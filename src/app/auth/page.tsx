@@ -41,6 +41,7 @@ export default function AuthPage() {
         <CardHeader className="text-center space-y-4">
           <div className="mx-auto h-20 w-20 rounded-2xl overflow-hidden shadow-elegant bg-primary">
             <Image src="/logo.png" alt="Iron Lodge Gym" width={80} height={80} className="h-full w-full object-cover" priority />
+          
           </div>
           <div>
             <CardTitle className="text-2xl font-display">Iron Lodge Gym</CardTitle>

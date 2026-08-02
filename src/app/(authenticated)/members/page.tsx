@@ -12,9 +12,15 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send } from 'lucide-react';
+import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { PAYMENT_METHODS } from '@/lib/constants';
+
+interface MessageTemplate {
+  id: string;
+  title: string;
+  message: string;
+}
 
 interface Trainer {
   id: string;
@@ -27,6 +33,7 @@ interface Member {
   id: string;
   member_number: string | null;
   full_name: string;
+  gender: string | null;
   phone: string | null;
   cnic: string | null;
   email: string | null;
@@ -47,6 +54,8 @@ interface FeeRecord {
   period_month: string;
   period_end?: string;
   amount: number;
+  amount_paid: number;
+  discount: number;
   paid: boolean;
   paid_at: string | null;
   payment_method: string | null;
@@ -54,10 +63,45 @@ interface FeeRecord {
   period_year?: number;
 }
 
+// Helper: get current month as YYYY-MM-01
+function getCurrentMonthKey(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+}
+
+// Helper: get all months from join_date to current month
+function getMonthsBetween(joinDate: string): string[] {
+  const months: string[] = [];
+  const join = new Date(joinDate);
+  const now = new Date();
+  let cursor = new Date(join.getFullYear(), join.getMonth(), 1);
+  const end = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  while (cursor <= end) {
+    const y = cursor.getFullYear();
+    const m = cursor.getMonth() + 1;
+    months.push(`${y}-${String(m).padStart(2, '0')}-01`);
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return months;
+}
+
+// Helper: format period month for display
+function formatPeriodMonth(periodMonth: string): string {
+  if (!periodMonth || !periodMonth.includes('-')) return periodMonth || '—';
+  const [y, m] = periodMonth.split('-').map(Number);
+  if (y && m) {
+    const dateObj = new Date(y, m - 1, 1);
+    return dateObj.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+  }
+  return periodMonth;
+}
+
 export default function MembersPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
   
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Member | null>(null);
@@ -65,6 +109,7 @@ export default function MembersPage() {
   const [form, setForm] = useState({
     member_number: '',
     full_name: '',
+    gender: 'male',
     phone: '',
     cnic: '',
     email: '',
@@ -85,14 +130,60 @@ export default function MembersPage() {
 
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [paymentFeeId, setPaymentFeeId] = useState<string | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<string>('cash');
+
+  // Payment Modal State
+  const [payModalOpen, setPayModalOpen] = useState(false);
+  const [payModalMember, setPayModalMember] = useState<Member | null>(null);
+  const [payDiscount, setPayDiscount] = useState('0');
+  const [payAmountReceived, setPayAmountReceived] = useState('');
+  const [payMethod, setPayMethod] = useState('cash');
 
   // Announcements State
   const [announcementOpen, setAnnouncementOpen] = useState(false);
   const [announcementMessage, setAnnouncementMessage] = useState('');
   const [selectedAnnounceMemberIds, setSelectedAnnounceMemberIds] = useState<string[]>([]);
   const [announcementSearch, setAnnouncementSearch] = useState('');
+
+  // Sender Phone & Saved Templates State
+  const [senderPhone, setSenderPhone] = useState('03035937356');
+  const [tempSenderPhone, setTempSenderPhone] = useState('03035937356');
+  const [isEditingSender, setIsEditingSender] = useState(false);
+
+  const [templates, setTemplates] = useState<MessageTemplate[]>([]);
+  const [saveTemplateDialogOpen, setSaveTemplateDialogOpen] = useState(false);
+  const [newTemplateTitle, setNewTemplateTitle] = useState('');
+
+  // Bulk Broadcast Queue State
+  const [bulkMode, setBulkMode] = useState(false);
+  const [bulkCurrentIndex, setBulkCurrentIndex] = useState(0);
+  const [sentMemberIds, setSentMemberIds] = useState<string[]>([]);
+
+  // Load persistent sender phone & templates on client mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const storedSender = localStorage.getItem('wa_sender_phone');
+      if (storedSender) {
+        setSenderPhone(storedSender);
+        setTempSenderPhone(storedSender);
+      }
+      const storedTemplates = localStorage.getItem('wa_announcement_templates');
+      if (storedTemplates) {
+        try {
+          setTemplates(JSON.parse(storedTemplates));
+        } catch (e) {
+          console.error('Failed to parse templates:', e);
+        }
+      } else {
+        const defaultTemplates: MessageTemplate[] = [
+          { id: '1', title: 'Welcome message', message: 'Welcome to Iron Lodge Gym! We are excited to have you on board with us.' },
+          { id: '2', title: 'Fee Reminder', message: 'Dear Member, this is a friendly reminder that your monthly gym fee is due. Please clear it at your earliest convenience. Thank you! - Iron Lodge Gym' },
+          { id: '3', title: 'Gym Notice', message: 'Attention Members: Please note our updated gym schedule and policies. Have a great workout! - Iron Lodge Gym' },
+        ];
+        setTemplates(defaultTemplates);
+        localStorage.setItem('wa_announcement_templates', JSON.stringify(defaultTemplates));
+      }
+    }
+  }, []);
 
   // Delete Member State
   const [memberToDelete, setMemberToDelete] = useState<Member | null>(null);
@@ -117,6 +208,44 @@ export default function MembersPage() {
     },
   });
 
+  // Fetch ALL fee records for all members (for current month status + pay modal)
+  const { data: allFeeRecords = [] } = useQuery({
+    queryKey: ['all_fee_records'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('fee_records')
+        .select('*')
+        .order('period_month', { ascending: false });
+      if (error) throw error;
+      return data as FeeRecord[];
+    },
+  });
+
+  // Map: memberId -> current month fee record
+  const currentMonthKey = getCurrentMonthKey();
+  const memberCurrentFee = useMemo(() => {
+    const map: Record<string, FeeRecord | undefined> = {};
+    allFeeRecords.forEach(fr => {
+      if (fr.period_month === currentMonthKey) {
+        map[fr.member_id] = fr;
+      }
+    });
+    return map;
+  }, [allFeeRecords, currentMonthKey]);
+
+  // Map: memberId -> all unpaid fee records
+  const memberUnpaidFees = useMemo(() => {
+    const map: Record<string, FeeRecord[]> = {};
+    allFeeRecords.forEach(fr => {
+      if (!fr.paid) {
+        if (!map[fr.member_id]) map[fr.member_id] = [];
+        map[fr.member_id].push(fr);
+      }
+    });
+    // Sort each member's unpaid records oldest first
+    Object.values(map).forEach(arr => arr.sort((a, b) => a.period_month.localeCompare(b.period_month)));
+    return map;
+  }, [allFeeRecords]);
+
   // Map assigned active clients count per trainer
   const trainerClientCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -128,7 +257,7 @@ export default function MembersPage() {
     return counts;
   }, [members]);
 
-  // Fetch Member Fee Records
+  // Fetch Member Fee Records (for detail dialog)
   const { data: memberFees = [], isLoading: loadingFees } = useQuery({
     queryKey: ['member_fees', selectedMember?.id],
     queryFn: async () => {
@@ -142,6 +271,33 @@ export default function MembersPage() {
     },
     enabled: !!selectedMember,
   });
+
+  // Auto-generate missing fee records when opening member detail
+  const generateMemberFees = useMutation({
+    mutationFn: async (memberId: string) => {
+      const res = await fetch('/api/fees/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ memberId }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to generate fee records');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['member_fees'] });
+      queryClient.invalidateQueries({ queryKey: ['all_fee_records'] });
+    },
+  });
+
+  // When opening member detail, ensure fee records exist for all months
+  useEffect(() => {
+    if (selectedMember && detailOpen) {
+      generateMemberFees.mutate(selectedMember.id);
+    }
+  }, [selectedMember?.id, detailOpen]);
 
   // Camera Management
   const stopCamera = () => {
@@ -202,6 +358,34 @@ export default function MembersPage() {
 
   const saveMutation = useMutation({
     mutationFn: async (data: typeof form) => {
+      // Validate duplicate phone or CNIC
+      const cleanPhone = (data.phone || '').trim();
+      const cleanCnic = (data.cnic || '').trim();
+      const phoneDigits = cleanPhone.replace(/\D/g, '');
+      const cnicDigits = cleanCnic.replace(/\D/g, '');
+
+      if (phoneDigits) {
+        const dupPhone = members.find((m) => {
+          if (editing && m.id === editing.id) return false;
+          const mDigits = (m.phone || '').replace(/\D/g, '');
+          return mDigits.length > 0 && mDigits === phoneDigits;
+        });
+        if (dupPhone) {
+          throw new Error(`Phone number already exists for member "${dupPhone.full_name}". Please try with a new number.`);
+        }
+      }
+
+      if (cnicDigits) {
+        const dupCnic = members.find((m) => {
+          if (editing && m.id === editing.id) return false;
+          const mDigits = (m.cnic || '').replace(/\D/g, '');
+          return mDigits.length > 0 && mDigits === cnicDigits;
+        });
+        if (dupCnic) {
+          throw new Error(`CNIC already exists for member "${dupCnic.full_name}". Please try with a new CNIC.`);
+        }
+      }
+
       const calcMonthly = Number(data.monthly_fee) || 0;
       const calcTraining = Number(data.training_fees) || 0;
       const totalFee = calcMonthly + calcTraining;
@@ -211,6 +395,7 @@ export default function MembersPage() {
       const payload = {
         member_number: data.member_number,
         full_name: data.full_name,
+        gender: data.gender || 'male',
         phone: data.phone || null,
         cnic: data.cnic || null,
         email: data.email || null,
@@ -244,7 +429,7 @@ export default function MembersPage() {
             continue;
           }
           let removed = false;
-          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id']) {
+          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
               delete currentPayload[col];
               removed = true;
@@ -279,6 +464,7 @@ export default function MembersPage() {
         }
       }
 
+      // Create initial fee record for new member with partial payment support
       if (!editing && newMember) {
         const isPaid = paidAmount >= totalFee && totalFee > 0;
         const joinDateStr = payload.join_date || new Date().toISOString().slice(0, 10);
@@ -290,6 +476,8 @@ export default function MembersPage() {
         await supabase.from('fee_records').insert({
           member_id: newMember.id,
           amount: totalFee,
+          amount_paid: paidAmount,
+          discount: 0,
           period_month: periodMonth,
           period_end: periodEnd,
           paid: isPaid,
@@ -300,6 +488,7 @@ export default function MembersPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['members'] });
+      queryClient.invalidateQueries({ queryKey: ['all_fee_records'] });
       queryClient.invalidateQueries({ queryKey: ['dash-fees'] });
       queryClient.invalidateQueries({ queryKey: ['dash-trend'] });
       queryClient.invalidateQueries({ queryKey: ['dash-active'] });
@@ -335,9 +524,38 @@ export default function MembersPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  // Bulk payment mutation
+  const bulkPayMutation = useMutation({
+    mutationFn: async ({ feeIds, amountPaid, discount, paymentMethod }: { feeIds: string[]; amountPaid: number; discount: number; paymentMethod: string }) => {
+      const res = await fetch('/api/fees/collect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feeIds, amountPaid, discount, paymentMethod }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to process payment');
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['all_fee_records'] });
+      queryClient.invalidateQueries({ queryKey: ['member_fees'] });
+      queryClient.invalidateQueries({ queryKey: ['members'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-fees'] });
+      toast.success(`Payment processed! ${data.summary?.remaining > 0 ? `Remaining: ${formatCurrency(data.summary.remaining)}` : 'Fully paid!'}`);
+      setPayModalOpen(false);
+      setPayModalMember(null);
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
   function openAnnouncements() {
     setAnnouncementMessage('');
     setAnnouncementSearch('');
+    setBulkMode(false);
+    setBulkCurrentIndex(0);
+    setSentMemberIds([]);
     // Default to selecting all active members
     setSelectedAnnounceMemberIds(members.filter((m) => m.active).map((m) => m.id));
     setAnnouncementOpen(true);
@@ -354,6 +572,58 @@ export default function MembersPage() {
     return cleaned;
   };
 
+  const handleSaveSenderPhone = () => {
+    const cleanPhone = tempSenderPhone.trim();
+    if (!cleanPhone) {
+      toast.error('Please enter a valid phone number');
+      return;
+    }
+    setSenderPhone(cleanPhone);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('wa_sender_phone', cleanPhone);
+    }
+    setIsEditingSender(false);
+    toast.success(`Sender number updated to ${cleanPhone}`);
+  };
+
+  const handleSaveTemplate = () => {
+    if (!newTemplateTitle.trim()) {
+      toast.error('Please enter a template title');
+      return;
+    }
+    if (!announcementMessage.trim()) {
+      toast.error('Please enter a message before saving');
+      return;
+    }
+    const newTpl: MessageTemplate = {
+      id: Date.now().toString(),
+      title: newTemplateTitle.trim(),
+      message: announcementMessage.trim(),
+    };
+    const updated = [newTpl, ...templates];
+    setTemplates(updated);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('wa_announcement_templates', JSON.stringify(updated));
+    }
+    toast.success(`Template "${newTpl.title}" saved successfully!`);
+    setNewTemplateTitle('');
+    setSaveTemplateDialogOpen(false);
+  };
+
+  const handleDeleteTemplate = (id: string, title: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const updated = templates.filter((t) => t.id !== id);
+    setTemplates(updated);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('wa_announcement_templates', JSON.stringify(updated));
+    }
+    toast.success(`Template "${title}" removed`);
+  };
+
+  const validSelectedMembers = useMemo(() => {
+    return members.filter((m) => selectedAnnounceMemberIds.includes(m.id) && !!formatPhoneForWA(m.phone));
+  }, [members, selectedAnnounceMemberIds]);
+
   const handleSendWhatsApp = () => {
     if (!announcementMessage.trim()) {
       toast.error('Please enter an announcement message');
@@ -363,24 +633,39 @@ export default function MembersPage() {
       toast.error('Please select at least one member');
       return;
     }
-
-    const selectedMembers = members.filter((m) => selectedAnnounceMemberIds.includes(m.id));
-    const validMembers = selectedMembers.filter((m) => !!formatPhoneForWA(m.phone));
-
-    if (validMembers.length === 0) {
+    if (validSelectedMembers.length === 0) {
       toast.error('None of the selected members have valid phone numbers');
       return;
     }
 
-    const encodedMsg = encodeURIComponent(announcementMessage);
-    const firstPhone = formatPhoneForWA(validMembers[0].phone);
-
-    window.open(`https://wa.me/${firstPhone}?text=${encodedMsg}`, '_blank');
-
-    if (validMembers.length > 1) {
-      toast.success(`Opening WhatsApp for ${validMembers.length} selected members. Use the queue in popup if popups are blocked.`);
+    if (validSelectedMembers.length > 1) {
+      setBulkMode(true);
+      setBulkCurrentIndex(0);
+      toast.info(`Bulk WhatsApp Broadcast mode activated for ${validSelectedMembers.length} members.`);
     } else {
-      toast.success(`WhatsApp chat opened for ${validMembers[0].full_name}!`);
+      const targetMember = validSelectedMembers[0];
+      const phone = formatPhoneForWA(targetMember.phone);
+      const encodedMsg = encodeURIComponent(announcementMessage);
+      window.open(`https://wa.me/${phone}?text=${encodedMsg}`, '_blank');
+      setSentMemberIds((prev) => Array.from(new Set([...prev, targetMember.id])));
+      toast.success(`WhatsApp chat opened for ${targetMember.full_name}!`);
+    }
+  };
+
+  const handleBulkSendNext = () => {
+    if (bulkCurrentIndex >= validSelectedMembers.length) return;
+    const currentMember = validSelectedMembers[bulkCurrentIndex];
+    const phone = formatPhoneForWA(currentMember.phone);
+    const encodedMsg = encodeURIComponent(announcementMessage);
+
+    window.open(`https://wa.me/${phone}?text=${encodedMsg}`, '_blank');
+    setSentMemberIds((prev) => Array.from(new Set([...prev, currentMember.id])));
+    toast.success(`Sent to ${currentMember.full_name} (${bulkCurrentIndex + 1}/${validSelectedMembers.length})`);
+
+    if (bulkCurrentIndex + 1 < validSelectedMembers.length) {
+      setBulkCurrentIndex(bulkCurrentIndex + 1);
+    } else {
+      toast.success('All bulk WhatsApp messages completed!');
     }
   };
 
@@ -398,28 +683,9 @@ export default function MembersPage() {
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['fees'] });
-      toast.success('Fees generated successfully');
-    },
-    onError: (e) => toast.error(e.message),
-  });
-
-  const collectFeeMutation = useMutation({
-    mutationFn: async ({ feeId, method }: { feeId: string, method: string }) => {
-      const res = await fetch('/api/fees/collect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ feeId, paymentMethod: method }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to collect fee');
-      }
-    },
-    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['all_fee_records'] });
       queryClient.invalidateQueries({ queryKey: ['member_fees'] });
-      toast.success('Fee collected successfully');
-      setPaymentFeeId(null);
+      toast.success('Fees generated successfully');
     },
     onError: (e) => toast.error(e.message),
   });
@@ -442,6 +708,7 @@ export default function MembersPage() {
     setForm({
       member_number: generatedNum,
       full_name: '',
+      gender: 'male',
       phone: '',
       cnic: '',
       email: '',
@@ -463,6 +730,7 @@ export default function MembersPage() {
     setForm({
       member_number: m.member_number || '',
       full_name: m.full_name,
+      gender: m.gender || 'male',
       phone: m.phone || '',
       cnic: m.cnic || '',
       email: m.email || '',
@@ -478,6 +746,39 @@ export default function MembersPage() {
     setDialogOpen(true);
   }
 
+  // Open Payment Modal
+  function openPayModal(m: Member) {
+    setPayModalMember(m);
+    setPayDiscount('0');
+    setPayAmountReceived('');
+    setPayMethod('cash');
+    setPayModalOpen(true);
+  }
+
+  // Payment modal calculations
+  const payModalUnpaidFees = payModalMember ? (memberUnpaidFees[payModalMember.id] || []) : [];
+  const payModalTotalDue = payModalUnpaidFees.reduce((sum, fr) => {
+    const remaining = (Number(fr.amount) || 0) - (Number(fr.amount_paid) || 0);
+    return sum + Math.max(0, remaining);
+  }, 0);
+  const payModalDiscountNum = Math.max(0, Number(payDiscount) || 0);
+  const payModalReceivedNum = Number(payAmountReceived) || 0;
+  const payModalNetRemaining = Math.max(0, payModalTotalDue - payModalDiscountNum - payModalReceivedNum);
+
+  function handlePaySubmit() {
+    if (!payModalMember || payModalUnpaidFees.length === 0) return;
+    if (payModalReceivedNum <= 0 && payModalDiscountNum <= 0) {
+      toast.error('Please enter amount received or discount');
+      return;
+    }
+    bulkPayMutation.mutate({
+      feeIds: payModalUnpaidFees.map(f => f.id),
+      amountPaid: payModalReceivedNum,
+      discount: payModalDiscountNum,
+      paymentMethod: payMethod,
+    });
+  }
+
   const filtered = members.filter((m) => {
     const cleanSearch = search.trim().toLowerCase();
     const matchSearch =
@@ -487,8 +788,63 @@ export default function MembersPage() {
       (m.member_number || '').toLowerCase().includes(cleanSearch) ||
       (m.cnic || '').toLowerCase().includes(cleanSearch);
     const matchFilter = filter === 'all' ? true : filter === 'active' ? m.active : !m.active;
-    return matchSearch && matchFilter;
+    const mGender = (m.gender || 'male').toLowerCase();
+    const matchGender = genderFilter === 'all' ? true : mGender === genderFilter;
+    return matchSearch && matchFilter && matchGender;
   });
+
+  // Helper to get payment status info for a member
+  function getMemberPaymentStatus(m: Member) {
+    const currentFee = memberCurrentFee[m.id];
+    const unpaidFees = memberUnpaidFees[m.id] || [];
+    const unpaidMonths = unpaidFees.length;
+    const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
+
+    if (!currentFee) {
+      // No fee record for current month — treated as unpaid
+      return {
+        status: 'unpaid' as const,
+        percentage: 0,
+        label: 'Unpaid',
+        unpaidMonths: Math.max(1, unpaidMonths),
+        totalDue: totalFee * Math.max(1, unpaidMonths),
+      };
+    }
+
+    const amountPaid = Number(currentFee.amount_paid) || 0;
+    const feeAmount = Number(currentFee.amount) || 0;
+    const discount = Number(currentFee.discount) || 0;
+    const effectiveDue = Math.max(0, feeAmount - discount);
+    const percentage = effectiveDue > 0 ? Math.min(100, Math.round((amountPaid / effectiveDue) * 100)) : (feeAmount === 0 ? 100 : 0);
+
+    if (currentFee.paid) {
+      return {
+        status: 'paid' as const,
+        percentage: 100,
+        label: '100% Paid',
+        unpaidMonths: Math.max(0, unpaidMonths),
+        totalDue: 0,
+      };
+    }
+
+    if (amountPaid > 0 && amountPaid < effectiveDue) {
+      return {
+        status: 'partial' as const,
+        percentage,
+        label: `${percentage}% Paid`,
+        unpaidMonths,
+        totalDue: unpaidFees.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0),
+      };
+    }
+
+    return {
+      status: 'unpaid' as const,
+      percentage: 0,
+      label: 'Unpaid',
+      unpaidMonths,
+      totalDue: unpaidFees.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0),
+    };
+  }
 
   return (
     <div className="p-4 md:p-6 lg:p-8 space-y-6">
@@ -511,15 +867,60 @@ export default function MembersPage() {
         </div>
       </div>
 
-      <div className="flex flex-col sm:flex-row gap-3">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="Search by CNIC, Member ID, Name, or Phone..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-10" />
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3 flex-1">
+          <div className="relative w-full sm:w-64 md:w-72">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input 
+              placeholder="Search CNIC, Member ID, Name..." 
+              value={search} 
+              onChange={(e) => setSearch(e.target.value)} 
+              className="pl-9 h-9 text-sm" 
+            />
+          </div>
+
+          {/* Gender Filter Buttons: All, Male, Female */}
+          <div className="flex items-center gap-1 bg-muted/60 p-1 rounded-lg border border-border">
+            <Button
+              type="button"
+              variant={genderFilter === 'all' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setGenderFilter('all')}
+              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                genderFilter === 'all' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              All
+            </Button>
+            <Button
+              type="button"
+              variant={genderFilter === 'male' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setGenderFilter('male')}
+              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                genderFilter === 'male' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Male
+            </Button>
+            <Button
+              type="button"
+              variant={genderFilter === 'female' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setGenderFilter('female')}
+              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                genderFilter === 'female' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Female
+            </Button>
+          </div>
         </div>
+
         <Select value={filter} onValueChange={(v) => setFilter(v as typeof filter)}>
-          <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-36 h-9"><SelectValue /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All</SelectItem>
+            <SelectItem value="all">All Status</SelectItem>
             <SelectItem value="active">Active</SelectItem>
             <SelectItem value="inactive">Inactive</SelectItem>
           </SelectContent>
@@ -551,9 +952,7 @@ export default function MembersPage() {
                 ) : filtered.map((m) => {
                   const assignedTrainer = trainers.find((t) => t.id === m.trainer_id);
                   const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
-                  const paidAmount = typeof m.amount_paid === 'number' ? m.amount_paid : (m.amount_paid !== undefined && m.amount_paid !== null ? Number(m.amount_paid) || 0 : 0);
-                  const percentage = totalFee > 0 ? Math.min(100, Math.round((paidAmount / totalFee) * 100)) : 100;
-                  const isFullyPaid = percentage >= 100;
+                  const payStatus = getMemberPaymentStatus(m);
 
                   return (
                     <tr 
@@ -584,14 +983,33 @@ export default function MembersPage() {
                         ) : '—'}
                       </td>
                       <td className="p-4 font-medium">{formatCurrency(totalFee)}</td>
-                      <td className="p-4">
-                        {isFullyPaid ? (
-                          <Badge variant="success" className="font-semibold px-2.5 py-0.5">100% Paid</Badge>
-                        ) : (
-                          <Badge variant="outline" className="border-2 border-red-500 text-red-500 bg-red-500/10 font-bold px-2.5 py-0.5">
-                            {percentage}% Paid ({formatCurrency(totalFee - paidAmount)} due)
-                          </Badge>
-                        )}
+                      <td className="p-4" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center gap-2">
+                          {payStatus.status === 'paid' ? (
+                            <Badge variant="success" className="font-semibold px-2.5 py-0.5">✅ Paid</Badge>
+                          ) : payStatus.status === 'partial' ? (
+                            <div className="flex items-center gap-2">
+                              <Badge variant="outline" className="border-2 border-amber-500 text-amber-600 bg-amber-500/10 font-bold px-2.5 py-0.5">
+                                ⚠️ {payStatus.percentage}% Paid
+                              </Badge>
+                              <Button size="sm" variant="default" className="h-7 text-xs px-2 bg-primary hover:bg-primary/90" onClick={() => openPayModal(m)}>
+                                <Wallet className="h-3 w-3 mr-1" /> Pay
+                              </Button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <Badge variant="destructive" className="font-bold px-2.5 py-0.5">
+                                ❌ Unpaid
+                                {payStatus.unpaidMonths > 1 && (
+                                  <span className="ml-1 text-[10px] opacity-80">({payStatus.unpaidMonths} mo)</span>
+                                )}
+                              </Badge>
+                              <Button size="sm" variant="default" className="h-7 text-xs px-2 bg-primary hover:bg-primary/90" onClick={() => openPayModal(m)}>
+                                <Wallet className="h-3 w-3 mr-1" /> Pay
+                              </Button>
+                            </div>
+                          )}
+                        </div>
                       </td>
                       <td className="p-4" onClick={(e) => e.stopPropagation()}>
                         <button onClick={() => toggleActive.mutate({ id: m.id, active: !m.active })}>
@@ -673,6 +1091,20 @@ export default function MembersPage() {
               <div className="space-y-2">
                 <Label>Full Name *</Label>
                 <Input required value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} placeholder="e.g. John Doe" />
+              </div>
+
+              {/* Gender Selection */}
+              <div className="space-y-2">
+                <Label>Gender *</Label>
+                <Select value={form.gender} onValueChange={(val) => setForm({ ...form, gender: val })}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select Gender" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="male">Male</SelectItem>
+                    <SelectItem value="female">Female</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               {/* Phone */}
@@ -823,7 +1255,7 @@ export default function MembersPage() {
           <Tabs defaultValue="info" className="mt-4">
             <TabsList className="grid w-full grid-cols-3">
               <TabsTrigger value="info">Info</TabsTrigger>
-              <TabsTrigger value="fees">Fees</TabsTrigger>
+              <TabsTrigger value="fees">Fee History</TabsTrigger>
               <TabsTrigger value="attendance">Attendance</TabsTrigger>
             </TabsList>
             
@@ -840,6 +1272,10 @@ export default function MembersPage() {
                 <div>
                   <div className="text-muted-foreground mb-1">CNIC</div>
                   <div className="font-medium">{selectedMember?.cnic || '—'}</div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground mb-1">Gender</div>
+                  <div className="font-medium capitalize">{selectedMember?.gender || 'male'}</div>
                 </div>
                 <div>
                   <div className="text-muted-foreground mb-1">Email</div>
@@ -864,12 +1300,6 @@ export default function MembersPage() {
                   <div className="font-medium">{selectedMember ? formatCurrency(selectedMember.training_fees || 0) : '—'}</div>
                 </div>
                 <div>
-                  <div className="text-muted-foreground mb-1">Amount Paid</div>
-                  <div className="font-medium text-green-600">
-                    {selectedMember ? formatCurrency(typeof selectedMember.amount_paid === 'number' ? selectedMember.amount_paid : (selectedMember.amount_paid !== undefined && selectedMember.amount_paid !== null ? Number(selectedMember.amount_paid) || 0 : 0)) : '—'}
-                  </div>
-                </div>
-                <div>
                   <div className="text-muted-foreground mb-1">Status</div>
                   <div>
                     <Badge variant={selectedMember?.active ? 'success' : 'destructive'}>
@@ -885,83 +1315,87 @@ export default function MembersPage() {
             </TabsContent>
 
             <TabsContent value="fees" className="pt-4">
+              {/* Fee History Summary */}
+              {selectedMember && (
+                <div className="mb-4 p-3 rounded-lg bg-muted/40 border border-border">
+                  <div className="flex items-center justify-between text-sm">
+                    <div className="flex items-center gap-2">
+                      <Receipt className="h-4 w-4 text-primary" />
+                      <span className="font-semibold">Fee History</span>
+                    </div>
+                    {(() => {
+                      const unpaid = memberFees.filter(f => !f.paid);
+                      const totalUnpaid = unpaid.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0);
+                      return unpaid.length > 0 ? (
+                        <div className="flex items-center gap-2">
+                          <Badge variant="destructive" className="text-xs">
+                            {unpaid.length} unpaid month{unpaid.length > 1 ? 's' : ''} — {formatCurrency(totalUnpaid)} due
+                          </Badge>
+                          <Button size="sm" className="h-7 text-xs" onClick={() => { setDetailOpen(false); openPayModal(selectedMember); }}>
+                            <Wallet className="h-3 w-3 mr-1" /> Collect
+                          </Button>
+                        </div>
+                      ) : (
+                        <Badge variant="success" className="text-xs">All paid ✓</Badge>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
+
               <div className="rounded-md border border-border">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-border bg-muted/50">
                       <th className="text-left p-3 font-medium text-muted-foreground">Period</th>
                       <th className="text-left p-3 font-medium text-muted-foreground">Amount</th>
+                      <th className="text-left p-3 font-medium text-muted-foreground">Paid</th>
+                      <th className="text-left p-3 font-medium text-muted-foreground">Discount</th>
                       <th className="text-left p-3 font-medium text-muted-foreground">Status</th>
                       <th className="text-left p-3 font-medium text-muted-foreground">Paid At</th>
-                      <th className="text-right p-3 font-medium text-muted-foreground">Action</th>
+                      <th className="text-left p-3 font-medium text-muted-foreground">Method</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {loadingFees ? (
-                      <tr><td colSpan={5} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
+                    {loadingFees || generateMemberFees.isPending ? (
+                      <tr><td colSpan={7} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
                     ) : memberFees.length === 0 ? (
-                      <tr><td colSpan={5} className="text-center py-8 text-muted-foreground">No fee records found</td></tr>
+                      <tr><td colSpan={7} className="text-center py-8 text-muted-foreground">No fee records found</td></tr>
                     ) : memberFees.map(fee => {
                       const isPaid = fee.paid ?? (fee.status === 'paid');
-                      let periodDisplay = String(fee.period_month || '—');
-                      if (fee.period_month && String(fee.period_month).includes('-')) {
-                        const [y, m] = String(fee.period_month).split('-').map(Number);
-                        if (y && m) {
-                          const dateObj = new Date(y, m - 1, 1);
-                          periodDisplay = dateObj.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-                        }
-                      }
+                      const feeAmount = Number(fee.amount) || 0;
+                      const feePaid = Number(fee.amount_paid) || 0;
+                      const feeDiscount = Number(fee.discount) || 0;
+                      const effectiveDue = Math.max(0, feeAmount - feeDiscount);
+                      const remaining = Math.max(0, effectiveDue - feePaid);
+                      const pctPaid = effectiveDue > 0 ? Math.min(100, Math.round((feePaid / effectiveDue) * 100)) : (feeAmount === 0 ? 100 : 0);
+                      const isPartial = feePaid > 0 && !isPaid;
 
                       return (
                         <tr key={fee.id} className="border-b border-border/50 last:border-0">
-                          <td className="p-3 font-medium">{periodDisplay}</td>
-                          <td className="p-3">{formatCurrency(fee.amount)}</td>
+                          <td className="p-3 font-medium">{formatPeriodMonth(fee.period_month)}</td>
+                          <td className="p-3">{formatCurrency(feeAmount)}</td>
                           <td className="p-3">
-                            <Badge variant={isPaid ? 'success' : 'destructive'}>
-                              {isPaid ? 'PAID' : 'UNPAID'}
-                            </Badge>
+                            <span className={isPaid ? 'text-green-600 font-semibold' : isPartial ? 'text-amber-600 font-semibold' : 'text-muted-foreground'}>
+                              {formatCurrency(feePaid)}
+                            </span>
                           </td>
-                          <td className="p-3 text-muted-foreground">{fee.paid_at ? formatDate(fee.paid_at) : '—'}</td>
-                          <td className="p-3 text-right">
-                            {!isPaid ? (
-                              paymentFeeId === fee.id ? (
-                                <div className="flex items-center justify-end gap-2">
-                                  <Select value={paymentMethod} onValueChange={setPaymentMethod}>
-                                    <SelectTrigger className="w-[100px] h-8 text-xs">
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {PAYMENT_METHODS.map(pm => (
-                                        <SelectItem key={pm.value} value={pm.value}>{pm.label}</SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                  <Button 
-                                    size="sm" 
-                                    className="h-8" 
-                                    onClick={() => collectFeeMutation.mutate({ feeId: fee.id, method: paymentMethod })} 
-                                    disabled={collectFeeMutation.isPending}
-                                  >
-                                    {collectFeeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Confirm'}
-                                  </Button>
-                                  <Button 
-                                    size="sm" 
-                                    variant="ghost" 
-                                    className="h-8" 
-                                    onClick={() => setPaymentFeeId(null)}
-                                  >
-                                    Cancel
-                                  </Button>
-                                </div>
-                              ) : (
-                                <Button size="sm" variant="outline" className="h-8" onClick={() => setPaymentFeeId(fee.id)}>
-                                  Collect
-                                </Button>
-                              )
+                          <td className="p-3 text-muted-foreground">
+                            {feeDiscount > 0 ? formatCurrency(feeDiscount) : '—'}
+                          </td>
+                          <td className="p-3">
+                            {isPaid ? (
+                              <Badge variant="success" className="text-xs">PAID</Badge>
+                            ) : isPartial ? (
+                              <Badge variant="outline" className="border-amber-500 text-amber-600 bg-amber-500/10 text-xs font-bold">
+                                {pctPaid}% ({formatCurrency(remaining)} due)
+                              </Badge>
                             ) : (
-                              <span className="text-muted-foreground text-xs capitalize">{fee.payment_method || '—'}</span>
+                              <Badge variant="destructive" className="text-xs">UNPAID</Badge>
                             )}
                           </td>
+                          <td className="p-3 text-muted-foreground text-xs">{fee.paid_at ? formatDate(fee.paid_at) : '—'}</td>
+                          <td className="p-3 text-muted-foreground text-xs capitalize">{fee.payment_method || '—'}</td>
                         </tr>
                       );
                     })}
@@ -980,20 +1414,240 @@ export default function MembersPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Announcements Dialog */}
-      <Dialog open={announcementOpen} onOpenChange={setAnnouncementOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      {/* Payment Collection Modal */}
+      <Dialog open={payModalOpen} onOpenChange={(open) => { setPayModalOpen(open); if (!open) setPayModalMember(null); }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-xl font-bold flex items-center gap-2">
-              <Megaphone className="h-5 w-5 text-green-600" />
-              Send Announcement via WhatsApp
+              <CreditCard className="h-5 w-5 text-primary" />
+              Collect Payment
             </DialogTitle>
           </DialogHeader>
 
+          {payModalMember && (
+            <div className="space-y-5 pt-2">
+              {/* Member Info */}
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/40 border border-border">
+                {payModalMember.photo_url ? (
+                  <img src={payModalMember.photo_url} alt={payModalMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border" />
+                ) : (
+                  <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary">
+                    {payModalMember.full_name.slice(0, 1).toUpperCase()}
+                  </div>
+                )}
+                <div>
+                  <div className="font-semibold">{payModalMember.full_name}</div>
+                  <div className="text-xs text-muted-foreground font-mono">#{payModalMember.member_number || 'N/A'}</div>
+                </div>
+              </div>
+
+              {/* Unpaid Months Breakdown */}
+              <div className="space-y-2">
+                <Label className="text-sm font-semibold flex items-center gap-2">
+                  <Receipt className="h-4 w-4" />
+                  Unpaid Months Breakdown
+                </Label>
+                <div className="rounded-md border border-border max-h-40 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-border bg-muted/50">
+                        <th className="text-left p-2 font-medium text-muted-foreground">Month</th>
+                        <th className="text-right p-2 font-medium text-muted-foreground">Fee</th>
+                        <th className="text-right p-2 font-medium text-muted-foreground">Already Paid</th>
+                        <th className="text-right p-2 font-medium text-muted-foreground">Remaining</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {payModalUnpaidFees.length === 0 ? (
+                        <tr><td colSpan={4} className="text-center py-4 text-muted-foreground">No unpaid fees</td></tr>
+                      ) : payModalUnpaidFees.map(fr => {
+                        const amt = Number(fr.amount) || 0;
+                        const paid = Number(fr.amount_paid) || 0;
+                        const rem = Math.max(0, amt - paid);
+                        return (
+                          <tr key={fr.id} className="border-b border-border/50 last:border-0">
+                            <td className="p-2 font-medium">{formatPeriodMonth(fr.period_month)}</td>
+                            <td className="p-2 text-right">{formatCurrency(amt)}</td>
+                            <td className="p-2 text-right text-green-600">{paid > 0 ? formatCurrency(paid) : '—'}</td>
+                            <td className="p-2 text-right font-semibold text-red-500">{formatCurrency(rem)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Total Due */}
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-red-600">Total Due</span>
+                  <span className="text-xl font-bold text-red-600">{formatCurrency(payModalTotalDue)}</span>
+                </div>
+                <div className="text-xs text-red-500/70 mt-1">
+                  {payModalUnpaidFees.length} unpaid month{payModalUnpaidFees.length !== 1 ? 's' : ''}
+                  {payModalUnpaidFees.length > 0 && ` × ${formatCurrency((payModalMember.monthly_fee || 0) + (payModalMember.training_fees || 0))}/mo`}
+                </div>
+              </div>
+
+              {/* Discount Field */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Discount (PKR)</Label>
+                <Input 
+                  type="number" 
+                  value={payDiscount} 
+                  onChange={(e) => setPayDiscount(e.target.value)} 
+                  placeholder="0"
+                  min="0"
+                />
+              </div>
+
+              {/* Amount Received Field */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Amount Received (PKR)</Label>
+                <Input 
+                  type="number" 
+                  value={payAmountReceived} 
+                  onChange={(e) => setPayAmountReceived(e.target.value)} 
+                  placeholder={String(Math.max(0, payModalTotalDue - payModalDiscountNum))}
+                  min="0"
+                />
+              </div>
+
+              {/* Payment Method */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Payment Method</Label>
+                <Select value={payMethod} onValueChange={setPayMethod}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PAYMENT_METHODS.map(pm => (
+                      <SelectItem key={pm.value} value={pm.value}>{pm.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Calculation Summary */}
+              <div className="bg-muted/40 border border-border rounded-lg p-4 space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Total Due</span>
+                  <span className="font-medium">{formatCurrency(payModalTotalDue)}</span>
+                </div>
+                {payModalDiscountNum > 0 && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Discount</span>
+                    <span className="font-medium text-green-600">- {formatCurrency(payModalDiscountNum)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Amount Received</span>
+                  <span className="font-medium text-green-600">- {formatCurrency(payModalReceivedNum)}</span>
+                </div>
+                <div className="border-t border-border pt-2 mt-2">
+                  <div className="flex justify-between">
+                    <span className="font-semibold text-sm">Remaining Balance</span>
+                    <span className={`text-lg font-bold ${payModalNetRemaining > 0 ? 'text-red-500' : 'text-green-500'}`}>
+                      {payModalNetRemaining > 0 ? formatCurrency(payModalNetRemaining) : 'PKR 0 ✓'}
+                    </span>
+                  </div>
+                  {payModalNetRemaining > 0 && (
+                    <p className="text-[11px] text-amber-600 mt-1">
+                      ⚠️ This amount will remain as partial payment. The member will still show as partially paid.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="mt-2 gap-2">
+            <Button type="button" variant="outline" onClick={() => { setPayModalOpen(false); setPayModalMember(null); }}>
+              Cancel
+            </Button>
+            <Button 
+              type="button" 
+              onClick={handlePaySubmit}
+              disabled={bulkPayMutation.isPending || payModalUnpaidFees.length === 0}
+              className="bg-primary"
+            >
+              {bulkPayMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              <Wallet className="h-4 w-4 mr-2" />
+              Confirm Payment
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Announcements Dialog */}
+      <Dialog open={announcementOpen} onOpenChange={setAnnouncementOpen}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader className="pb-2 border-b border-border">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <DialogTitle className="text-xl font-bold flex items-center gap-2">
+                <Megaphone className="h-5 w-5 text-green-600" />
+                Send Announcement via WhatsApp
+              </DialogTitle>
+
+              {/* Sender Phone Bar */}
+              <div className="flex items-center gap-2 bg-muted/60 px-3 py-1.5 rounded-lg border border-border text-xs">
+                <PhoneCall className="h-3.5 w-3.5 text-green-600" />
+                <span className="text-muted-foreground font-medium">Sender:</span>
+                {isEditingSender ? (
+                  <div className="flex items-center gap-1">
+                    <Input
+                      value={tempSenderPhone}
+                      onChange={(e) => setTempSenderPhone(e.target.value)}
+                      className="h-6 w-32 text-xs font-mono px-1 py-0"
+                    />
+                    <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={handleSaveSenderPhone}>
+                      <Save className="h-3.5 w-3.5 text-green-600" />
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <span className="font-mono font-semibold text-foreground">{senderPhone}</span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
+                      onClick={() => { setTempSenderPhone(senderPhone); setIsEditingSender(true); }}
+                      title="Edit sender phone number"
+                    >
+                      <Edit3 className="h-3 w-3" />
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </DialogHeader>
+
           <div className="space-y-4 pt-2">
-            {/* Announcement Message Field */}
+            {/* Announcement Message Field & Save for Later */}
             <div className="space-y-2">
-              <Label htmlFor="announcement-message" className="font-semibold">Announcement Message *</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="announcement-message" className="font-semibold text-sm">
+                  Announcement Message *
+                </Label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    if (!announcementMessage.trim()) {
+                      toast.error('Please write a message before saving it as a template');
+                      return;
+                    }
+                    setSaveTemplateDialogOpen(true);
+                  }}
+                  className="h-7 text-xs gap-1 text-primary hover:text-primary border-primary/30 bg-primary/5 hover:bg-primary/10"
+                >
+                  <BookmarkPlus className="h-3.5 w-3.5" />
+                  Save Message for Later
+                </Button>
+              </div>
+
               <textarea
                 id="announcement-message"
                 rows={4}
@@ -1002,15 +1656,180 @@ export default function MembersPage() {
                 placeholder="Type your message here (e.g. Gym timing updates, special offers, fee reminders)..."
                 className="w-full rounded-md border border-input bg-background p-3 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
+
+              {/* Saved Message Templates Buttons */}
+              {templates.length > 0 && (
+                <div className="space-y-1.5 pt-1">
+                  <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1">
+                    <Bookmark className="h-3 w-3 text-primary" /> Saved Message Templates:
+                  </span>
+                  <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto p-1">
+                    {templates.map((tpl) => (
+                      <div
+                        key={tpl.id}
+                        onClick={() => {
+                          setAnnouncementMessage(tpl.message);
+                          toast.success(`Loaded "${tpl.title}" into message field`);
+                        }}
+                        className="group inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 transition-all cursor-pointer shadow-sm hover:shadow"
+                        title={tpl.message}
+                      >
+                        <MessageSquare className="h-3 w-3 text-primary" />
+                        <span>{tpl.title}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => handleDeleteTemplate(tpl.id, tpl.title, e)}
+                          className="ml-1 text-muted-foreground hover:text-red-500 opacity-60 group-hover:opacity-100 transition-opacity p-0.5"
+                          title="Delete template"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
+
+            {/* Bulk Broadcast Queue Section */}
+            {bulkMode && validSelectedMembers.length > 0 ? (
+              <div className="border border-green-500/40 bg-green-50/30 dark:bg-green-950/20 rounded-lg p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Badge className="bg-green-600 text-white font-mono text-xs">
+                      Bulk WhatsApp Queue
+                    </Badge>
+                    <span className="text-xs text-muted-foreground font-medium">
+                      Member {bulkCurrentIndex + 1} of {validSelectedMembers.length}
+                    </span>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setBulkMode(false)}
+                    className="h-7 text-xs text-muted-foreground hover:text-foreground"
+                  >
+                    Exit Bulk Queue
+                  </Button>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
+                  <div
+                    className="bg-green-600 h-2 transition-all duration-300 rounded-full"
+                    style={{
+                      width: `${Math.round(((bulkCurrentIndex + (sentMemberIds.includes(validSelectedMembers[bulkCurrentIndex]?.id) ? 1 : 0)) / validSelectedMembers.length) * 100)}%`,
+                    }}
+                  />
+                </div>
+
+                {/* Current Recipient Details Card */}
+                {validSelectedMembers[bulkCurrentIndex] && (
+                  <div className="flex items-center justify-between p-3 bg-background border border-border rounded-md shadow-sm">
+                    <div className="flex items-center gap-3">
+                      {validSelectedMembers[bulkCurrentIndex].photo_url ? (
+                        <img
+                          src={validSelectedMembers[bulkCurrentIndex].photo_url!}
+                          alt={validSelectedMembers[bulkCurrentIndex].full_name}
+                          className="h-10 w-10 rounded-full object-cover border border-border"
+                        />
+                      ) : (
+                        <div className="h-10 w-10 rounded-full bg-green-600/20 grid place-items-center font-bold text-green-700 dark:text-green-400">
+                          {validSelectedMembers[bulkCurrentIndex].full_name.slice(0, 1).toUpperCase()}
+                        </div>
+                      )}
+                      <div>
+                        <div className="font-semibold text-sm flex items-center gap-2">
+                          {validSelectedMembers[bulkCurrentIndex].full_name}
+                          {sentMemberIds.includes(validSelectedMembers[bulkCurrentIndex].id) && (
+                            <Badge variant="outline" className="text-[10px] text-green-600 border-green-600 bg-green-50 dark:bg-green-950/40">
+                              <CheckCircle2 className="h-3 w-3 mr-1" /> Sent
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="text-xs text-muted-foreground font-mono">
+                          #{validSelectedMembers[bulkCurrentIndex].member_number || 'N/A'} • {validSelectedMembers[bulkCurrentIndex].phone}
+                        </div>
+                      </div>
+                    </div>
+
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="bg-green-600 hover:bg-green-700 text-white font-medium gap-1.5"
+                      onClick={handleBulkSendNext}
+                    >
+                      <Send className="h-3.5 w-3.5" />
+                      Send & Next ({bulkCurrentIndex + 1}/{validSelectedMembers.length})
+                    </Button>
+                  </div>
+                )}
+
+                {/* Queue Control Buttons */}
+                <div className="flex items-center justify-between text-xs pt-1">
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={bulkCurrentIndex === 0}
+                      onClick={() => setBulkCurrentIndex((prev) => Math.max(0, prev - 1))}
+                      className="h-7 text-xs"
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={bulkCurrentIndex >= validSelectedMembers.length - 1}
+                      onClick={() => setBulkCurrentIndex((prev) => Math.min(validSelectedMembers.length - 1, prev + 1))}
+                      className="h-7 text-xs"
+                    >
+                      <SkipForward className="h-3 w-3 mr-1" /> Skip
+                    </Button>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setSentMemberIds([]);
+                      setBulkCurrentIndex(0);
+                      toast.info('Bulk broadcast progress reset');
+                    }}
+                    className="h-7 text-xs text-muted-foreground"
+                  >
+                    <RotateCcw className="h-3 w-3 mr-1" /> Reset Progress
+                  </Button>
+                </div>
+              </div>
+            ) : null}
 
             {/* Member Selection Section */}
             <div className="space-y-3 pt-2">
               <div className="flex items-center justify-between">
                 <Label className="font-semibold">Select Recipient Members</Label>
-                <Badge variant="outline" className="font-mono">
-                  {selectedAnnounceMemberIds.length} / {members.length} Selected
-                </Badge>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="font-mono">
+                    {selectedAnnounceMemberIds.length} / {members.length} Selected
+                  </Badge>
+                  {validSelectedMembers.length > 1 && !bulkMode && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setBulkMode(true);
+                        setBulkCurrentIndex(0);
+                      }}
+                      className="h-6 text-[11px] text-green-600 border-green-600/40 hover:bg-green-50 dark:hover:bg-green-950/40 px-2"
+                    >
+                      Start Bulk Queue
+                    </Button>
+                  )}
+                </div>
               </div>
 
               {/* Internal Search & Select All Bar */}
@@ -1077,6 +1896,7 @@ export default function MembersPage() {
                   .map((m) => {
                     const isSelected = selectedAnnounceMemberIds.includes(m.id);
                     const formattedPhone = formatPhoneForWA(m.phone);
+                    const isSent = sentMemberIds.includes(m.id);
                     return (
                       <div
                         key={m.id}
@@ -1104,7 +1924,14 @@ export default function MembersPage() {
                             </div>
                           )}
                           <div>
-                            <div className="font-medium text-sm leading-none">{m.full_name}</div>
+                            <div className="font-medium text-sm leading-none flex items-center gap-2">
+                              {m.full_name}
+                              {isSent && (
+                                <Badge variant="outline" className="text-[10px] text-green-600 border-green-600 bg-green-50 py-0 px-1">
+                                  ✓ Sent
+                                </Badge>
+                              )}
+                            </div>
                             <div className="text-xs text-muted-foreground mt-1 flex items-center gap-2">
                               <span>#{m.member_number || 'N/A'}</span>
                               <span>•</span>
@@ -1125,6 +1952,7 @@ export default function MembersPage() {
                                 `https://wa.me/${formattedPhone}?text=${encodeURIComponent(announcementMessage)}`,
                                 '_blank'
                               );
+                              setSentMemberIds((prev) => Array.from(new Set([...prev, m.id])));
                             }}
                           >
                             <Send className="h-3 w-3 mr-1" /> Open Chat
@@ -1146,7 +1974,54 @@ export default function MembersPage() {
               className="bg-green-600 hover:bg-green-700 text-white font-medium gap-2"
               onClick={handleSendWhatsApp}
             >
-              <Send className="h-4 w-4" /> Send via WhatsApp
+              <Send className="h-4 w-4" /> {validSelectedMembers.length > 1 ? 'Start Bulk WhatsApp Broadcast' : 'Send via WhatsApp'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Save Template Title Dialog */}
+      <Dialog open={saveTemplateDialogOpen} onOpenChange={setSaveTemplateDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-lg font-bold flex items-center gap-2">
+              <BookmarkPlus className="h-5 w-5 text-primary" />
+              Save Announcement Template
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-3 py-2">
+            <Label htmlFor="template-title" className="font-medium text-sm">
+              Template Title *
+            </Label>
+            <Input
+              id="template-title"
+              placeholder="e.g. Welcome message, Fee Reminder, Eid Wish..."
+              value={newTemplateTitle}
+              onChange={(e) => setNewTemplateTitle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSaveTemplate();
+              }}
+              autoFocus
+            />
+            <p className="text-xs text-muted-foreground">
+              Saving this will add a quick button under the announcement box so you can reload this text anytime.
+            </p>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setSaveTemplateDialogOpen(false);
+                setNewTemplateTitle('');
+              }}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={handleSaveTemplate} className="bg-primary text-primary-foreground font-medium">
+              <Save className="h-4 w-4 mr-1.5" /> Save Template
             </Button>
           </DialogFooter>
         </DialogContent>
