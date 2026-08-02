@@ -44,12 +44,14 @@ interface Member {
 interface FeeRecord {
   id: string;
   member_id: string;
-  period_month: number;
-  period_year: number;
+  period_month: string;
+  period_end?: string;
   amount: number;
-  status: 'paid' | 'unpaid';
+  paid: boolean;
   paid_at: string | null;
   payment_method: string | null;
+  status?: string;
+  period_year?: number;
 }
 
 export default function MembersPage() {
@@ -195,11 +197,17 @@ export default function MembersPage() {
   const currentMonthlyFee = Number(form.monthly_fee) || 0;
   const currentTrainingFee = Number(form.training_fees) || 0;
   const totalPayable = currentMonthlyFee + currentTrainingFee;
-  const currentAmountPaid = form.amount_paid === '' ? totalPayable : Number(form.amount_paid) || 0;
+  const currentAmountPaid = form.amount_paid === '' ? totalPayable : (isNaN(Number(form.amount_paid)) ? 0 : Number(form.amount_paid));
   const remainingFees = Math.max(0, totalPayable - currentAmountPaid);
 
   const saveMutation = useMutation({
     mutationFn: async (data: typeof form) => {
+      const calcMonthly = Number(data.monthly_fee) || 0;
+      const calcTraining = Number(data.training_fees) || 0;
+      const totalFee = calcMonthly + calcTraining;
+      const rawPaid = data.amount_paid === '' ? totalFee : Number(data.amount_paid);
+      const paidAmount = isNaN(rawPaid) ? totalFee : rawPaid;
+
       const payload = {
         member_number: data.member_number,
         full_name: data.full_name,
@@ -207,42 +215,87 @@ export default function MembersPage() {
         cnic: data.cnic || null,
         email: data.email || null,
         join_date: data.join_date,
-        monthly_fee: Number(data.monthly_fee) || 0,
-        training_fees: Number(data.training_fees) || 0,
+        monthly_fee: calcMonthly,
+        training_fees: calcTraining,
         trainer_id: data.trainer_id || null,
-        amount_paid: data.amount_paid === '' ? (Number(data.monthly_fee) || 0) + (Number(data.training_fees) || 0) : Number(data.amount_paid) || 0,
+        amount_paid: paidAmount,
         notes: data.notes || null,
         photo_url: data.photo_url || null,
         active: data.active,
       };
 
-      if (editing) {
-        const { error } = await supabase.from('members').update(payload).eq('id', editing.id);
-        if (error) throw error;
-      } else {
-        const { data: newMember, error } = await supabase.from('members').insert(payload).select().single();
-        if (error) throw error;
+      let currentPayload: Record<string, any> = { ...payload };
+      let newMember: any = null;
 
-        if (newMember) {
-          const totalFee = payload.monthly_fee + payload.training_fees;
-          const paidAmount = payload.amount_paid;
-          const isPaid = paidAmount >= totalFee && totalFee > 0;
-          const joinDateStr = payload.join_date || new Date().toISOString().slice(0, 10);
-          const [jYear, jMonth] = joinDateStr.split('-').map(Number);
-          const periodMonth = `${jYear}-${String(jMonth).padStart(2, '0')}-01`;
-          const lastDay = new Date(jYear, jMonth, 0).getDate();
-          const periodEnd = `${jYear}-${String(jMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-
-          await supabase.from('fee_records').insert({
-            member_id: newMember.id,
-            amount: totalFee,
-            period_month: periodMonth,
-            period_end: periodEnd,
-            paid: isPaid,
-            paid_at: isPaid ? new Date().toISOString() : null,
-            payment_method: 'cash',
-          });
+      for (let attempt = 0; attempt < 5; attempt++) {
+        if (editing) {
+          const { data, error } = await supabase.from('members').update(currentPayload).eq('id', editing.id).select().single();
+          if (!error) {
+            newMember = data;
+            break;
+          }
+          const missingCol = (
+            error.message?.match(/Could not find the '([^']+)' column/i)?.[1] ||
+            error.message?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1] ||
+            error.details?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1]
+          );
+          if (missingCol && missingCol in currentPayload) {
+            delete currentPayload[missingCol];
+            continue;
+          }
+          let removed = false;
+          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id']) {
+            if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
+              delete currentPayload[col];
+              removed = true;
+            }
+          }
+          if (removed) continue;
+          throw error;
+        } else {
+          const { data, error } = await supabase.from('members').insert(currentPayload).select().single();
+          if (!error) {
+            newMember = data;
+            break;
+          }
+          const missingCol = (
+            error.message?.match(/Could not find the '([^']+)' column/i)?.[1] ||
+            error.message?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1] ||
+            error.details?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1]
+          );
+          if (missingCol && missingCol in currentPayload) {
+            delete currentPayload[missingCol];
+            continue;
+          }
+          let removed = false;
+          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id']) {
+            if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
+              delete currentPayload[col];
+              removed = true;
+            }
+          }
+          if (removed) continue;
+          throw error;
         }
+      }
+
+      if (!editing && newMember) {
+        const isPaid = paidAmount >= totalFee && totalFee > 0;
+        const joinDateStr = payload.join_date || new Date().toISOString().slice(0, 10);
+        const [jYear, jMonth] = joinDateStr.split('-').map(Number);
+        const periodMonth = `${jYear}-${String(jMonth).padStart(2, '0')}-01`;
+        const lastDay = new Date(jYear, jMonth, 0).getDate();
+        const periodEnd = `${jYear}-${String(jMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+        await supabase.from('fee_records').insert({
+          member_id: newMember.id,
+          amount: totalFee,
+          period_month: periodMonth,
+          period_end: periodEnd,
+          paid: isPaid,
+          paid_at: isPaid ? new Date().toISOString() : null,
+          payment_method: 'cash',
+        });
       }
     },
     onSuccess: () => {
@@ -498,7 +551,7 @@ export default function MembersPage() {
                 ) : filtered.map((m) => {
                   const assignedTrainer = trainers.find((t) => t.id === m.trainer_id);
                   const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
-                  const paidAmount = m.amount_paid ?? totalFee;
+                  const paidAmount = typeof m.amount_paid === 'number' ? m.amount_paid : (m.amount_paid !== undefined && m.amount_paid !== null ? Number(m.amount_paid) || 0 : 0);
                   const percentage = totalFee > 0 ? Math.min(100, Math.round((paidAmount / totalFee) * 100)) : 100;
                   const isFullyPaid = percentage >= 100;
 
@@ -813,7 +866,7 @@ export default function MembersPage() {
                 <div>
                   <div className="text-muted-foreground mb-1">Amount Paid</div>
                   <div className="font-medium text-green-600">
-                    {selectedMember ? formatCurrency(selectedMember.amount_paid ?? ((selectedMember.monthly_fee || 0) + (selectedMember.training_fees || 0))) : '—'}
+                    {selectedMember ? formatCurrency(typeof selectedMember.amount_paid === 'number' ? selectedMember.amount_paid : (selectedMember.amount_paid !== undefined && selectedMember.amount_paid !== null ? Number(selectedMember.amount_paid) || 0 : 0)) : '—'}
                   </div>
                 </div>
                 <div>
@@ -848,58 +901,70 @@ export default function MembersPage() {
                       <tr><td colSpan={5} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
                     ) : memberFees.length === 0 ? (
                       <tr><td colSpan={5} className="text-center py-8 text-muted-foreground">No fee records found</td></tr>
-                    ) : memberFees.map(fee => (
-                      <tr key={fee.id} className="border-b border-border/50 last:border-0">
-                        <td className="p-3">{fee.period_month}/{fee.period_year}</td>
-                        <td className="p-3">{formatCurrency(fee.amount)}</td>
-                        <td className="p-3">
-                          <Badge variant={fee.status === 'paid' ? 'success' : 'destructive'}>
-                            {fee.status.toUpperCase()}
-                          </Badge>
-                        </td>
-                        <td className="p-3 text-muted-foreground">{fee.paid_at ? formatDate(fee.paid_at) : '—'}</td>
-                        <td className="p-3 text-right">
-                          {fee.status === 'unpaid' ? (
-                            paymentFeeId === fee.id ? (
-                              <div className="flex items-center justify-end gap-2">
-                                <Select value={paymentMethod} onValueChange={setPaymentMethod}>
-                                  <SelectTrigger className="w-[100px] h-8 text-xs">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {PAYMENT_METHODS.map(pm => (
-                                      <SelectItem key={pm.value} value={pm.value}>{pm.label}</SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                                <Button 
-                                  size="sm" 
-                                  className="h-8" 
-                                  onClick={() => collectFeeMutation.mutate({ feeId: fee.id, method: paymentMethod })} 
-                                  disabled={collectFeeMutation.isPending}
-                                >
-                                  {collectFeeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Confirm'}
+                    ) : memberFees.map(fee => {
+                      const isPaid = fee.paid ?? (fee.status === 'paid');
+                      let periodDisplay = String(fee.period_month || '—');
+                      if (fee.period_month && String(fee.period_month).includes('-')) {
+                        const [y, m] = String(fee.period_month).split('-').map(Number);
+                        if (y && m) {
+                          const dateObj = new Date(y, m - 1, 1);
+                          periodDisplay = dateObj.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+                        }
+                      }
+
+                      return (
+                        <tr key={fee.id} className="border-b border-border/50 last:border-0">
+                          <td className="p-3 font-medium">{periodDisplay}</td>
+                          <td className="p-3">{formatCurrency(fee.amount)}</td>
+                          <td className="p-3">
+                            <Badge variant={isPaid ? 'success' : 'destructive'}>
+                              {isPaid ? 'PAID' : 'UNPAID'}
+                            </Badge>
+                          </td>
+                          <td className="p-3 text-muted-foreground">{fee.paid_at ? formatDate(fee.paid_at) : '—'}</td>
+                          <td className="p-3 text-right">
+                            {!isPaid ? (
+                              paymentFeeId === fee.id ? (
+                                <div className="flex items-center justify-end gap-2">
+                                  <Select value={paymentMethod} onValueChange={setPaymentMethod}>
+                                    <SelectTrigger className="w-[100px] h-8 text-xs">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {PAYMENT_METHODS.map(pm => (
+                                        <SelectItem key={pm.value} value={pm.value}>{pm.label}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                  <Button 
+                                    size="sm" 
+                                    className="h-8" 
+                                    onClick={() => collectFeeMutation.mutate({ feeId: fee.id, method: paymentMethod })} 
+                                    disabled={collectFeeMutation.isPending}
+                                  >
+                                    {collectFeeMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Confirm'}
+                                  </Button>
+                                  <Button 
+                                    size="sm" 
+                                    variant="ghost" 
+                                    className="h-8" 
+                                    onClick={() => setPaymentFeeId(null)}
+                                  >
+                                    Cancel
+                                  </Button>
+                                </div>
+                              ) : (
+                                <Button size="sm" variant="outline" className="h-8" onClick={() => setPaymentFeeId(fee.id)}>
+                                  Collect
                                 </Button>
-                                <Button 
-                                  size="sm" 
-                                  variant="ghost" 
-                                  className="h-8" 
-                                  onClick={() => setPaymentFeeId(null)}
-                                >
-                                  Cancel
-                                </Button>
-                              </div>
+                              )
                             ) : (
-                              <Button size="sm" variant="outline" className="h-8" onClick={() => setPaymentFeeId(fee.id)}>
-                                Collect
-                              </Button>
-                            )
-                          ) : (
-                            <span className="text-muted-foreground text-xs capitalize">{fee.payment_method || '—'}</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                              <span className="text-muted-foreground text-xs capitalize">{fee.payment_method || '—'}</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
