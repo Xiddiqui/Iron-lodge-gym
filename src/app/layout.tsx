@@ -4,8 +4,8 @@ import { QueryProvider } from '@/providers/query-provider';
 import { Toaster } from 'sonner';
 
 export const metadata: Metadata = {
-  title: 'Gym Manager',
-  description: 'Digital gym register: members, monthly fees, expenses, and profit at a glance.',
+  title: 'Iron Lodge Gym',
+  description: 'Iron Lodge Gym – Digital gym register: members, monthly fees, expenses, and profit at a glance.',
   manifest: '/manifest.webmanifest',
   icons: {
     icon: '/favicon.png',
@@ -16,11 +16,11 @@ export const metadata: Metadata = {
     'apple-mobile-web-app-capable': 'yes',
     'mobile-web-app-capable': 'yes',
     'apple-mobile-web-app-status-bar-style': 'default',
-    'apple-mobile-web-app-title': 'Gym Manager',
+    'apple-mobile-web-app-title': 'Iron Lodge Gym',
   },
   openGraph: {
-    title: 'Gym Manager',
-    description: 'Digital gym register: members, fees, expenses and profit dashboard.',
+    title: 'Iron Lodge Gym',
+    description: 'Iron Lodge Gym – Digital gym register: members, fees, expenses and profit dashboard.',
     type: 'website',
   },
 };

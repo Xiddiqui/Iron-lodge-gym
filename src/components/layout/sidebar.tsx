@@ -44,7 +44,13 @@ export function Sidebar() {
         .from('enquiries')
         .select('*', { count: 'exact', head: true })
         .eq('is_read', false);
-      if (error) return 0;
+      if (error) {
+        const { count: fallbackCount } = await supabase
+          .from('enquiries')
+          .select('*', { count: 'exact', head: true })
+          .eq('status', 'new');
+        return fallbackCount ?? 0;
+      }
       return count ?? 0;
     },
     enabled: role === 'admin',
@@ -80,13 +86,7 @@ export function Sidebar() {
 
       {/* Header */}
       <div className="relative px-5 py-5 flex items-center gap-3 border-b border-sidebar-border">
-        {settings?.logo_url ? (
-          <img src={settings.logo_url} alt="Logo" className="h-11 w-11 rounded-xl object-cover shadow-elegant bg-background" />
-        ) : (
-          <div className="h-11 w-11 rounded-xl bg-gradient-primary text-primary-foreground grid place-items-center shadow-elegant">
-            <Dumbbell className="h-5 w-5" />
-          </div>
-        )}
+        <img src={settings?.logo_url || '/logo.png'} alt="Iron Lodge Gym" className="h-11 w-15 rounded-xl object-cover shadow-elegant bg-primary" />
         <div className="min-w-0">
           <p className="font-display font-semibold truncate tracking-tight">{settings?.gym_name ?? 'Gym Manager'}</p>
           {role === 'admin' && (
@@ -186,13 +186,7 @@ export function Sidebar() {
           {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
         <div className="flex items-center gap-2">
-          {settings?.logo_url ? (
-            <img src={settings.logo_url} alt="Logo" className="h-8 w-8 rounded-lg object-cover shadow-elegant bg-background" />
-          ) : (
-            <div className="h-8 w-8 rounded-lg bg-gradient-primary text-primary-foreground grid place-items-center shadow-elegant">
-              <Dumbbell className="h-4 w-4" />
-            </div>
-          )}
+          <img src={settings?.logo_url || '/logo.png'} alt="Iron Lodge Gym" className="h-8 w-8 rounded-lg object-cover shadow-elegant bg-background" />
           <span className="font-display font-semibold">{settings?.gym_name ?? 'Gym Manager'}</span>
         </div>
         <div className="w-9" />

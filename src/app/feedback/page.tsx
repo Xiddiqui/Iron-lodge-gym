@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Dumbbell, Send, CheckCircle2, Loader2, MessageSquareHeart } from 'lucide-react';
+import { Send, CheckCircle2, Loader2, MessageSquareHeart } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function FeedbackPage() {
@@ -33,21 +33,26 @@ export default function FeedbackPage() {
 
     setIsSubmitting(true);
     try {
-      const { error } = await supabase.from('enquiries').insert({
+      const payload: Record<string, any> = {
         name: form.name.trim(),
         phone: form.phone.trim() || null,
         email: form.email.trim() || null,
         message: form.message.trim(),
         status: 'new',
-        is_read: false,
-      });
+      };
 
-      if (error) throw error;
+      const { error } = await supabase.from('enquiries').insert(payload);
+
+      if (error) {
+        console.error('Feedback insert error:', error);
+        throw error;
+      }
 
       setSubmitted(true);
       toast.success('Feedback submitted successfully!');
     } catch (err: any) {
-      toast.error(err.message || 'Failed to submit feedback. Please try again.');
+      console.error('Submission error:', err);
+      toast.error(err.message || err.details || 'Failed to submit feedback. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
@@ -69,13 +74,7 @@ export default function FeedbackPage() {
       <div className="w-full max-w-lg space-y-6 relative z-10">
         {/* Header Branding */}
         <div className="flex flex-col items-center text-center space-y-3">
-          {settings?.logo_url ? (
-            <img src={settings.logo_url} alt={gymName} className="h-16 w-16 rounded-2xl object-cover shadow-elegant bg-background border border-border" />
-          ) : (
-            <div className="h-16 w-16 rounded-2xl bg-gradient-primary text-primary-foreground grid place-items-center shadow-elegant">
-              <Dumbbell className="h-8 w-8" />
-            </div>
-          )}
+          <img src={settings?.logo_url || '/logo.png'} alt={gymName} className="h-16 w-20 rounded-2xl object-cover shadow-elegant bg-primary border border-border" />
           <h1 className="text-3xl font-display font-bold tracking-tight text-foreground">{gymName}</h1>
           <p className="text-sm text-muted-foreground max-w-sm">
             We value your feedback and inquiries. Fill out the form below to get in touch with us!

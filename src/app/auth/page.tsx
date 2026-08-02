@@ -7,7 +7,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Dumbbell, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
+import Image from 'next/image';
 import { toast } from 'sonner';
 
 export default function AuthPage() {
@@ -38,11 +39,11 @@ export default function AuthPage() {
       </div>
       <Card className="w-full max-w-md relative z-10 border-border/50">
         <CardHeader className="text-center space-y-4">
-          <div className="mx-auto h-14 w-14 rounded-2xl bg-gradient-primary text-primary-foreground grid place-items-center shadow-elegant">
-            <Dumbbell className="h-7 w-7" />
+          <div className="mx-auto h-20 w-20 rounded-2xl overflow-hidden shadow-elegant bg-primary">
+            <Image src="/logo.png" alt="Iron Lodge Gym" width={80} height={80} className="h-full w-full object-cover" priority />
           </div>
           <div>
-            <CardTitle className="text-2xl font-display">Gym Manager</CardTitle>
+            <CardTitle className="text-2xl font-display">Iron Lodge Gym</CardTitle>
             <CardDescription className="mt-2">Sign in to your account</CardDescription>
           </div>
         </CardHeader>

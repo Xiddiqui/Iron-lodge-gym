@@ -1,7 +1,7 @@
 {
-  "name": "Gym Manager",
-  "short_name": "Gym Manager",
-  "description": "Digital gym register: members, monthly fees, expenses, and profit at a glance.",
+  "name": "Iron Lodge Gym",
+  "short_name": "Iron Lodge",
+  "description": "Iron Lodge Gym – Digital gym register: members, monthly fees, expenses, and profit at a glance.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
