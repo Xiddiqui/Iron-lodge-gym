@@ -41,11 +41,33 @@ export default function ExpensesPage() {
 
   const addMutation = useMutation({
     mutationFn: async (data: typeof form) => {
-      const { error } = await supabase.from('expenses').insert({ ...data, amount: Number(data.amount), logged_by: currentUser?.id });
+      const payload: Record<string, any> = {
+        name: data.name.trim(),
+        category: data.category,
+        amount: Number(data.amount),
+        expense_date: data.expense_date || new Date().toISOString().slice(0, 10),
+      };
+      if (data.notes && data.notes.trim()) {
+        payload.notes = data.notes.trim();
+      }
+      if (currentUser?.id) {
+        payload.logged_by = currentUser.id;
+      }
+
+      let { error } = await supabase.from('expenses').insert(payload);
+
+      if (error && payload.logged_by) {
+        delete payload.logged_by;
+        const retry = await supabase.from('expenses').insert(payload);
+        error = retry.error;
+      }
+
       if (error) throw error;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['expenses'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-expenses'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-trend'] });
       toast.success('Expense added');
       setDialogOpen(false);
     },
@@ -59,6 +81,8 @@ export default function ExpensesPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['expenses'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-expenses'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-trend'] });
       toast.success('Expense deleted');
     },
   });

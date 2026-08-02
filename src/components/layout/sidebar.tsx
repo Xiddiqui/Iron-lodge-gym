@@ -12,15 +12,16 @@ import { useRole } from '@/hooks/use-role';
 import { useCurrentUser } from '@/hooks/use-session';
 import { useGymSettings } from '@/hooks/use-gym-settings';
 import { supabase } from '@/lib/supabase/client';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, adminOnly: true },
   { to: '/members', label: 'Members', icon: Users, adminOnly: false },
+  { to: '/trainers', label: 'Trainers', icon: Dumbbell, adminOnly: false },
   { to: '/attendance', label: 'Attendance', icon: CalendarCheck, adminOnly: false },
-  { to: '/enquiries', label: 'Enquiries', icon: MessageSquare, adminOnly: false },
+  { to: '/enquiries', label: 'Enquiries', icon: MessageSquare, adminOnly: true },
   { to: '/expenses', label: 'Expenses', icon: Receipt, adminOnly: true },
   { to: '/settings', label: 'Settings', icon: Settings, adminOnly: true },
 ];
@@ -34,12 +35,28 @@ export function Sidebar() {
   const { data: settings } = useGymSettings();
   const queryClient = useQueryClient();
 
+  // Fetch unread enquiries count for admin badge
+  const { data: unreadCount = 0 } = useQuery({
+    queryKey: ['enquiries-unread-count'],
+    queryFn: async () => {
+      if (role !== 'admin') return 0;
+      const { count, error } = await supabase
+        .from('enquiries')
+        .select('*', { count: 'exact', head: true })
+        .eq('is_read', false);
+      if (error) return 0;
+      return count ?? 0;
+    },
+    enabled: role === 'admin',
+    refetchInterval: 10000,
+  });
+
   useEffect(() => setMobileOpen(false), [pathname]);
 
   // Redirect staff from admin-only pages
   useEffect(() => {
     if (roleLoading || !role) return;
-    if (role !== 'admin' && (pathname === '/dashboard' || pathname === '/expenses' || pathname === '/settings')) {
+    if (role !== 'admin' && (pathname === '/dashboard' || pathname === '/expenses' || pathname === '/settings' || pathname === '/enquiries')) {
       router.replace('/members');
     }
   }, [role, roleLoading, pathname, router]);
@@ -105,7 +122,12 @@ export function Sidebar() {
                   />
                 )}
                 <item.icon className="h-4 w-4 shrink-0" />
-                {item.label}
+                <span className="flex-1 text-left">{item.label}</span>
+                {item.to === '/enquiries' && unreadCount > 0 && (
+                  <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-red-600 px-1.5 text-[11px] font-bold text-white shadow-sm animate-pulse">
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                )}
               </Link>
             </motion.div>
           );

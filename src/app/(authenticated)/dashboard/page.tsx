@@ -31,23 +31,71 @@ export default function DashboardPage() {
   const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [trendMonths, setTrendMonths] = useState(6);
 
-  const monthStart = `${selectedMonth}-01`;
   const [year, month] = selectedMonth.split('-').map(Number);
-  const monthEnd = new Date(year, month, 1).toISOString().slice(0, 10);
+  const monthStart = `${selectedMonth}-01`;
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const monthEnd = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
 
-  // Fee records for the month
+  // Fee records for the month with auto-sync for missing member records
   const { data: fees = [] } = useQuery({
     queryKey: ['dash-fees', monthStart, monthEnd],
     enabled: role === 'admin',
     queryFn: async () => {
-      const { data, error } = await supabase
+      // 1. Get existing fee records for selected month
+      const { data: existingFees, error } = await supabase
         .from('fee_records')
         .select('id, amount, paid, paid_at, member_id, period_month, period_end, members(full_name, phone)')
+        .gte('period_month', monthStart)
         .lt('period_month', monthEnd)
-        .gt('period_end', monthStart)
         .order('paid', { ascending: false });
+
       if (error) throw error;
-      return data ?? [];
+      let feeList = existingFees ?? [];
+
+      // 2. Fetch members joined on or before monthEnd to check if any active member lacks a fee_record for this month
+      const { data: activeMembers } = await supabase
+        .from('members')
+        .select('*')
+        .lte('join_date', monthEnd);
+
+      if (activeMembers && activeMembers.length > 0) {
+        const existingMemberIds = new Set(feeList.map((f: any) => f.member_id));
+        const missingMembers = activeMembers.filter((m: any) => !existingMemberIds.has(m.id));
+
+        if (missingMembers.length > 0) {
+          const lastDay = new Date(year, month, 0).getDate();
+          const periodEndStr = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+          const newRecords = missingMembers.map((m: any) => {
+            const totalFee = (Number(m.monthly_fee) || 0) + (Number(m.training_fees) || 0);
+            const paidAmount = m.amount_paid ?? totalFee;
+            const isJoinedInThisMonth = m.join_date >= monthStart && m.join_date < monthEnd;
+            const isPaid = isJoinedInThisMonth ? paidAmount >= totalFee && totalFee > 0 : false;
+
+            return {
+              member_id: m.id,
+              amount: totalFee,
+              period_month: monthStart,
+              period_end: periodEndStr,
+              paid: isPaid,
+              paid_at: isPaid ? (m.created_at || new Date().toISOString()) : null,
+              payment_method: 'cash',
+            };
+          });
+
+          const { data: insertedRecords } = await supabase
+            .from('fee_records')
+            .upsert(newRecords, { onConflict: 'member_id,period_month', ignoreDuplicates: true })
+            .select('id, amount, paid, paid_at, member_id, period_month, period_end, members(full_name, phone)');
+
+          if (insertedRecords && insertedRecords.length > 0) {
+            feeList = [...feeList, ...insertedRecords];
+          }
+        }
+      }
+
+      return feeList;
     },
   });
 
@@ -72,32 +120,37 @@ export default function DashboardPage() {
     queryKey: ['dash-trend', selectedMonth, trendMonths],
     enabled: role === 'admin',
     queryFn: async () => {
-      const endDate = new Date(year, month, 1);
-      const startDate = new Date(year, month - trendMonths, 1);
-      const startStr = startDate.toISOString().slice(0, 10);
-      const endStr = endDate.toISOString().slice(0, 10);
-
-      const [{ data: feeData }, { data: expData }] = await Promise.all([
-        supabase.from('fee_records').select('amount, paid, paid_at').eq('paid', true).gte('paid_at', startStr).lt('paid_at', endStr),
-        supabase.from('expenses').select('amount, expense_date').gte('expense_date', startStr).lt('expense_date', endStr),
-      ]);
-
       const months: { key: string; label: string; revenue: number; expenses: number; profit: number }[] = [];
       const map = new Map<string, typeof months[0]>();
-      for (let i = 0; i < trendMonths; i++) {
-        const d = new Date(startDate.getFullYear(), startDate.getMonth() + i, 1);
-        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+
+      for (let i = trendMonths - 1; i >= 0; i--) {
+        const d = new Date(year, month - 1 - i, 1);
+        const y = d.getFullYear();
+        const mStr = String(d.getMonth() + 1).padStart(2, '0');
+        const key = `${y}-${mStr}`;
         const entry = { key, label: formatMonthYear(d), revenue: 0, expenses: 0, profit: 0 };
         months.push(entry);
         map.set(key, entry);
       }
 
+      const startKey = months[0].key + '-01';
+      const endNextMonth = month === 12 ? 1 : month + 1;
+      const endNextYear = month === 12 ? year + 1 : year;
+      const endKey = `${endNextYear}-${String(endNextMonth).padStart(2, '0')}-01`;
+
+      const [{ data: feeData }, { data: expData }] = await Promise.all([
+        supabase.from('fee_records').select('amount, paid, paid_at, period_month').eq('paid', true).gte('period_month', startKey).lt('period_month', endKey),
+        supabase.from('expenses').select('amount, expense_date').gte('expense_date', startKey).lt('expense_date', endKey),
+      ]);
+
       feeData?.forEach((r) => {
-        if (!r.paid_at) return;
-        const entry = map.get(r.paid_at.slice(0, 7));
+        const key = r.paid_at ? r.paid_at.slice(0, 7) : r.period_month ? r.period_month.slice(0, 7) : null;
+        if (!key) return;
+        const entry = map.get(key);
         if (entry) entry.revenue += Number(r.amount);
       });
       expData?.forEach((r) => {
+        if (!r.expense_date) return;
         const entry = map.get(r.expense_date.slice(0, 7));
         if (entry) entry.expenses += Number(r.amount);
       });
