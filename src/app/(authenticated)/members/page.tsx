@@ -362,13 +362,48 @@ export default function MembersPage() {
   const currentAmountPaid = form.amount_paid === '' ? totalPayable : (isNaN(Number(form.amount_paid)) ? 0 : Number(form.amount_paid));
   const remainingFees = Math.max(0, totalPayable - currentAmountPaid);
 
+  const cleanFormMemberNum = (form.member_number || '').trim();
+  const dupMemberNumber = cleanFormMemberNum ? members.find((m) => {
+    if (editing && m.id === editing.id) return false;
+    const mNumClean = (m.member_number || '').trim();
+    if (!mNumClean) return false;
+    const numA = parseInt(cleanFormMemberNum, 10);
+    const numB = parseInt(mNumClean, 10);
+    if (!isNaN(numA) && !isNaN(numB)) {
+      return numA === numB;
+    }
+    return mNumClean.toLowerCase() === cleanFormMemberNum.toLowerCase();
+  }) : null;
+
   const saveMutation = useMutation({
     mutationFn: async (data: typeof form) => {
-      // Validate duplicate phone or CNIC
+      // Validate duplicate member number, phone or CNIC
+      const cleanMemberNum = (data.member_number || '').trim();
       const cleanPhone = (data.phone || '').trim();
       const cleanCnic = (data.cnic || '').trim();
       const phoneDigits = cleanPhone.replace(/\D/g, '');
       const cnicDigits = cleanCnic.replace(/\D/g, '');
+
+      if (!cleanMemberNum) {
+        throw new Error('Member number is required.');
+      }
+
+      if (cleanMemberNum) {
+        const dupMemberNum = members.find((m) => {
+          if (editing && m.id === editing.id) return false;
+          const mNumClean = (m.member_number || '').trim();
+          if (!mNumClean) return false;
+          const numA = parseInt(cleanMemberNum, 10);
+          const numB = parseInt(mNumClean, 10);
+          if (!isNaN(numA) && !isNaN(numB)) {
+            return numA === numB;
+          }
+          return mNumClean.toLowerCase() === cleanMemberNum.toLowerCase();
+        });
+        if (dupMemberNum) {
+          throw new Error(`Member number "${cleanMemberNum}" already exists for member "${dupMemberNum.full_name}". Please enter a unique member number.`);
+        }
+      }
 
       if (phoneDigits) {
         const dupPhone = members.find((m) => {
@@ -700,7 +735,7 @@ export default function MembersPage() {
     setEditing(null);
     stopCamera();
 
-    // Auto-generate member number (001, 002, etc.)
+    // Auto-generate member number (1, 2, etc.)
     let maxNum = 0;
     members.forEach((m) => {
       if (m.member_number) {
@@ -709,7 +744,7 @@ export default function MembersPage() {
       }
     });
     const nextNum = maxNum > 0 ? maxNum + 1 : members.length + 1;
-    const generatedNum = String(nextNum).padStart(3, '0');
+    const generatedNum = String(nextNum);
 
     setForm({
       member_number: generatedNum,
@@ -720,7 +755,7 @@ export default function MembersPage() {
       email: '',
       join_date: new Date().toISOString().slice(0, 10),
       monthly_fee: '',
-      training_fees: '0',
+      training_fees: '',
       trainer_id: null,
       amount_paid: '',
       notes: '',
@@ -1093,10 +1128,23 @@ export default function MembersPage() {
 
           <form onSubmit={(e) => { e.preventDefault(); saveMutation.mutate(form); }} className="space-y-5 pt-2">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Member Number (Auto Generated, Read Only) */}
+              {/* Member Number (Editable) */}
               <div className="space-y-2">
-                <Label className="text-muted-foreground">Member Number (Auto-Generated)</Label>
-                <Input readOnly value={form.member_number} className="bg-muted font-mono font-bold cursor-not-allowed text-primary" />
+                <Label>Member Number *</Label>
+                <Input
+                  required
+                  value={form.member_number}
+                  onChange={(e) => setForm({ ...form, member_number: e.target.value })}
+                  placeholder="e.g. 1"
+                  className={`font-mono font-bold text-primary ${
+                    dupMemberNumber ? 'border-destructive focus-visible:ring-destructive' : ''
+                  }`}
+                />
+                {dupMemberNumber && (
+                  <p className="text-xs font-medium text-destructive">
+                    Member number &quot;{cleanFormMemberNum}&quot; already exists ({dupMemberNumber.full_name}).
+                  </p>
+                )}
               </div>
 
               {/* Full Name */}
@@ -1236,7 +1284,7 @@ export default function MembersPage() {
               <Button type="button" variant="outline" onClick={() => { setDialogOpen(false); stopCamera(); }}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={saveMutation.isPending}>
+              <Button type="submit" disabled={saveMutation.isPending || !!dupMemberNumber}>
                 {saveMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
                 {editing ? 'Update' : 'Add'} Member
               </Button>
