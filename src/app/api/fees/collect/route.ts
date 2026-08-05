@@ -116,7 +116,7 @@ export async function POST(request: Request) {
       amount_paid: newAmountPaid,
       discount: (Number(record.discount) || 0) + recordDiscount,
       paid: isFullyPaid,
-      paid_at: isFullyPaid ? new Date().toISOString() : record.paid_at,
+      paid_at: newAmountPaid > 0 ? (record.paid_at || new Date().toISOString()) : null,
       payment_method: method,
       collected_by: user.id,
     });

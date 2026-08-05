@@ -45,13 +45,22 @@ export default function DashboardPage() {
       // 1. Get existing fee records for selected month
       const { data: existingFees, error } = await supabase
         .from('fee_records')
-        .select('id, amount, paid, paid_at, member_id, period_month, period_end, members(full_name, phone)')
+        .select('id, amount, amount_paid, paid, paid_at, member_id, period_month, period_end, members(full_name, phone)')
         .gte('period_month', monthStart)
         .lt('period_month', monthEnd)
         .order('paid', { ascending: false });
 
       if (error) throw error;
       let feeList = existingFees ?? [];
+
+      // Auto-heal missing paid_at for records with amount_paid > 0
+      const missingPaidAt = feeList.filter((f: any) => (Number(f.amount_paid) || 0) > 0 && !f.paid_at);
+      if (missingPaidAt.length > 0) {
+        const idsToUpdate = missingPaidAt.map((f: any) => f.id);
+        const nowIso = new Date().toISOString();
+        await supabase.from('fee_records').update({ paid_at: nowIso }).in('id', idsToUpdate);
+        feeList = feeList.map((f: any) => (idsToUpdate.includes(f.id) ? { ...f, paid_at: nowIso } : f));
+      }
 
       // 2. Fetch members joined on or before monthEnd to check if any active member lacks a fee_record for this month
       const { data: activeMembers } = await supabase
@@ -69,17 +78,19 @@ export default function DashboardPage() {
 
           const newRecords = missingMembers.map((m: any) => {
             const totalFee = (Number(m.monthly_fee) || 0) + (Number(m.training_fees) || 0);
-            const paidAmount = m.amount_paid ?? totalFee;
+            const paidAmount = Number(m.amount_paid) || 0;
             const isJoinedInThisMonth = m.join_date >= monthStart && m.join_date < monthEnd;
-            const isPaid = isJoinedInThisMonth ? paidAmount >= totalFee && totalFee > 0 : false;
+            const actualPaid = isJoinedInThisMonth ? paidAmount : 0;
+            const isPaid = isJoinedInThisMonth ? actualPaid >= totalFee && totalFee > 0 : false;
 
             return {
               member_id: m.id,
               amount: totalFee,
+              amount_paid: actualPaid,
               period_month: monthStart,
               period_end: periodEndStr,
               paid: isPaid,
-              paid_at: isPaid ? (m.created_at || new Date().toISOString()) : null,
+              paid_at: actualPaid > 0 ? (m.created_at || new Date().toISOString()) : null,
               payment_method: 'cash',
             };
           });
@@ -87,7 +98,7 @@ export default function DashboardPage() {
           const { data: insertedRecords } = await supabase
             .from('fee_records')
             .upsert(newRecords, { onConflict: 'member_id,period_month', ignoreDuplicates: true })
-            .select('id, amount, paid, paid_at, member_id, period_month, period_end, members(full_name, phone)');
+            .select('id, amount, amount_paid, paid, paid_at, member_id, period_month, period_end, members(full_name, phone)');
 
           if (insertedRecords && insertedRecords.length > 0) {
             feeList = [...feeList, ...insertedRecords];
@@ -139,15 +150,27 @@ export default function DashboardPage() {
       const endKey = `${endNextYear}-${String(endNextMonth).padStart(2, '0')}-01`;
 
       const [{ data: feeData }, { data: expData }] = await Promise.all([
-        supabase.from('fee_records').select('amount, paid, paid_at, period_month').eq('paid', true).gte('period_month', startKey).lt('period_month', endKey),
-        supabase.from('expenses').select('amount, expense_date').gte('expense_date', startKey).lt('expense_date', endKey),
+        supabase
+          .from('fee_records')
+          .select('amount, amount_paid, paid, paid_at, period_month')
+          .gte('period_month', startKey)
+          .lt('period_month', endKey),
+        supabase
+          .from('expenses')
+          .select('amount, expense_date')
+          .gte('expense_date', startKey)
+          .lt('expense_date', endKey),
       ]);
 
       feeData?.forEach((r) => {
+        const amtPaid = Number(r.amount_paid);
+        const actualCollected = (!isNaN(amtPaid) && amtPaid > 0) ? amtPaid : (r.paid ? Number(r.amount) || 0 : 0);
+        if (actualCollected <= 0) return;
+
         const key = r.paid_at ? r.paid_at.slice(0, 7) : r.period_month ? r.period_month.slice(0, 7) : null;
         if (!key) return;
         const entry = map.get(key);
-        if (entry) entry.revenue += Number(r.amount);
+        if (entry) entry.revenue += actualCollected;
       });
       expData?.forEach((r) => {
         if (!r.expense_date) return;
@@ -174,7 +197,11 @@ export default function DashboardPage() {
     },
   });
 
-  const totalRevenue = fees.filter((f: any) => f.paid).reduce((s: number, f: any) => s + Number(f.amount), 0);
+  const totalRevenue = fees.reduce((s: number, f: any) => {
+    const paidAmt = Number(f.amount_paid);
+    if (!isNaN(paidAmt) && paidAmt > 0) return s + paidAmt;
+    return s + (f.paid ? Number(f.amount) || 0 : 0);
+  }, 0);
   const totalExpenses = expenses.reduce((s: number, e: any) => s + Number(e.amount), 0);
   const netProfit = totalRevenue - totalExpenses;
   const paidCount = fees.filter((f: any) => f.paid).length;
@@ -185,9 +212,15 @@ export default function DashboardPage() {
     acc[e.category] = (acc[e.category] || 0) + Number(e.amount);
     return acc;
   }, {});
-  const expenseChartData = Object.entries(expenseByCategory).map(([cat, amt]) => ({ category: cat, amount: amt }));
+  // const expenseChartData = Object.entries(expenseByCategory).map(([cat, amt]) => ({ category: cat, amount: amt }));
   const categoryColors: Record<string, string> = { rent: '#64748b', utility: '#3b82f6', salary: '#a855f7', maintenance: '#f97316', equipment: '#06b6d4', misc: '#6b7280' };
 
+  const categories = ["misc", "salary", "rent", "maintenance", "utility"];
+
+const expenseChartData = categories.map((cat) => ({
+  category: cat,
+  amount: expenseByCategory[cat] || 0 // Use the value from DB, or 0 if it doesn't exist
+}));
   // Month options
   const monthOptions = Array.from({ length: 12 }, (_, i) => {
     const d = new Date();
@@ -373,7 +406,7 @@ export default function DashboardPage() {
                   <Tooltip contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
                   <Bar dataKey="amount" radius={[4, 4, 0, 0]}>
                     {expenseChartData.map((entry, i) => (
-                      <Cell key={i} fill={categoryColors[entry.category] || '#6b7280'} />
+                      <Cell width={70} key={i} fill={categoryColors[entry.category] || '#6b7280'} />
                     ))}
                   </Bar>
                 </BarChart>

@@ -15,6 +15,7 @@ import { supabase } from '@/lib/supabase/client';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { recordStaffLogout } from '@/lib/staff-attendance';
 
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, adminOnly: true },
@@ -70,6 +71,9 @@ export function Sidebar() {
   const filteredNav = NAV_ITEMS.filter(item => item.adminOnly ? role === 'admin' : true);
 
   async function handleSignOut() {
+    if (user?.id) {
+      await recordStaffLogout(user.id);
+    }
     await queryClient.cancelQueries();
     queryClient.clear();
     await supabase.auth.signOut();

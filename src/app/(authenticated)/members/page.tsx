@@ -4,6 +4,8 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { formatCurrency, formatDate } from '@/lib/format';
+import { useRole } from '@/hooks/use-role';
+import { useCurrentUser } from '@/hooks/use-session';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -46,6 +48,7 @@ interface Member {
   notes: string | null;
   photo_url: string | null;
   created_at: string;
+  assigned_staff_id: string | null;
 }
 
 interface FeeRecord {
@@ -99,6 +102,9 @@ function formatPeriodMonth(periodMonth: string): string {
 
 export default function MembersPage() {
   const queryClient = useQueryClient();
+  const { data: userRole } = useRole();
+  const { data: currentUser } = useCurrentUser();
+  const isAdmin = userRole === 'admin';
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
@@ -481,7 +487,7 @@ export default function MembersPage() {
           period_month: periodMonth,
           period_end: periodEnd,
           paid: isPaid,
-          paid_at: isPaid ? new Date().toISOString() : null,
+          paid_at: paidAmount > 0 ? new Date().toISOString() : null,
           payment_method: 'cash',
         });
       }
@@ -779,7 +785,13 @@ export default function MembersPage() {
     });
   }
 
-  const filtered = members.filter((m) => {
+  // Staff users only see members assigned to them; admins see all
+  const staffFilteredMembers = useMemo(() => {
+    if (isAdmin || !currentUser?.id) return members;
+    return members.filter((m) => m.assigned_staff_id === currentUser.id);
+  }, [members, isAdmin, currentUser?.id]);
+
+  const filtered = staffFilteredMembers.filter((m) => {
     const cleanSearch = search.trim().toLowerCase();
     const matchSearch =
       !cleanSearch ||

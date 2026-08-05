@@ -11,6 +11,8 @@ import { Loader2 } from 'lucide-react';
 import Image from 'next/image';
 import { toast } from 'sonner';
 
+import { recordStaffLogin } from '@/lib/staff-attendance';
+
 export default function AuthPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
@@ -20,11 +22,14 @@ export default function AuthPage() {
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) {
       toast.error(error.message);
       setLoading(false);
       return;
+    }
+    if (data.user?.id) {
+      await recordStaffLogin(data.user.id);
     }
     toast.success('Signed in successfully');
     router.push('/dashboard');
