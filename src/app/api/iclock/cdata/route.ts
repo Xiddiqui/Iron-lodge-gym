@@ -111,25 +111,30 @@ export async function POST(request: Request) {
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
+  const results: string[] = [];
   for (const line of lines) {
     const parts = line.split('\t');
     if (parts.length < 2) continue;
 
     const pin = parts[0]?.trim();       // member_number
     const dateStr = parts[1]?.trim();   // "YYYY-MM-DD HH:MM:SS"
-    // const statusStr = parts[2]?.trim(); // 0=check-in, 1=check-out
 
     if (!pin || !dateStr) continue;
 
     try {
-      await processPunch({ adminClient, pin, dateStr });
-    } catch (err) {
+      const res = await processPunch({ adminClient, pin, dateStr });
+      if (res?.reason) {
+        results.push(`[Pin #${pin}]: ${res.reason}`);
+      } else {
+        results.push(`[Pin #${pin}]: Processed`);
+      }
+    } catch (err: any) {
       console.error(`[Biometric] Error processing punch for pin=${pin}:`, err);
+      results.push(`[Pin #${pin} Error]: ${err.message}`);
     }
   }
 
-  // Always respond OK — the device will retry on any non-200 response
-  return new Response('OK', {
+  return new Response(`OK\n${results.join('\n')}`, {
     status: 200,
     headers: { 'Content-Type': 'text/plain; charset=utf-8' },
   });
@@ -158,16 +163,32 @@ async function processPunch({
   }
 
   // Look up active member by member_number (pin)
-  const { data: member, error: memberErr } = await adminClient
+  // Try exact match first
+  let { data: member } = await adminClient
     .from('members')
     .select('id, full_name, photo_url, member_number')
     .eq('member_number', pin)
     .eq('active', true)
-    .single();
+    .maybeSingle();
 
-  if (memberErr || !member) {
-    console.warn(`[Biometric] No active member found for pin=${pin}`);
-    return;
+  // Fallback 1: Try integer equivalence (e.g. pin '1' matches member_number '0001' or '001')
+  if (!member && !isNaN(Number(pin))) {
+    const numPin = Number(pin).toString();
+    const { data: allActiveMembers } = await adminClient
+      .from('members')
+      .select('id, full_name, photo_url, member_number')
+      .eq('active', true);
+
+    if (allActiveMembers) {
+      member = allActiveMembers.find(
+        (m: any) => m.member_number && Number(m.member_number) === Number(pin)
+      ) || null;
+    }
+  }
+
+  if (!member) {
+    console.warn(`[Biometric] No active member found matching pin/member_number="${pin}"`);
+    return { success: false, reason: `No active member with member_number="${pin}" found in database` };
   }
 
   // Determine the UTC date for this punch (used for "same day" dedup check)
