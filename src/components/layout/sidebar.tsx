@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard, Users, CalendarCheck, MessageSquare,
-  Receipt, Settings, LogOut, Dumbbell, Menu, X
+  Receipt, Settings, LogOut, Dumbbell, Menu, X, Landmark
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useRole } from '@/hooks/use-role';
@@ -24,6 +24,7 @@ const NAV_ITEMS = [
   { to: '/attendance', label: 'Attendance', icon: CalendarCheck, adminOnly: false },
   { to: '/enquiries', label: 'Enquiries', icon: MessageSquare, adminOnly: true },
   { to: '/expenses', label: 'Expenses', icon: Receipt, adminOnly: true },
+  { to: '/reserve-account', label: 'Reserve', icon: Landmark, adminOnly: true },
   { to: '/settings', label: 'Settings', icon: Settings, adminOnly: true },
 ];
 
@@ -63,7 +64,7 @@ export function Sidebar() {
   // Redirect staff from admin-only pages
   useEffect(() => {
     if (roleLoading || !role) return;
-    if (role !== 'admin' && (pathname === '/dashboard' || pathname === '/expenses' || pathname === '/settings' || pathname === '/enquiries')) {
+    if (role !== 'admin' && (pathname === '/dashboard' || pathname === '/expenses' || pathname === '/settings' || pathname === '/enquiries' || pathname === '/reserve-account')) {
       router.replace('/members');
     }
   }, [role, roleLoading, pathname, router]);

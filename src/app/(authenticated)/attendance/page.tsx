@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
   CalendarCheck, Plus, Search, Loader2, Clock, LogOut,
-  UserCheck, Shield, Coffee, ChevronDown, ChevronUp, UserX, AlertCircle, Wifi, Fingerprint
+  UserCheck, Shield, Coffee, ChevronDown, ChevronUp, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -32,6 +32,7 @@ export default function AttendancePage() {
 
   // --- Live data state (driven by realtime sockets) ---
   const [attendance, setAttendance] = useState<any[]>([]);
+  const [memberFeeStatuses, setMemberFeeStatuses] = useState<Record<string, { status: 'paid' | 'due' | 'overdue'; amountDue?: number }>>({});
   const [isLoadingMemberAtt, setIsLoadingMemberAtt] = useState(true);
   const [members, setMembers] = useState<any[]>([]);
   const [staffAttendance, setStaffAttendance] = useState<StaffDayAttendance[]>([]);
@@ -55,13 +56,58 @@ export default function AttendancePage() {
       .gte('check_in', `${forDate}T00:00:00`)
       .lt('check_in', nextDay.toISOString().slice(0, 10) + 'T00:00:00')
       .order('check_in', { ascending: false });
-    setIsLoadingMemberAtt(false);
-    if (!error) {
+
+    if (!error && data) {
       setAttendance(data ?? []);
+
       // Track last biometric device activity
       const lastBio = (data ?? []).find((a: any) => a.source === 'biometric');
       if (lastBio) setLastBiometricPing(lastBio.check_in);
+
+      // Fetch latest fee status for each member present
+      const memberIds = Array.from(new Set(data.map((a: any) => a.member_id).filter(Boolean)));
+      if (memberIds.length > 0) {
+        const { data: feeData } = await supabase
+          .from('fee_records')
+          .select('member_id, paid, amount, discount, amount_paid, period_month, period_end, status')
+          .in('member_id', memberIds)
+          .order('period_month', { ascending: false });
+
+        if (feeData) {
+          const today = new Date();
+          const feeMap: Record<string, { status: 'paid' | 'due' | 'overdue'; amountDue?: number }> = {};
+
+          feeData.forEach((fr: any) => {
+            if (!feeMap[fr.member_id]) {
+              const isPaid = fr.paid ?? (fr.status === 'paid');
+              const feeAmount = Number(fr.amount) || 0;
+              const discount = Number(fr.discount) || 0;
+              const amountPaid = Number(fr.amount_paid) || 0;
+              const effectiveDue = Math.max(0, feeAmount - discount - amountPaid);
+
+              let status: 'paid' | 'due' | 'overdue' = 'due';
+              if (isPaid || effectiveDue === 0) {
+                status = 'paid';
+              } else if (fr.period_end && new Date(fr.period_end) < today) {
+                status = 'overdue';
+              } else {
+                status = 'due';
+              }
+
+              feeMap[fr.member_id] = {
+                status,
+                amountDue: effectiveDue > 0 ? effectiveDue : feeAmount,
+              };
+            }
+          });
+
+          setMemberFeeStatuses(feeMap);
+        }
+      } else {
+        setMemberFeeStatuses({});
+      }
     }
+    setIsLoadingMemberAtt(false);
   }, []);
 
   // ─────────────────────────────────────────────────────────────────
@@ -307,7 +353,7 @@ export default function AttendancePage() {
                     <tr className="border-b border-border bg-accent/20">
                       <th className="text-left p-4 font-medium text-muted-foreground">Member</th>
                       <th className="text-left p-4 font-medium text-muted-foreground">Check In</th>
-                      <th className="text-left p-4 font-medium text-muted-foreground">Check Out</th>
+                      <th className="text-left p-4 font-medium text-muted-foreground">Fee Status</th>
                       <th className="text-left p-4 font-medium text-muted-foreground hidden md:table-cell">Source</th>
                       <th className="text-left p-4 font-medium text-muted-foreground hidden sm:table-cell">Marked By</th>
                     </tr>
@@ -315,13 +361,13 @@ export default function AttendancePage() {
                   <tbody>
                     {isLoadingMemberAtt ? (
                       <tr>
-                        <td colSpan={4} className="text-center py-12">
+                        <td colSpan={5} className="text-center py-12">
                           <Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" />
                         </td>
                       </tr>
                     ) : attendance.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="text-center py-12 text-muted-foreground">
+                        <td colSpan={5} className="text-center py-12 text-muted-foreground">
                           No member attendance records for this date
                         </td>
                       </tr>
@@ -346,23 +392,34 @@ export default function AttendancePage() {
                             </div>
                           </td>
                           <td className="p-4">
-                            {a.check_out ? (
-                              <div className="flex items-center gap-2 text-muted-foreground font-mono text-xs">
-                                <Clock className="h-3.5 w-3.5" />
-                                {new Date(a.check_out).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
-                              </div>
-                            ) : (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="h-8 text-amber-500 border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-500"
-                                onClick={() => checkOutMutation.mutate(a.id)}
-                                disabled={checkOutMutation.isPending}
-                              >
-                                <LogOut className="h-3.5 w-3.5 mr-1" />
-                                Check Out
-                              </Button>
-                            )}
+                            {(() => {
+                              const feeInfo = memberFeeStatuses[a.member_id];
+                              const rawStatus = a.fee_status || feeInfo?.status || 'due';
+                              const amountDue = a.fee_amount_due ?? feeInfo?.amountDue;
+
+                              if (rawStatus === 'paid') {
+                                return (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                                    <CheckCircle className="h-3.5 w-3.5" />
+                                    Fee Paid
+                                  </span>
+                                );
+                              }
+                              if (rawStatus === 'overdue') {
+                                return (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-500/15 text-red-400 border border-red-500/30">
+                                    <AlertCircle className="h-3.5 w-3.5" />
+                                    Overdue {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
+                                  </span>
+                                );
+                              }
+                              return (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                                  <Clock className="h-3.5 w-3.5" />
+                                  Fee Due {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td className="p-4 hidden md:table-cell">
                             {a.source === 'biometric' ? (
@@ -669,19 +726,9 @@ export default function AttendancePage() {
                     </div>
                   </div>
                   {existingRecord ? (
-                    existingRecord.check_out ? (
-                      <Badge variant="secondary" className="text-xs">Checked out</Badge>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-8 text-amber-500 border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-500"
-                        onClick={() => checkOutMutation.mutate(existingRecord.id)}
-                        disabled={checkOutMutation.isPending}
-                      >
-                        <LogOut className="h-3.5 w-3.5 mr-1" /> Check Out
-                      </Button>
-                    )
+                    <Badge variant="secondary" className="text-xs bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                      Already Marked
+                    </Badge>
                   ) : (
                     <Button
                       size="sm"

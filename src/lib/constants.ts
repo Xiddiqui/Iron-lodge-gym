@@ -5,6 +5,7 @@ export const EXPENSE_CATEGORIES = [
   { value: 'maintenance', label: 'Maintenance', color: 'bg-orange-500' },
   { value: 'equipment', label: 'Equipment', color: 'bg-cyan-500' },
   { value: 'misc', label: 'Misc', color: 'bg-gray-500' },
+  { value: 'reserve', label: 'Reserve', color: 'bg-emerald-500' },
 ] as const;
 
 export type ExpenseCategory = typeof EXPENSE_CATEGORIES[number]['value'];

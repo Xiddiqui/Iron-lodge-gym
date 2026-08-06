@@ -23,7 +23,7 @@ export default function ExpensesPage() {
   const queryClient = useQueryClient();
   const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', category: 'misc', amount: '', expense_date: new Date().toISOString().slice(0, 10), notes: '' });
+  const [form, setForm] = useState({ name: '', category: 'misc', amount: '', expense_date: new Date().toISOString().slice(0, 10), notes: '', is_reserve: false });
 
   const monthStart = `${selectedMonth}-01`;
   const [y, m] = selectedMonth.split('-').map(Number);
@@ -33,7 +33,7 @@ export default function ExpensesPage() {
     queryKey: ['expenses', monthStart, monthEnd],
     enabled: role === 'admin',
     queryFn: async () => {
-      const { data, error } = await supabase.from('expenses').select('*').gte('expense_date', monthStart).lt('expense_date', monthEnd).order('expense_date', { ascending: false });
+      const { data, error } = await supabase.from('expenses').select('*').gte('expense_date', monthStart).lt('expense_date', monthEnd).eq('is_reserve', false).order('expense_date', { ascending: false });
       if (error) throw error;
       return data;
     },
@@ -55,6 +55,7 @@ export default function ExpensesPage() {
         category: data.category,
         amount: numAmount,
         expense_date: data.expense_date || new Date().toISOString().slice(0, 10),
+        is_reserve: data.is_reserve || false,
       };
       if (data.notes && data.notes.trim()) {
         payload.notes = data.notes.trim();
@@ -78,6 +79,7 @@ export default function ExpensesPage() {
       queryClient.invalidateQueries({ queryKey: ['expenses'] });
       queryClient.invalidateQueries({ queryKey: ['dash-expenses'] });
       queryClient.invalidateQueries({ queryKey: ['dash-trend'] });
+      queryClient.invalidateQueries({ queryKey: ['reserve-'] });
       toast.success('Expense added successfully');
       setDialogOpen(false);
     },
@@ -118,7 +120,7 @@ export default function ExpensesPage() {
             <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
             <SelectContent>{monthOptions.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
           </Select>
-          <Button onClick={() => { setForm({ name: '', category: 'misc', amount: '', expense_date: new Date().toISOString().slice(0, 10), notes: '' }); setDialogOpen(true); }}>
+          <Button onClick={() => { setForm({ name: '', category: 'misc', amount: '', expense_date: new Date().toISOString().slice(0, 10), notes: '', is_reserve: false }); setDialogOpen(true); }}>
             <Plus className="h-4 w-4 mr-1" /> Add Expense
           </Button>
         </div>
@@ -189,6 +191,27 @@ export default function ExpensesPage() {
             <div className="space-y-2">
               <Label>Notes</Label>
               <Input placeholder="Optional notes" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+            </div>
+            
+            <div className="flex items-center gap-3 p-3 rounded-lg border border-border/50 bg-accent/10">
+              <input 
+                type="checkbox" 
+                id="is-reserve" 
+                checked={form.is_reserve} 
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setForm({
+                    ...form,
+                    is_reserve: checked,
+                    category: checked ? 'reserve' : (form.category === 'reserve' ? 'misc' : form.category)
+                  });
+                }} 
+                className="h-4 w-4 rounded accent-emerald-500" 
+              />
+              <Label htmlFor="is-reserve" className="text-sm cursor-pointer">
+                Deduct from Reserve Account
+                <span className="block text-xs text-muted-foreground">This expense will be tracked in the Reserve Account instead of the main dashboard</span>
+              </Label>
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>

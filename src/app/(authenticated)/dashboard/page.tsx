@@ -5,12 +5,15 @@ import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { useRole } from '@/hooks/use-role';
 import { formatCurrency, formatDate, formatMonthYear } from '@/lib/format';
+import { useGymSettings } from '@/hooks/use-gym-settings';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
 import { motion, useMotionValue, useTransform, animate } from 'framer-motion';
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
-import { Wallet, Receipt, Zap, UserCheck, ArrowUpRight, ArrowDownRight, TrendingUp, Target, History } from 'lucide-react';
+import { Wallet, Receipt, Zap, UserCheck, ArrowUpRight, ArrowDownRight, TrendingUp, Target, History, Landmark } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 function AnimatedNumber({ value, format }: { value: number; format: (n: number) => string }) {
@@ -23,19 +26,84 @@ function AnimatedNumber({ value, format }: { value: number; format: (n: number) 
   return <motion.span>{display}</motion.span>;
 }
 
+const isToday = (dateStr: string | null) => {
+  if (!dateStr) return false;
+  const d = new Date(dateStr);
+  const today = new Date();
+  return (
+    d.getFullYear() === today.getFullYear() &&
+    d.getMonth() === today.getMonth() &&
+    d.getDate() === today.getDate()
+  );
+};
+
+const isPastNDays = (dateStr: string | null, days: number) => {
+  if (!dateStr) return false;
+  const d = new Date(dateStr);
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - (days - 1));
+  cutoff.setHours(0, 0, 0, 0);
+  return d >= cutoff;
+};
+
+function formatPaymentDateTime(dateStr: string | null) {
+  if (!dateStr) return 'N/A';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return 'N/A';
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+function formatPaymentTime(dateStr: string | null) {
+  if (!dateStr) return 'N/A';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return 'N/A';
+  return d.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
 const CHART_COLORS = { revenue: '#a3e635', expenses: '#ef4444', profit: '#22c55e' };
-const PIE_COLORS = ['#a3e635', '#ef4444'];
+const PIE_COLORS = ['#a3e635', '#f97316', '#ef4444'];
 
 export default function DashboardPage() {
   const { data: role } = useRole();
+  const { data: settings } = useGymSettings();
   const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [trendMonths, setTrendMonths] = useState(6);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [modalFilter, setModalFilter] = useState<'today' | '7days' | '30days'>('today');
 
   const [year, month] = selectedMonth.split('-').map(Number);
   const monthStart = `${selectedMonth}-01`;
   const nextYear = month === 12 ? year + 1 : year;
   const nextMonth = month === 12 ? 1 : month + 1;
   const monthEnd = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
+
+  // Query for recent payment records (Today's payments & modal history)
+  const { data: allPaymentRecords = [] } = useQuery({
+    queryKey: ['dash-recent-payment-records'],
+    enabled: role === 'admin',
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('fee_records')
+        .select('id, amount, amount_paid, paid, paid_at, payment_method, member_id, period_month, period_end, members(full_name, phone)')
+        .or('paid.eq.true,amount_paid.gt.0')
+        .order('paid_at', { ascending: false, nullsFirst: false })
+        .limit(300);
+
+      if (error) throw error;
+      return data ?? [];
+    },
+  });
 
   // Fee records for the month with auto-sync for missing member records
   const { data: fees = [] } = useQuery({
@@ -118,6 +186,7 @@ export default function DashboardPage() {
       const { data, error } = await supabase
         .from('expenses')
         .select('id, amount, category, expense_date, name')
+        .eq('is_reserve', false)
         .gte('expense_date', monthStart)
         .lt('expense_date', monthEnd)
         .order('expense_date', { ascending: false });
@@ -158,6 +227,7 @@ export default function DashboardPage() {
         supabase
           .from('expenses')
           .select('amount, expense_date')
+          .eq('is_reserve', false)
           .gte('expense_date', startKey)
           .lt('expense_date', endKey),
       ]);
@@ -204,23 +274,51 @@ export default function DashboardPage() {
   }, 0);
   const totalExpenses = expenses.reduce((s: number, e: any) => s + Number(e.amount), 0);
   const netProfit = totalRevenue - totalExpenses;
-  const paidCount = fees.filter((f: any) => f.paid).length;
-  const unpaidCount = fees.filter((f: any) => !f.paid).length;
+  const reserve = netProfit > 0 ? (netProfit * (settings?.reserve_percentage || 0) / 100) : 0
+  const fullyPaidCount = fees.filter((f: any) => f.paid || (Number(f.amount_paid) >= Number(f.amount) && Number(f.amount) > 0)).length;
+  const partiallyPaidCount = fees.filter((f: any) => !f.paid && Number(f.amount_paid) > 0 && Number(f.amount_paid) < Number(f.amount)).length;
+  const unpaidCount = fees.filter((f: any) => !f.paid && (Number(f.amount_paid) || 0) === 0).length;
+
+  // Payments calculations for Today's Card & Modal
+  const todayPayments = allPaymentRecords.filter((f: any) => isToday(f.paid_at));
+  const todayTotalCollected = todayPayments.reduce((sum: number, f: any) => {
+    const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
+    return sum + amtPaid;
+  }, 0);
+
+  const filteredModalPayments = allPaymentRecords.filter((f: any) => {
+    if (modalFilter === 'today') return isToday(f.paid_at);
+    if (modalFilter === '7days') return isPastNDays(f.paid_at, 7);
+    if (modalFilter === '30days') return isPastNDays(f.paid_at, 30);
+    return true;
+  });
+
+  const modalTotalCollected = filteredModalPayments.reduce((sum: number, f: any) => {
+    const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
+    return sum + amtPaid;
+  }, 0);
+
+  const modalFullCount = filteredModalPayments.filter((f: any) => {
+    const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
+    return f.paid || (amtPaid >= Number(f.amount) && Number(f.amount) > 0);
+  }).length;
+
+  const modalPartialCount = filteredModalPayments.length - modalFullCount;
 
   // Expense breakdown by category
   const expenseByCategory = expenses.reduce((acc: Record<string, number>, e: any) => {
     acc[e.category] = (acc[e.category] || 0) + Number(e.amount);
     return acc;
   }, {});
-  // const expenseChartData = Object.entries(expenseByCategory).map(([cat, amt]) => ({ category: cat, amount: amt }));
+  
   const categoryColors: Record<string, string> = { rent: '#64748b', utility: '#3b82f6', salary: '#a855f7', maintenance: '#f97316', equipment: '#06b6d4', misc: '#6b7280' };
-
   const categories = ["misc", "salary", "rent", "maintenance", "utility"];
 
-const expenseChartData = categories.map((cat) => ({
-  category: cat,
-  amount: expenseByCategory[cat] || 0 // Use the value from DB, or 0 if it doesn't exist
-}));
+  const expenseChartData = categories.map((cat) => ({
+    category: cat,
+    amount: expenseByCategory[cat] || 0
+  }));
+
   // Month options
   const monthOptions = Array.from({ length: 12 }, (_, i) => {
     const d = new Date();
@@ -253,7 +351,7 @@ const expenseChartData = categories.map((cat) => ({
       </div>
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <Card>
           <CardContent className="p-5">
             <div className="flex items-center justify-between">
@@ -288,7 +386,7 @@ const expenseChartData = categories.map((cat) => ({
             </div>
             <div className="mt-3">
               <p className="text-sm text-muted-foreground">Net Profit</p>
-              <p className="text-2xl font-display font-bold"><AnimatedNumber value={netProfit} format={formatCurrency} /></p>
+              <p className="text-2xl font-display font-bold"><AnimatedNumber value={netProfit - reserve} format={formatCurrency} /></p>
             </div>
           </CardContent>
         </Card>
@@ -304,6 +402,19 @@ const expenseChartData = categories.map((cat) => ({
             </div>
           </CardContent>
         </Card>
+        {(settings?.reserve_percentage ?? 0) > 0 && (
+          <Card>
+            <CardContent className="p-5">
+              <div className="flex items-center justify-between">
+                <div className="h-10 w-10 rounded-lg bg-emerald-500/20 grid place-items-center"><Landmark className="h-5 w-5 text-emerald-400" /></div>
+              </div>
+              <div className="mt-3">
+                <p className="text-sm text-muted-foreground">Reserve (This Month)</p>
+                <p className="text-2xl font-display font-bold"><AnimatedNumber value={netProfit > 0 ? (netProfit * (settings?.reserve_percentage || 0) / 100) : 0} format={formatCurrency} /></p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       {/* Charts Row */}
@@ -351,7 +462,19 @@ const expenseChartData = categories.map((cat) => ({
             <div className="h-64 flex items-center justify-center">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
-                  <Pie data={[{ name: 'Paid', value: paidCount }, { name: 'Unpaid', value: unpaidCount }]} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={5} dataKey="value">
+                  <Pie
+                  data={[
+                    { name: 'Paid', value: fullyPaidCount },
+                    { name: 'Partially Paid', value: partiallyPaidCount },
+                    { name: 'Unpaid', value: unpaidCount },
+                  ]}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={50}
+                  outerRadius={80}
+                  paddingAngle={5}
+                  dataKey="value"
+                >
                     {PIE_COLORS.map((color, i) => <Cell key={i} fill={color} />)}
                   </Pie>
                   <Tooltip contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
@@ -365,29 +488,75 @@ const expenseChartData = categories.map((cat) => ({
 
       {/* Bottom Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Recent Payments */}
+        {/* Today's Payments */}
         <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base"><History className="inline h-4 w-4 mr-2" />Recent Payments</CardTitle>
+          <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
+            <CardTitle className="text-base flex items-center gap-2">
+              <History className="h-4 w-4 text-primary" />
+              Today's Payments
+            </CardTitle>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setModalFilter('today');
+                setIsModalOpen(true);
+              }}
+              className="text-xs text-primary hover:text-primary hover:bg-primary/10 h-7 px-2 font-medium"
+            >
+              View All <ArrowUpRight className="h-3 w-3 ml-1" />
+            </Button>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
-              {fees.filter((f: any) => f.paid).slice(0, 5).map((f: any) => (
-                <div key={f.id} className="flex items-center justify-between py-2 border-b border-border/50 last:border-0">
-                  <div>
-                    <p className="text-sm font-medium">{(f.members as any)?.full_name ?? 'Unknown'}</p>
-                    <p className="text-xs text-muted-foreground">{formatDate(f.paid_at)}</p>
+              {todayPayments.slice(0, 5).map((f: any) => {
+                const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
+                const totalAmount = Number(f.amount) || 0;
+                const isFullyPaid = f.paid || (amtPaid >= totalAmount && totalAmount > 0);
+                const isPartial = !isFullyPaid && amtPaid > 0;
+
+                return (
+                  <div key={f.id} className="flex items-center justify-between py-2 border-b border-border/50 last:border-0">
+                    <div>
+                      <p className="text-sm font-medium">{(f.members as any)?.full_name ?? 'Unknown Member'}</p>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <p className="text-xs text-muted-foreground">{formatPaymentTime(f.paid_at)}</p>
+                        {f.payment_method && (
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-muted text-muted-foreground uppercase font-mono">
+                            {f.payment_method}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-semibold text-primary">{formatCurrency(amtPaid)}</p>
+                      {isPartial ? (
+                        <div className="flex items-center justify-end gap-1 mt-0.5">
+                          <span className="text-[10px] text-muted-foreground">of {formatCurrency(totalAmount)}</span>
+                          <Badge variant="warning" className="text-[10px] px-1.5 py-0">Partial</Badge>
+                        </div>
+                      ) : (
+                        <Badge variant="success" className="text-[10px] px-1.5 py-0 mt-0.5">Paid</Badge>
+                      )}
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <p className="text-sm font-semibold text-primary">{formatCurrency(f.amount)}</p>
-                    <Badge variant="success" className="text-[10px]">Paid</Badge>
-                  </div>
+                );
+              })}
+
+              {todayPayments.length === 0 && (
+                <div className="text-center py-6 text-muted-foreground">
+                  <Receipt className="h-8 w-8 mx-auto mb-2 opacity-40 text-muted-foreground" />
+                  <p className="text-sm">No payments received today</p>
                 </div>
-              ))}
-              {fees.filter((f: any) => f.paid).length === 0 && (
-                <p className="text-sm text-muted-foreground text-center py-4">No payments yet</p>
               )}
             </div>
+
+            {todayPayments.length > 0 && (
+              <div className="mt-4 pt-3 border-t border-border/50 flex items-center justify-between text-xs text-muted-foreground">
+                <span>Today's Total ({todayPayments.length} {todayPayments.length === 1 ? 'payment' : 'payments'}):</span>
+                <span className="font-bold text-primary text-sm">{formatCurrency(todayTotalCollected)}</span>
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -415,6 +584,145 @@ const expenseChartData = categories.map((cat) => ({
           </CardContent>
         </Card>
       </div>
+
+      {/* Payment Details Popup Modal */}
+      <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col p-6">
+          <DialogHeader className="pb-2">
+            <DialogTitle className="flex items-center gap-2 text-lg">
+              <History className="h-5 w-5 text-primary" />
+              Payment History Details
+            </DialogTitle>
+            <DialogDescription>
+              Review detailed payment transactions, filter by timeframe, and track partial or full collections.
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Filter Buttons */}
+          <div className="flex items-center gap-2 my-3 p-1 bg-muted/50 rounded-lg border border-border/50">
+            <button
+              type="button"
+              onClick={() => setModalFilter('today')}
+              className={cn(
+                'flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer',
+                modalFilter === 'today'
+                  ? 'bg-background text-foreground shadow-sm font-semibold'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+            >
+              Today ({todayPayments.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setModalFilter('7days')}
+              className={cn(
+                'flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer',
+                modalFilter === '7days'
+                  ? 'bg-background text-foreground shadow-sm font-semibold'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+            >
+              Past 7 Days ({allPaymentRecords.filter((f: any) => isPastNDays(f.paid_at, 7)).length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setModalFilter('30days')}
+              className={cn(
+                'flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer',
+                modalFilter === '30days'
+                  ? 'bg-background text-foreground shadow-sm font-semibold'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+            >
+              Past 30 Days ({allPaymentRecords.filter((f: any) => isPastNDays(f.paid_at, 30)).length})
+            </button>
+          </div>
+
+          {/* Summary Cards Row inside Modal */}
+          <div className="grid grid-cols-3 gap-3 mb-3">
+            <div className="bg-card border border-border/60 rounded-lg p-3">
+              <p className="text-[11px] text-muted-foreground uppercase font-medium">Total Collected</p>
+              <p className="text-lg font-bold text-primary mt-0.5">{formatCurrency(modalTotalCollected)}</p>
+            </div>
+            <div className="bg-card border border-border/60 rounded-lg p-3">
+              <p className="text-[11px] text-muted-foreground uppercase font-medium">Full Payments</p>
+              <p className="text-lg font-bold text-green-400 mt-0.5">{modalFullCount}</p>
+            </div>
+            <div className="bg-card border border-border/60 rounded-lg p-3">
+              <p className="text-[11px] text-muted-foreground uppercase font-medium">Partial Payments</p>
+              <p className="text-lg font-bold text-yellow-400 mt-0.5">{modalPartialCount}</p>
+            </div>
+          </div>
+
+          {/* Payment Records List */}
+          <div className="flex-1 overflow-y-auto pr-1 space-y-2.5 max-h-[360px] min-h-[200px]">
+            {filteredModalPayments.length === 0 ? (
+              <div className="text-center py-12 text-muted-foreground">
+                <Receipt className="h-10 w-10 mx-auto mb-2 opacity-30" />
+                <p className="text-sm font-medium">No payments found for this period</p>
+              </div>
+            ) : (
+              filteredModalPayments.map((f: any) => {
+                const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
+                const totalAmount = Number(f.amount) || 0;
+                const remaining = Math.max(0, totalAmount - amtPaid);
+                const isFullyPaid = f.paid || (amtPaid >= totalAmount && totalAmount > 0);
+                const isPartial = !isFullyPaid && amtPaid > 0;
+
+                return (
+                  <div
+                    key={f.id}
+                    className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-lg border border-border/50 bg-accent/20 hover:bg-accent/40 transition-colors gap-2"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-semibold">{(f.members as any)?.full_name ?? 'Unknown Member'}</p>
+                        {(f.members as any)?.phone && (
+                          <span className="text-xs text-muted-foreground">({(f.members as any)?.phone})</span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <span>{formatPaymentDateTime(f.paid_at)}</span>
+                        {f.payment_method && (
+                          <span className="px-1.5 py-0.5 rounded bg-muted text-[10px] uppercase font-mono text-muted-foreground">
+                            {f.payment_method}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="sm:text-right flex sm:flex-col justify-between items-end gap-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-primary">{formatCurrency(amtPaid)}</span>
+                        {isPartial ? (
+                          <Badge variant="warning" className="text-[10px]">Partial</Badge>
+                        ) : (
+                          <Badge variant="success" className="text-[10px]">Paid</Badge>
+                        )}
+                      </div>
+                      {isPartial && (
+                        <p className="text-[11px] text-muted-foreground">
+                          Total: {formatCurrency(totalAmount)} • <span className="text-red-400">Due: {formatCurrency(remaining)}</span>
+                        </p>
+                      )}
+                      {isFullyPaid && totalAmount > 0 && (
+                        <p className="text-[11px] text-muted-foreground">Total Fee: {formatCurrency(totalAmount)}</p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <DialogFooter className="mt-4 pt-3 border-t border-border">
+            <Button variant="outline" size="sm" onClick={() => setIsModalOpen(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
+

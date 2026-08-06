@@ -927,51 +927,55 @@ export default function MembersPage() {
           </div>
 
           {/* Gender Filter Buttons: All, Male, Female */}
-          <div className="flex items-center gap-1 bg-muted/60 p-1 rounded-lg border border-border">
-            <Button
-              type="button"
-              variant={genderFilter === 'all' ? 'default' : 'ghost'}
-              size="sm"
-              onClick={() => setGenderFilter('all')}
-              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
-                genderFilter === 'all' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              All
-            </Button>
-            <Button
-              type="button"
-              variant={genderFilter === 'male' ? 'default' : 'ghost'}
-              size="sm"
-              onClick={() => setGenderFilter('male')}
-              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
-                genderFilter === 'male' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              Male
-            </Button>
-            <Button
-              type="button"
-              variant={genderFilter === 'female' ? 'default' : 'ghost'}
-              size="sm"
-              onClick={() => setGenderFilter('female')}
-              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
-                genderFilter === 'female' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              Female
-            </Button>
-          </div>
+          {isAdmin ? 
+        <div className="flex items-center gap-1 bg-muted/60 p-1 rounded-lg border border-border">
+        <Button
+          type="button"
+          variant={genderFilter === 'all' ? 'default' : 'ghost'}
+          size="sm"
+          onClick={() => setGenderFilter('all')}
+          className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+            genderFilter === 'all' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          All
+        </Button>
+        <Button
+          type="button"
+          variant={genderFilter === 'male' ? 'default' : 'ghost'}
+          size="sm"
+          onClick={() => setGenderFilter('male')}
+          className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+            genderFilter === 'male' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          Male
+        </Button>
+        <Button
+          type="button"
+          variant={genderFilter === 'female' ? 'default' : 'ghost'}
+          size="sm"
+          onClick={() => setGenderFilter('female')}
+          className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+            genderFilter === 'female' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          Female
+        </Button>
+      </div>
+      : null  
+        }
+          
         </div>
 
-        <Select value={filter} onValueChange={(v) => setFilter(v as typeof filter)}>
+        {/* <Select value={filter} onValueChange={(v) => setFilter(v as typeof filter)}>
           <SelectTrigger className="w-36 h-9"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Status</SelectItem>
             <SelectItem value="active">Active</SelectItem>
             <SelectItem value="inactive">Inactive</SelectItem>
           </SelectContent>
-        </Select>
+        </Select> */}
       </div>
 
       <Card>
