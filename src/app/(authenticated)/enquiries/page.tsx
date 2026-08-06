@@ -5,11 +5,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { useRole } from '@/hooks/use-role';
 import { useRouter } from 'next/navigation';
-import { formatDate } from '@/lib/format';
+import { formatDate, formatPhoneForWA } from '@/lib/format';
 import { ENQUIRY_STATUSES } from '@/lib/constants';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { toast } from 'sonner';
 import { MessageSquare, Loader2, Mail, Phone, Eye, User, CalendarDays, MessageCircle } from 'lucide-react';
 
 export default function EnquiriesPage() {
@@ -37,14 +40,14 @@ export default function EnquiriesPage() {
     enabled: role === 'admin',
   });
 
-  // Mark all unread enquiries as read on visit
+  // Mark all unread or 'new' enquiries as read on visit
   useEffect(() => {
-    if (enquiries.length > 0 && enquiries.some((e: any) => e.is_read === false)) {
+    if (enquiries.length > 0 && enquiries.some((e: any) => e.is_read === false || e.status === 'new')) {
       (async () => {
         const { error } = await supabase
           .from('enquiries')
-          .update({ is_read: true })
-          .eq('is_read', false);
+          .update({ is_read: true, status: 'read' })
+          .or('is_read.eq.false,status.eq.new');
         if (!error) {
           queryClient.invalidateQueries({ queryKey: ['enquiries-unread-count'] });
           queryClient.invalidateQueries({ queryKey: ['enquiries'] });
@@ -53,10 +56,40 @@ export default function EnquiriesPage() {
     }
   }, [enquiries, queryClient]);
 
-  function openView(e: any) {
+  async function openView(e: any) {
     setViewing(e);
     setDialogOpen(true);
+
+    if (e.status === 'new' || !e.is_read) {
+      const nextStatus = e.status === 'new' ? 'read' : e.status;
+      const { error } = await supabase
+        .from('enquiries')
+        .update({ is_read: true, status: nextStatus })
+        .eq('id', e.id);
+
+      if (!error) {
+        setViewing((prev: any) => (prev?.id === e.id ? { ...prev, is_read: true, status: nextStatus } : prev));
+        queryClient.invalidateQueries({ queryKey: ['enquiries-unread-count'] });
+        queryClient.invalidateQueries({ queryKey: ['enquiries'] });
+      }
+    }
   }
+
+  const handleUpdateStatus = async (newStatus: string) => {
+    if (!viewing) return;
+    const { error } = await supabase
+      .from('enquiries')
+      .update({ status: newStatus })
+      .eq('id', viewing.id);
+
+    if (error) {
+      toast.error('Failed to update status');
+    } else {
+      toast.success(`Status updated to ${ENQUIRY_STATUSES.find((s) => s.value === newStatus)?.label || newStatus}`);
+      setViewing({ ...viewing, status: newStatus });
+      queryClient.invalidateQueries({ queryKey: ['enquiries'] });
+    }
+  };
 
   const getStatusStyle = (status: string) => ENQUIRY_STATUSES.find((s) => s.value === status);
 
@@ -110,7 +143,7 @@ export default function EnquiriesPage() {
                       </div>
                     </td>
                     <td className="p-4 hidden lg:table-cell text-muted-foreground max-w-xs truncate">{e.message || '—'}</td>
-                    <td className="p-4"><Badge className={getStatusStyle(e.status)?.color}>{getStatusStyle(e.status)?.label}</Badge></td>
+                    <td className="p-4"><Badge className={getStatusStyle(e.status)?.color}>{getStatusStyle(e.status)?.label || e.status}</Badge></td>
                     <td className="p-4 hidden md:table-cell text-muted-foreground">{formatDate(e.created_at)}</td>
                   </tr>
                 ))}
@@ -120,7 +153,7 @@ export default function EnquiriesPage() {
         </CardContent>
       </Card>
 
-      {/* Read-only detail popup */}
+      {/* Detail popup */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
@@ -163,15 +196,61 @@ export default function EnquiriesPage() {
                 </div>
               </div>
 
-              {/* Status & Date */}
-              <div className="flex items-center justify-between pt-2 border-t border-border/50">
+              {/* Status Selector & Date */}
+              <div className="flex items-center justify-between pt-3 border-t border-border/50">
                 <div className="flex items-center gap-2">
-                  <Badge className={getStatusStyle(viewing.status)?.color}>{getStatusStyle(viewing.status)?.label}</Badge>
+                  <span className="text-xs text-muted-foreground">Status:</span>
+                  <Select value={viewing.status} onValueChange={handleUpdateStatus}>
+                    <SelectTrigger className="w-[140px] h-8 text-xs">
+                      <SelectValue>
+                        <Badge className={getStatusStyle(viewing.status)?.color}>
+                          {getStatusStyle(viewing.status)?.label || viewing.status}
+                        </Badge>
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {ENQUIRY_STATUSES.map((s) => (
+                        <SelectItem key={s.value} value={s.value} className="text-xs">
+                          <Badge className={s.color}>{s.label}</Badge>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   <CalendarDays className="h-3.5 w-3.5" />
                   {formatDate(viewing.created_at)}
                 </div>
+              </div>
+
+              {/* WhatsApp Action Button */}
+              <div className="pt-3 border-t border-border/50 flex items-center justify-between gap-3">
+                <div className="text-xs text-muted-foreground truncate">
+                  {viewing.phone ? (
+                    <span>WhatsApp: <strong className="text-foreground">{viewing.phone}</strong></span>
+                  ) : (
+                    <span className="text-muted-foreground italic">No phone number provided</span>
+                  )}
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium flex items-center gap-2 shadow-sm shrink-0"
+                  disabled={!viewing.phone || !formatPhoneForWA(viewing.phone)}
+                  onClick={() => {
+                    const waPhone = formatPhoneForWA(viewing.phone);
+                    if (!waPhone) {
+                      toast.error('No valid phone number for WhatsApp reply');
+                      return;
+                    }
+                    const text = encodeURIComponent(`Hi ${viewing.name}, thank you for reaching out to Iron Lodge Gym regarding your enquiry.`);
+                    window.open(`https://wa.me/${waPhone}?text=${text}`, '_blank');
+                    toast.success(`Opening WhatsApp chat for ${viewing.name}...`);
+                  }}
+                >
+                  <MessageSquare className="h-4 w-4" />
+                  Reply on WhatsApp
+                </Button>
               </div>
             </div>
           )}

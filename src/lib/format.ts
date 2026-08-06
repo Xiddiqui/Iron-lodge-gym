@@ -30,3 +30,16 @@ export function getMonthStart(date = new Date()): string {
 export function daysBetween(a: Date, b: Date): number {
   return Math.floor((a.getTime() - b.getTime()) / (1000 * 60 * 60 * 24));
 }
+
+export function formatPhoneForWA(phone: string | null | undefined): string | null {
+  if (!phone) return null;
+  let cleaned = phone.replace(/\D/g, '');
+  if (!cleaned) return null;
+  if (cleaned.startsWith('0')) {
+    cleaned = '92' + cleaned.slice(1);
+  } else if (!cleaned.startsWith('92') && cleaned.length === 10) {
+    cleaned = '92' + cleaned;
+  }
+  return cleaned;
+}
+
