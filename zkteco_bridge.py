@@ -22,7 +22,10 @@ try:
 except ImportError:
     print("Installing required library 'pyzk' and 'requests'...")
     import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyzk", "requests"])
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyzk", "requests"])
+    except Exception:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "pyzk", "requests"])
     from zk import ZK
 
 import requests
