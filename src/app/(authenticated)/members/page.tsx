@@ -14,7 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare } from 'lucide-react';
+import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { PAYMENT_METHODS } from '@/lib/constants';
 
@@ -29,6 +29,25 @@ interface Trainer {
   name: string;
   phone: string | null;
   specialization: string | null;
+}
+
+interface Profile {
+  id: string;
+  full_name: string;
+  email: string | null;
+  role: string;
+}
+
+interface MemberPendingEdit {
+  id: string;
+  member_id: string;
+  requested_by: string;
+  status: 'pending' | 'approved' | 'rejected';
+  changes: Record<string, any>;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface Member {
@@ -49,6 +68,7 @@ interface Member {
   photo_url: string | null;
   created_at: string;
   assigned_staff_id: string | null;
+  created_by?: string | null;
 }
 
 interface FeeRecord {
@@ -106,8 +126,70 @@ export default function MembersPage() {
   const { data: currentUser } = useCurrentUser();
   const isAdmin = userRole === 'admin';
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [filter, setFilter] = useState<'all' | 'active' | 'inactive' | 'pending'>('all');
   const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
+
+  // Fetch Profiles (for Added By staff names & Pending Approvals)
+  const { data: profiles = [] } = useQuery({
+    queryKey: ['profiles'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('profiles').select('*');
+      if (error) return [];
+      return data as Profile[];
+    },
+  });
+
+  // Fetch Pending Member Edits
+  const { data: pendingEdits = [] } = useQuery({
+    queryKey: ['member_pending_edits'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('member_pending_edits')
+        .select('*')
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false });
+      if (error) return [];
+      return data as MemberPendingEdit[];
+    },
+  });
+
+  // Map pending edits by member_id
+  const pendingEditsByMemberId = useMemo(() => {
+    const map: Record<string, MemberPendingEdit> = {};
+    pendingEdits.forEach((pe) => {
+      map[pe.member_id] = pe;
+    });
+    return map;
+  }, [pendingEdits]);
+
+  // Real-time listener for pending member edit requests
+  useEffect(() => {
+    const channel = supabase
+      .channel('pending-edits-realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'member_pending_edits',
+        },
+        (payload) => {
+          queryClient.invalidateQueries({ queryKey: ['member_pending_edits'] });
+          if (isAdmin) {
+            const reqUserId = payload.new?.requested_by;
+            const staffName = profiles.find((p) => p.id === reqUserId)?.full_name || 'Staff member';
+            toast.info(`🔔 New member edit request from ${staffName}!`, {
+              duration: 6000,
+            });
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [isAdmin, profiles, queryClient]);
   
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Member | null>(null);
@@ -151,8 +233,8 @@ export default function MembersPage() {
   const [announcementSearch, setAnnouncementSearch] = useState('');
 
   // Sender Phone & Saved Templates State
-  const [senderPhone, setSenderPhone] = useState('03035937356');
-  const [tempSenderPhone, setTempSenderPhone] = useState('03035937356');
+  const [senderPhone, setSenderPhone] = useState('03325158779');
+  const [tempSenderPhone, setTempSenderPhone] = useState('03325158779');
   const [isEditingSender, setIsEditingSender] = useState(false);
 
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
@@ -433,7 +515,7 @@ export default function MembersPage() {
       const rawPaid = data.amount_paid === '' ? totalFee : Number(data.amount_paid);
       const paidAmount = isNaN(rawPaid) ? totalFee : rawPaid;
 
-      const payload = {
+      const payload: Record<string, any> = {
         member_number: data.member_number,
         full_name: data.full_name,
         gender: data.gender || 'male',
@@ -449,6 +531,22 @@ export default function MembersPage() {
         photo_url: data.photo_url || null,
         active: data.active,
       };
+
+      if (editing && !isAdmin) {
+        // Staff member attempting to edit — submit to pending approvals instead of direct update
+        const { error } = await supabase.from('member_pending_edits').insert({
+          member_id: editing.id,
+          requested_by: currentUser?.id,
+          status: 'pending',
+          changes: payload,
+        });
+        if (error) throw error;
+        return { isPendingEdit: true };
+      }
+
+      if (!editing && currentUser?.id) {
+        payload.created_by = currentUser.id;
+      }
 
       let currentPayload: Record<string, any> = { ...payload };
       let newMember: any = null;
@@ -470,7 +568,7 @@ export default function MembersPage() {
             continue;
           }
           let removed = false;
-          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender']) {
+          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'created_by']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
               delete currentPayload[col];
               removed = true;
@@ -494,7 +592,7 @@ export default function MembersPage() {
             continue;
           }
           let removed = false;
-          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id']) {
+          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id', 'created_by']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
               delete currentPayload[col];
               removed = true;
@@ -526,19 +624,75 @@ export default function MembersPage() {
           payment_method: 'cash',
         });
       }
+
+      return { isPendingEdit: false };
     },
-    onSuccess: () => {
+    onSuccess: (result: any) => {
       queryClient.invalidateQueries({ queryKey: ['members'] });
       queryClient.invalidateQueries({ queryKey: ['all_fee_records'] });
+      queryClient.invalidateQueries({ queryKey: ['member_pending_edits'] });
       queryClient.invalidateQueries({ queryKey: ['dash-fees'] });
       queryClient.invalidateQueries({ queryKey: ['dash-trend'] });
       queryClient.invalidateQueries({ queryKey: ['dash-active'] });
-      toast.success(editing ? 'Member updated' : 'Member added');
+      if (result?.isPendingEdit) {
+        toast.success('Member edit request submitted! Waiting for admin approval.');
+      } else {
+        toast.success(editing ? 'Member updated' : 'Member added');
+      }
       stopCamera();
       setDialogOpen(false);
       setEditing(null);
     },
     onError: (e) => toast.error(e.message),
+  });
+
+  const approveEditMutation = useMutation({
+    mutationFn: async (pendingEdit: MemberPendingEdit) => {
+      const { error: updateError } = await supabase
+        .from('members')
+        .update(pendingEdit.changes)
+        .eq('id', pendingEdit.member_id);
+      if (updateError) throw updateError;
+
+      const { error: editError } = await supabase
+        .from('member_pending_edits')
+        .update({
+          status: 'approved',
+          reviewed_by: currentUser?.id || null,
+          reviewed_at: new Date().toISOString(),
+        })
+        .eq('id', pendingEdit.id);
+      if (editError) throw editError;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['members'] });
+      queryClient.invalidateQueries({ queryKey: ['member_pending_edits'] });
+      toast.success('Member details updated successfully!');
+    },
+    onError: (err: any) => {
+      toast.error(`Approval failed: ${err.message}`);
+    },
+  });
+
+  const rejectEditMutation = useMutation({
+    mutationFn: async (pendingEdit: MemberPendingEdit) => {
+      const { error } = await supabase
+        .from('member_pending_edits')
+        .update({
+          status: 'rejected',
+          reviewed_by: currentUser?.id || null,
+          reviewed_at: new Date().toISOString(),
+        })
+        .eq('id', pendingEdit.id);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['member_pending_edits'] });
+      toast.info('Pending edit request rejected.');
+    },
+    onError: (err: any) => {
+      toast.error(`Rejection failed: ${err.message}`);
+    },
   });
 
   const toggleActive = useMutation({
@@ -926,163 +1080,380 @@ export default function MembersPage() {
             />
           </div>
 
-          {/* Gender Filter Buttons: All, Male, Female */}
-          {isAdmin ? 
-        <div className="flex items-center gap-1 bg-muted/60 p-1 rounded-lg border border-border">
-        <Button
-          type="button"
-          variant={genderFilter === 'all' ? 'default' : 'ghost'}
-          size="sm"
-          onClick={() => setGenderFilter('all')}
-          className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
-            genderFilter === 'all' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-          }`}
-        >
-          All
-        </Button>
-        <Button
-          type="button"
-          variant={genderFilter === 'male' ? 'default' : 'ghost'}
-          size="sm"
-          onClick={() => setGenderFilter('male')}
-          className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
-            genderFilter === 'male' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-          }`}
-        >
-          Male
-        </Button>
-        <Button
-          type="button"
-          variant={genderFilter === 'female' ? 'default' : 'ghost'}
-          size="sm"
-          onClick={() => setGenderFilter('female')}
-          className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
-            genderFilter === 'female' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-          }`}
-        >
-          Female
-        </Button>
-      </div>
-      : null  
-        }
-          
-        </div>
-
-        {/* <Select value={filter} onValueChange={(v) => setFilter(v as typeof filter)}>
-          <SelectTrigger className="w-36 h-9"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Status</SelectItem>
-            <SelectItem value="active">Active</SelectItem>
-            <SelectItem value="inactive">Inactive</SelectItem>
-          </SelectContent>
-        </Select> */}
-      </div>
-
-      <Card>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="text-left p-4 font-medium text-muted-foreground">Member #</th>
-                  <th className="text-left p-4 font-medium text-muted-foreground">Name</th>
-                  <th className="text-left p-4 font-medium text-muted-foreground hidden sm:table-cell">Phone</th>
-                  <th className="text-left p-4 font-medium text-muted-foreground hidden md:table-cell">CNIC</th>
-                  <th className="text-left p-4 font-medium text-muted-foreground hidden lg:table-cell">Trainer</th>
-                  <th className="text-left p-4 font-medium text-muted-foreground">Total Fee</th>
-                  <th className="text-left p-4 font-medium text-muted-foreground">Payment Status</th>
-                  <th className="text-left p-4 font-medium text-muted-foreground">Status</th>
-                  <th className="text-right p-4 font-medium text-muted-foreground">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {isLoading ? (
-                  <tr><td colSpan={9} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
-                ) : filtered.length === 0 ? (
-                  <tr><td colSpan={9} className="text-center py-8 text-muted-foreground">No members found</td></tr>
-                ) : filtered.map((m) => {
-                  const assignedTrainer = trainers.find((t) => t.id === m.trainer_id);
-                  const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
-                  const payStatus = getMemberPaymentStatus(m);
-
-                  return (
-                    <tr 
-                      key={m.id} 
-                      className="border-b border-border/50 hover:bg-accent/30 transition-colors cursor-pointer"
-                      onClick={() => { setSelectedMember(m); setDetailOpen(true); }}
-                    >
-                      <td className="p-4 font-mono font-medium text-muted-foreground">
-                        {m.member_number || '—'}
-                      </td>
-                      <td className="p-4">
-                        <div className="flex items-center gap-3">
-                          {m.photo_url ? (
-                            <img src={m.photo_url} alt={m.full_name} className="h-9 w-9 rounded-full object-cover border border-border" />
-                          ) : (
-                            <div className="h-9 w-9 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary">
-                              {m.full_name.slice(0, 1).toUpperCase()}
-                            </div>
-                          )}
-                          <span className="font-medium">{m.full_name}</span>
-                        </div>
-                      </td>
-                      <td className="p-4 hidden sm:table-cell text-muted-foreground">{m.phone || '—'}</td>
-                      <td className="p-4 hidden md:table-cell text-muted-foreground font-mono text-xs">{m.cnic || '—'}</td>
-                      <td className="p-4 hidden lg:table-cell text-muted-foreground">
-                        {assignedTrainer ? (
-                          <Badge variant="outline" className="font-normal">{assignedTrainer.name}</Badge>
-                        ) : '—'}
-                      </td>
-                      <td className="p-4 font-medium">{formatCurrency(totalFee)}</td>
-                      <td className="p-4" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center gap-2">
-                          {payStatus.status === 'paid' ? (
-                            <Badge variant="success" className="font-semibold px-2.5 py-0.5">✅ Paid</Badge>
-                          ) : payStatus.status === 'partial' ? (
-                            <div className="flex items-center gap-2">
-                              <Badge variant="outline" className="border-2 border-amber-500 text-amber-600 bg-amber-500/10 font-bold px-2.5 py-0.5">
-                                ⚠️ {payStatus.percentage}% Paid
-                              </Badge>
-                              <Button size="sm" variant="default" className="h-7 text-xs px-2 bg-primary hover:bg-primary/90" onClick={() => openPayModal(m)}>
-                                <Wallet className="h-3 w-3 mr-1" /> Pay
-                              </Button>
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-2">
-                              <Badge variant="destructive" className="font-bold px-2.5 py-0.5">
-                                ❌ Unpaid
-                                {payStatus.unpaidMonths > 1 && (
-                                  <span className="ml-1 text-[10px] opacity-80">({payStatus.unpaidMonths} mo)</span>
-                                )}
-                              </Badge>
-                              <Button size="sm" variant="default" className="h-7 text-xs px-2 bg-primary hover:bg-primary/90" onClick={() => openPayModal(m)}>
-                                <Wallet className="h-3 w-3 mr-1" /> Pay
-                              </Button>
-                            </div>
-                          )}
-                        </div>
-                      </td>
-                      <td className="p-4" onClick={(e) => e.stopPropagation()}>
-                        <button onClick={() => toggleActive.mutate({ id: m.id, active: !m.active })}>
-                          <Badge variant={m.active ? 'success' : 'destructive'} className="cursor-pointer">{m.active ? 'Active' : 'Inactive'}</Badge>
-                        </button>
-                      </td>
-                      <td className="p-4 text-right flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
-                        <Button variant="ghost" size="icon" title="Edit Member" onClick={() => openEdit(m)}>
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button variant="ghost" size="icon" title="Delete Member" className="text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => setMemberToDelete(m)}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          {/* Member Status Filters: All, Active, Inactive, Pending Approvals */}
+          <div className="flex items-center gap-1 bg-muted/60 p-1 rounded-lg border border-border">
+            <Button
+              type="button"
+              variant={filter === 'all' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setFilter('all')}
+              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                filter === 'all' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              All ({members.length})
+            </Button>
+            <Button
+              type="button"
+              variant={filter === 'active' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setFilter('active')}
+              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                filter === 'active' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Active ({members.filter((m) => m.active).length})
+            </Button>
+            <Button
+              type="button"
+              variant={filter === 'inactive' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setFilter('inactive')}
+              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                filter === 'inactive' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Inactive ({members.filter((m) => !m.active).length})
+            </Button>
+            {isAdmin && (
+              <Button
+                type="button"
+                variant={filter === 'pending' ? 'default' : 'ghost'}
+                size="sm"
+                onClick={() => setFilter('pending')}
+                className={`h-7 px-3 text-xs font-semibold rounded-md transition-all flex items-center gap-1.5 ${
+                  filter === 'pending' ? 'bg-amber-600 text-white shadow-sm' : 'text-amber-600 hover:text-amber-700 hover:bg-amber-500/10'
+                }`}
+              >
+                <span>Pending Approvals</span>
+                {pendingEdits.length > 0 && (
+                  <Badge className="h-5 px-1.5 bg-amber-500 text-white font-extrabold text-[11px] rounded-full">
+                    {pendingEdits.length}
+                  </Badge>
+                )}
+              </Button>
+            )}
           </div>
-        </CardContent>
-      </Card>
+
+          {/* Gender Filter Buttons: All, Male, Female */}
+          {isAdmin && filter !== 'pending' ? (
+            <div className="flex items-center gap-1 bg-muted/60 p-1 rounded-lg border border-border">
+              <Button
+                type="button"
+                variant={genderFilter === 'all' ? 'default' : 'ghost'}
+                size="sm"
+                onClick={() => setGenderFilter('all')}
+                className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                  genderFilter === 'all' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                All
+              </Button>
+              <Button
+                type="button"
+                variant={genderFilter === 'male' ? 'default' : 'ghost'}
+                size="sm"
+                onClick={() => setGenderFilter('male')}
+                className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                  genderFilter === 'male' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Male
+              </Button>
+              <Button
+                type="button"
+                variant={genderFilter === 'female' ? 'default' : 'ghost'}
+                size="sm"
+                onClick={() => setGenderFilter('female')}
+                className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                  genderFilter === 'female' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Female
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {isAdmin && filter === 'pending' ? (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Clock className="h-5 w-5 text-amber-500" />
+              <h2 className="text-lg font-bold">Pending Member Approvals</h2>
+              <Badge className="bg-amber-500 text-white font-bold">{pendingEdits.length}</Badge>
+            </div>
+          </div>
+
+          {pendingEdits.length === 0 ? (
+            <Card>
+              <CardContent className="p-8 text-center text-muted-foreground">
+                <CheckCircle2 className="h-10 w-10 text-muted-foreground/40 mx-auto mb-2" />
+                <p className="font-medium text-base">No pending approvals</p>
+                <p className="text-xs text-muted-foreground mt-1">All member edit requests submitted by staff members have been reviewed.</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 gap-4">
+              {pendingEdits.map((pe) => {
+                const targetMember = members.find((m) => m.id === pe.member_id);
+                const staffProfile = profiles.find((p) => p.id === pe.requested_by);
+                const changes = pe.changes || {};
+
+                // Calculate diffs between targetMember & proposed changes
+                const diffs: { field: string; oldVal: string; newVal: string }[] = [];
+                if (targetMember) {
+                  if (changes.full_name && changes.full_name !== targetMember.full_name) {
+                    diffs.push({ field: 'Full Name', oldVal: targetMember.full_name, newVal: changes.full_name });
+                  }
+                  if (changes.member_number && changes.member_number !== targetMember.member_number) {
+                    diffs.push({ field: 'Member #', oldVal: targetMember.member_number || '—', newVal: changes.member_number });
+                  }
+                  if (changes.phone !== undefined && changes.phone !== targetMember.phone) {
+                    diffs.push({ field: 'Phone', oldVal: targetMember.phone || '—', newVal: changes.phone || '—' });
+                  }
+                  if (changes.cnic !== undefined && changes.cnic !== targetMember.cnic) {
+                    diffs.push({ field: 'CNIC', oldVal: targetMember.cnic || '—', newVal: changes.cnic || '—' });
+                  }
+                  if (changes.gender && changes.gender !== targetMember.gender) {
+                    diffs.push({ field: 'Gender', oldVal: targetMember.gender || 'male', newVal: changes.gender });
+                  }
+                  if (changes.monthly_fee !== undefined && Number(changes.monthly_fee) !== Number(targetMember.monthly_fee)) {
+                    diffs.push({ field: 'Monthly Fee', oldVal: formatCurrency(targetMember.monthly_fee), newVal: formatCurrency(Number(changes.monthly_fee)) });
+                  }
+                  if (changes.training_fees !== undefined && Number(changes.training_fees) !== Number(targetMember.training_fees)) {
+                    diffs.push({ field: 'Training Fee', oldVal: formatCurrency(targetMember.training_fees), newVal: formatCurrency(Number(changes.training_fees)) });
+                  }
+                  if (changes.trainer_id !== undefined && changes.trainer_id !== targetMember.trainer_id) {
+                    const oldTr = trainers.find((t) => t.id === targetMember.trainer_id)?.name || 'None';
+                    const newTr = trainers.find((t) => t.id === changes.trainer_id)?.name || 'None';
+                    diffs.push({ field: 'Trainer', oldVal: oldTr, newVal: newTr });
+                  }
+                  if (changes.active !== undefined && changes.active !== targetMember.active) {
+                    diffs.push({ field: 'Status', oldVal: targetMember.active ? 'Active' : 'Inactive', newVal: changes.active ? 'Active' : 'Inactive' });
+                  }
+                  if (changes.notes !== undefined && changes.notes !== targetMember.notes) {
+                    diffs.push({ field: 'Notes', oldVal: targetMember.notes || '—', newVal: changes.notes || '—' });
+                  }
+                }
+
+                return (
+                  <Card key={pe.id} className="border border-amber-500/40 bg-amber-500/5 shadow-sm overflow-hidden">
+                    <CardContent className="p-4 sm:p-5">
+                      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-border/60">
+                        <div className="flex items-center gap-3">
+                          {targetMember?.photo_url ? (
+                            <img src={targetMember.photo_url} alt={targetMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border" />
+                          ) : (
+                            <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary">
+                              {(targetMember?.full_name || changes.full_name || 'M').slice(0, 1).toUpperCase()}
+                            </div>
+                          )}
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-base">{targetMember?.full_name || changes.full_name || 'Member'}</span>
+                              <Badge variant="outline" className="font-mono text-xs">#{targetMember?.member_number || changes.member_number || '—'}</Badge>
+                            </div>
+                            <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
+                              <span>Edited by: <strong className="text-foreground">{staffProfile?.full_name || 'Staff Member'}</strong></span>
+                              <span>•</span>
+                              <span>{new Date(pe.created_at).toLocaleString()}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <Badge className="bg-amber-500 text-white font-bold px-3 py-1">
+                          ⏳ Waiting for Approval
+                        </Badge>
+                      </div>
+
+                      {/* Proposed Changes */}
+                      <div className="py-4 space-y-2">
+                        <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">Proposed Changes</h4>
+                        {diffs.length === 0 ? (
+                          <p className="text-xs text-muted-foreground italic">Member details update submitted.</p>
+                        ) : (
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                            {diffs.map((d, idx) => (
+                              <div key={idx} className="p-2.5 rounded-lg bg-background border border-border text-xs">
+                                <span className="font-semibold text-muted-foreground block mb-1">{d.field}</span>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="line-through text-muted-foreground">{d.oldVal}</span>
+                                  <span>→</span>
+                                  <span className="font-bold text-green-600 dark:text-green-400">{d.newVal}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="pt-3 border-t border-border/60 flex items-center justify-end gap-2">
+                        {isAdmin ? (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-destructive/50 text-destructive hover:bg-destructive/10"
+                              disabled={rejectEditMutation.isPending}
+                              onClick={() => rejectEditMutation.mutate(pe)}
+                            >
+                              <XCircle className="h-4 w-4 mr-1.5" /> Reject Request
+                            </Button>
+                            <Button
+                              size="sm"
+                              className="bg-green-600 hover:bg-green-700 text-white font-semibold shadow-sm"
+                              disabled={approveEditMutation.isPending}
+                              onClick={() => approveEditMutation.mutate(pe)}
+                            >
+                              <Check className="h-4 w-4 mr-1.5" /> Approve & Update Member
+                            </Button>
+                          </>
+                        ) : (
+                          <p className="text-xs text-amber-600 dark:text-amber-400 italic">Only admins can approve or reject edit requests.</p>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="text-left p-4 font-medium text-muted-foreground">Member #</th>
+                    <th className="text-left p-4 font-medium text-muted-foreground">Name</th>
+                    <th className="text-left p-4 font-medium text-muted-foreground hidden sm:table-cell">Phone</th>
+                    <th className="text-left p-4 font-medium text-muted-foreground hidden md:table-cell">CNIC</th>
+                    <th className="text-left p-4 font-medium text-muted-foreground hidden lg:table-cell">Trainer</th>
+                    {isAdmin && (
+                      <th className="text-left p-4 font-medium text-muted-foreground hidden lg:table-cell">Added By</th>
+                    )}
+                    <th className="text-left p-4 font-medium text-muted-foreground">Total Fee</th>
+                    <th className="text-left p-4 font-medium text-muted-foreground">Payment Status</th>
+                    <th className="text-left p-4 font-medium text-muted-foreground">Status</th>
+                    <th className="text-right p-4 font-medium text-muted-foreground">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {isLoading ? (
+                    <tr><td colSpan={isAdmin ? 10 : 9} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
+                  ) : filtered.length === 0 ? (
+                    <tr><td colSpan={isAdmin ? 10 : 9} className="text-center py-8 text-muted-foreground">No members found</td></tr>
+                  ) : filtered.map((m) => {
+                    const assignedTrainer = trainers.find((t) => t.id === m.trainer_id);
+                    const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
+                    const payStatus = getMemberPaymentStatus(m);
+                    const pendingEditReq = pendingEditsByMemberId[m.id];
+
+                    return (
+                      <tr 
+                        key={m.id} 
+                        className="border-b border-border/50 hover:bg-accent/30 transition-colors cursor-pointer"
+                        onClick={() => { setSelectedMember(m); setDetailOpen(true); }}
+                      >
+                        <td className="p-4 font-mono font-medium text-muted-foreground">
+                          {m.member_number || '—'}
+                        </td>
+                        <td className="p-4">
+                          <div className="flex items-center gap-3">
+                            {m.photo_url ? (
+                              <img src={m.photo_url} alt={m.full_name} className="h-9 w-9 rounded-full object-cover border border-border" />
+                            ) : (
+                              <div className="h-9 w-9 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary">
+                                {m.full_name.slice(0, 1).toUpperCase()}
+                              </div>
+                            )}
+                            <div className="flex flex-col">
+                              <span className="font-medium">{m.full_name}</span>
+                              {pendingEditReq && (
+                                <Badge variant="outline" className="w-fit border-amber-500 text-amber-600 bg-amber-500/10 font-bold text-[10px] px-1.5 py-0 mt-0.5 animate-pulse">
+                                  ⏳ Waiting for Approval
+                                </Badge>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="p-4 hidden sm:table-cell text-muted-foreground">{m.phone || '—'}</td>
+                        <td className="p-4 hidden md:table-cell text-muted-foreground font-mono text-xs">{m.cnic || '—'}</td>
+                        <td className="p-4 hidden lg:table-cell text-muted-foreground">
+                          {assignedTrainer ? (
+                            <Badge variant="outline" className="font-normal">{assignedTrainer.name}</Badge>
+                          ) : '—'}
+                        </td>
+                        {isAdmin && (
+                          <td className="p-4 hidden lg:table-cell text-muted-foreground text-xs font-medium">
+                            {(() => {
+                              if (!m.created_by) return '—';
+                              const staff = profiles.find((p) => p.id === m.created_by);
+                              return staff ? (
+                                <span className="inline-flex items-center gap-1 bg-accent/60 text-foreground px-2 py-0.5 rounded border border-border/60">
+                                  <User className="h-3 w-3 text-primary" />
+                                  {staff.full_name}
+                                </span>
+                              ) : '—';
+                            })()}
+                          </td>
+                        )}
+                        <td className="p-4 font-medium">{formatCurrency(totalFee)}</td>
+                        <td className="p-4" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center gap-2">
+                            {payStatus.status === 'paid' ? (
+                              <Badge variant="success" className="font-semibold px-2.5 py-0.5">✅ Paid</Badge>
+                            ) : payStatus.status === 'partial' ? (
+                              <div className="flex items-center gap-2">
+                                <Badge variant="outline" className="border-2 border-amber-500 text-amber-600 bg-amber-500/10 font-bold px-2.5 py-0.5">
+                                  ⚠️ {payStatus.percentage}% Paid
+                                </Badge>
+                                <Button size="sm" variant="default" className="h-7 text-xs px-2 bg-primary hover:bg-primary/90" onClick={() => openPayModal(m)}>
+                                  <Wallet className="h-3 w-3 mr-1" /> Pay
+                                </Button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2">
+                                <Badge variant="destructive" className="font-bold px-2.5 py-0.5">
+                                  ❌ Unpaid
+                                  {payStatus.unpaidMonths > 1 && (
+                                    <span className="ml-1 text-[10px] opacity-80">({payStatus.unpaidMonths} mo)</span>
+                                  )}
+                                </Badge>
+                                <Button size="sm" variant="default" className="h-7 text-xs px-2 bg-primary hover:bg-primary/90" onClick={() => openPayModal(m)}>
+                                  <Wallet className="h-3 w-3 mr-1" /> Pay
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="p-4" onClick={(e) => e.stopPropagation()}>
+                          <button onClick={() => toggleActive.mutate({ id: m.id, active: !m.active })}>
+                            <Badge variant={m.active ? 'success' : 'destructive'} className="cursor-pointer">{m.active ? 'Active' : 'Inactive'}</Badge>
+                          </button>
+                        </td>
+                        <td className="p-4 text-right flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+                          <Button variant="ghost" size="icon" title="Edit Member" onClick={() => openEdit(m)}>
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" title="Delete Member" className="text-destructive hover:text-destructive hover:bg-destructive/10" onClick={() => setMemberToDelete(m)}>
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Add/Edit Member Dialog */}
       <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) stopCamera(); }}>
