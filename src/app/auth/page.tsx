@@ -1,14 +1,13 @@
 'use client';
 export const dynamic = 'force-dynamic';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Loader2 } from 'lucide-react';
-import Image from 'next/image';
+import { Loader2, Dumbbell } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { recordStaffLogin } from '@/lib/staff-attendance';
@@ -18,6 +17,29 @@ export default function AuthPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [logoUrl, setLogoUrl] = useState<string | null>('/logo.png');
+  const [gymName, setGymName] = useState<string>('Iron Lodge Gym');
+  const [imageError, setImageError] = useState(false);
+
+  useEffect(() => {
+    async function fetchGymSettings() {
+      try {
+        const { data } = await supabase
+          .from('gym_settings')
+          .select('gym_name, logo_url')
+          .eq('id', 1)
+          .maybeSingle();
+
+        if (data) {
+          if (data.gym_name) setGymName(data.gym_name);
+          if (data.logo_url) setLogoUrl(data.logo_url);
+        }
+      } catch (err) {
+        console.error('Failed to fetch gym settings:', err);
+      }
+    }
+    fetchGymSettings();
+  }, []);
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
@@ -44,12 +66,26 @@ export default function AuthPage() {
       </div>
       <Card className="w-full max-w-md relative z-10 border-border/50">
         <CardHeader className="text-center space-y-4">
-          <div className="mx-auto h-20 w-20 rounded-2xl overflow-hidden shadow-elegant bg-primary">
-            <Image src="/logo.png" alt="Iron Lodge Gym" width={80} height={80} className="h-full w-full object-cover" priority />
-          
+          <div className="mx-auto h-20 w-20 rounded-2xl overflow-hidden shadow-elegant bg-primary flex items-center justify-center p-1.5 border border-border/20">
+            {!imageError && logoUrl ? (
+              <img
+                src={logoUrl}
+                alt={gymName}
+                className="h-full w-full object-contain rounded-xl"
+                onError={() => {
+                  if (logoUrl !== '/logo.png') {
+                    setLogoUrl('/logo.png');
+                  } else {
+                    setImageError(true);
+                  }
+                }}
+              />
+            ) : (
+              <Dumbbell className="h-10 w-10 text-primary-foreground" />
+            )}
           </div>
           <div>
-            <CardTitle className="text-2xl font-display">Iron Lodge Gym</CardTitle>
+            <CardTitle className="text-2xl font-display">{gymName}</CardTitle>
             <CardDescription className="mt-2">Sign in to your account</CardDescription>
           </div>
         </CardHeader>
