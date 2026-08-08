@@ -141,7 +141,7 @@ export function Sidebar() {
 
       {/* User section */}
       <div className="relative border-t border-sidebar-border p-3">
-        <div className="px-3 py-2 mb-2 flex items-center gap-3">
+        {/* <div className="px-3 py-2 mb-2 flex items-center gap-3">
           <div className="h-9 w-9 rounded-full bg-sidebar-accent grid place-items-center text-sm font-semibold">
             {userName.slice(0, 1).toUpperCase()}
           </div>
@@ -149,9 +149,10 @@ export function Sidebar() {
             <p className="text-sm truncate">{userName}</p>
             <p className="text-[10px] uppercase tracking-widest text-sidebar-foreground/50">{role ?? '…'}</p>
           </div>
-        </div>
+        </div> */}
         <Button variant="ghost" onClick={handleSignOut} className="w-full justify-start text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground">
           <LogOut className="h-4 w-4" /> Sign out
+          <p className="text-[15px] uppercase tracking-widest text-sidebar-foreground/50">{role ?? '…'}</p>
         </Button>
       </div>
     </aside>
