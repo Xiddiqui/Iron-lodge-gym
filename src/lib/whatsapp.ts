@@ -56,9 +56,6 @@ export function getActiveProvider(): WhatsAppProvider {
   if (process.env.META_PHONE_NUMBER_ID && process.env.META_ACCESS_TOKEN && process.env.META_PHONE_NUMBER_ID !== 'your_meta_phone_number_id') {
     return 'meta';
   }
-  if (process.env.LOCAL_WHATSAPP_BRIDGE_URL) {
-    return 'local_bridge';
-  }
   if (process.env.ULTRAMSG_INSTANCE_ID && process.env.ULTRAMSG_TOKEN && process.env.ULTRAMSG_INSTANCE_ID !== 'instanceXXXXX') {
     return 'ultramsg';
   }
@@ -72,9 +69,10 @@ export function getActiveProvider(): WhatsAppProvider {
     return 'twilio';
   }
 
-  // Default recommendation (Local bridge or Meta pay-as-you-go)
-  return 'local_bridge';
+  // Default to Meta Official Cloud API for production serverless deployment
+  return 'meta';
 }
+
 
 
 /**
