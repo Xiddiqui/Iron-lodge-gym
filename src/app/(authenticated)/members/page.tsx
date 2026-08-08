@@ -245,6 +245,8 @@ export default function MembersPage() {
   const [bulkMode, setBulkMode] = useState(false);
   const [bulkCurrentIndex, setBulkCurrentIndex] = useState(0);
   const [sentMemberIds, setSentMemberIds] = useState<string[]>([]);
+  const [sendingBulk, setSendingBulk] = useState(false);
+
 
   // Load persistent sender phone & templates on client mount
   useEffect(() => {
@@ -819,7 +821,7 @@ export default function MembersPage() {
     return members.filter((m) => selectedAnnounceMemberIds.includes(m.id) && !!formatPhoneForWA(m.phone));
   }, [members, selectedAnnounceMemberIds]);
 
-  const handleSendWhatsApp = () => {
+  const handleSendWhatsApp = async () => {
     if (!announcementMessage.trim()) {
       toast.error('Please enter an announcement message');
       return;
@@ -833,19 +835,39 @@ export default function MembersPage() {
       return;
     }
 
-    if (validSelectedMembers.length > 1) {
-      setBulkMode(true);
-      setBulkCurrentIndex(0);
-      toast.info(`Bulk WhatsApp Broadcast mode activated for ${validSelectedMembers.length} members.`);
-    } else {
-      const targetMember = validSelectedMembers[0];
-      const phone = formatPhoneForWA(targetMember.phone);
-      const encodedMsg = encodeURIComponent(announcementMessage);
-      window.open(`https://wa.me/${phone}?text=${encodedMsg}`, '_blank');
-      setSentMemberIds((prev) => Array.from(new Set([...prev, targetMember.id])));
-      toast.success(`WhatsApp chat opened for ${targetMember.full_name}!`);
+    setSendingBulk(true);
+    try {
+      const recipients = validSelectedMembers.map((m) => ({
+        phone: m.phone!,
+        name: m.full_name,
+      }));
+
+      const res = await fetch('/api/announcements/whatsapp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: announcementMessage,
+          recipients,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to dispatch WhatsApp announcement');
+      }
+
+      setSentMemberIds(validSelectedMembers.map((m) => m.id));
+      toast.success(
+        `Dispatched bulk WhatsApp announcement to ${data.details?.totalSent || recipients.length} members!`
+      );
+      setAnnouncementOpen(false);
+    } catch (err: any) {
+      toast.error(err.message || 'Error dispatching WhatsApp announcement');
+    } finally {
+      setSendingBulk(false);
     }
   };
+
 
   const handleBulkSendNext = () => {
     if (bulkCurrentIndex >= validSelectedMembers.length) return;
@@ -2026,7 +2048,7 @@ export default function MembersPage() {
               </DialogTitle>
 
               {/* Sender Phone Bar */}
-              <div className="flex items-center gap-2 bg-muted/60 px-3 py-1.5 rounded-lg border border-border text-xs">
+              {/* <div className="flex items-center gap-2 bg-muted/60 px-3 py-1.5 rounded-lg border border-border text-xs">
                 <PhoneCall className="h-3.5 w-3.5 text-green-600" />
                 <span className="text-muted-foreground font-medium">Sender:</span>
                 {isEditingSender ? (
@@ -2054,7 +2076,7 @@ export default function MembersPage() {
                     </Button>
                   </div>
                 )}
-              </div>
+              </div> */}
             </div>
           </DialogHeader>
 
@@ -2401,17 +2423,27 @@ export default function MembersPage() {
           </div>
 
           <DialogFooter className="mt-4 gap-2">
-            <Button type="button" variant="outline" onClick={() => setAnnouncementOpen(false)}>
+            <Button type="button" variant="outline" onClick={() => setAnnouncementOpen(false)} disabled={sendingBulk}>
               Cancel
             </Button>
             <Button
               type="button"
+              disabled={sendingBulk}
               className="bg-green-600 hover:bg-green-700 text-white font-medium gap-2"
               onClick={handleSendWhatsApp}
             >
-              <Send className="h-4 w-4" /> {validSelectedMembers.length > 1 ? 'Start Bulk WhatsApp Broadcast' : 'Send via WhatsApp'}
+              {sendingBulk ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Dispatching ({validSelectedMembers.length})...
+                </>
+              ) : (
+                <>
+                  <Send className="h-4 w-4" /> Send Bulk Announcement ({validSelectedMembers.length})
+                </>
+              )}
             </Button>
           </DialogFooter>
+
         </DialogContent>
       </Dialog>
 

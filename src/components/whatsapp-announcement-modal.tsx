@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
-import { MessageSquare, Send, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { MessageSquare, Send, Loader2, CheckCircle2, AlertCircle, Zap } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface WhatsAppAnnouncementModalProps {
@@ -25,10 +25,23 @@ export function WhatsAppAnnouncementModal({ trigger }: WhatsAppAnnouncementModal
   const [target, setTarget] = useState<'all_members' | 'custom'>('all_members');
   const [customPhones, setCustomPhones] = useState('');
   const [loading, setLoading] = useState(false);
+  const [provider, setProvider] = useState<string>('ultramsg');
   const [lastResult, setLastResult] = useState<{
     totalSent: number;
     totalFailed: number;
+    provider?: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      fetch('/api/announcements/whatsapp')
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.provider) setProvider(data.provider);
+        })
+        .catch(() => {});
+    }
+  }, [open]);
 
   const handleSend = async () => {
     if (!message.trim()) {
@@ -76,10 +89,11 @@ export function WhatsAppAnnouncementModal({ trigger }: WhatsAppAnnouncementModal
       setLastResult({
         totalSent: data.details?.totalSent || 0,
         totalFailed: data.details?.totalFailed || 0,
+        provider: data.details?.provider || provider,
       });
 
       toast.success(
-        `Successfully dispatched WhatsApp announcement to ${data.details?.totalSent || 0} recipients!`
+        `Successfully dispatched bulk WhatsApp announcement to ${data.details?.totalSent || 0} recipients!`
       );
     } catch (err: any) {
       toast.error(err.message || 'An error occurred while sending WhatsApp announcement.');
@@ -100,12 +114,18 @@ export function WhatsAppAnnouncementModal({ trigger }: WhatsAppAnnouncementModal
       </DialogTrigger>
       <DialogContent className="sm:max-w-[550px] bg-slate-900 border-slate-800 text-slate-100">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-emerald-400 text-xl">
-            <MessageSquare className="w-6 h-6" />
-            WhatsApp Bulk Announcement
-          </DialogTitle>
+          <div className="flex items-center justify-between">
+            <DialogTitle className="flex items-center gap-2 text-emerald-400 text-xl">
+              <MessageSquare className="w-6 h-6" />
+              1-Click Bulk WhatsApp Dispatch
+            </DialogTitle>
+            <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold uppercase bg-emerald-950 text-emerald-300 border border-emerald-800/60 flex items-center gap-1">
+              <Zap className="w-3 h-3 text-amber-400" />
+              {provider}
+            </span>
+          </div>
           <DialogDescription className="text-slate-400">
-            Dispatch official WhatsApp announcement messages to gym members via Twilio.
+            Dispatch official WhatsApp announcements in the background with a single click (no browser popups required).
           </DialogDescription>
         </DialogHeader>
 
@@ -183,7 +203,7 @@ export function WhatsAppAnnouncementModal({ trigger }: WhatsAppAnnouncementModal
           {lastResult && (
             <div className="p-3 bg-slate-950 rounded-md border border-slate-800 flex items-center justify-between text-xs">
               <span className="text-emerald-400 flex items-center gap-1.5 font-medium">
-                <CheckCircle2 className="w-4 h-4" /> Sent: {lastResult.totalSent}
+                <CheckCircle2 className="w-4 h-4" /> Sent: {lastResult.totalSent} ({lastResult.provider})
               </span>
               {lastResult.totalFailed > 0 && (
                 <span className="text-rose-400 flex items-center gap-1.5 font-medium">
@@ -223,3 +243,4 @@ export function WhatsAppAnnouncementModal({ trigger }: WhatsAppAnnouncementModal
     </Dialog>
   );
 }
+

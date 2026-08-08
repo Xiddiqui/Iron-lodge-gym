@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { sendBulkWhatsAppMessages } from '@/lib/twilio';
+import { sendBulkWhatsAppMessages, getActiveProvider } from '@/lib/whatsapp';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+
+export async function GET() {
+  const provider = getActiveProvider();
+  return NextResponse.json({
+    provider,
+    configured: provider !== undefined,
+  });
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -52,11 +60,23 @@ export async function POST(req: NextRequest) {
     // Trigger bulk WhatsApp dispatch
     const result = await sendBulkWhatsAppMessages(finalRecipients, message, mediaUrl);
 
+    if (result.totalSent === 0 && result.totalFailed > 0) {
+      const firstError = result.failed[0]?.error || 'Failed to send WhatsApp messages.';
+      return NextResponse.json(
+        {
+          error: `${firstError} (Provider: ${result.provider})`,
+          details: result,
+        },
+        { status: 400 }
+      );
+    }
+
     return NextResponse.json({
       success: true,
-      message: `Dispatched WhatsApp announcement to ${result.totalSent} recipients`,
+      message: `Dispatched WhatsApp announcement to ${result.totalSent} recipients via ${result.provider}`,
       details: result,
     });
+
   } catch (err: any) {
     console.error('Error in WhatsApp announcement route:', err);
     return NextResponse.json(
@@ -65,3 +85,4 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
