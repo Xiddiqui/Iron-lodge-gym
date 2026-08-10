@@ -10,8 +10,9 @@ export interface StaffSession {
 }
 
 export interface StaffBreak {
+  id?: string;
   startAt: string;
-  endAt: string;
+  endAt: string | null;
   durationMinutes: number;
 }
 
@@ -20,7 +21,7 @@ export interface StaffDayAttendance {
   fullName: string;
   email: string | null;
   role: string;
-  status: 'active' | 'logged_out' | 'absent';
+  status: 'active' | 'on_break' | 'logged_out' | 'absent';
   firstLogin: string | null;
   firstLogout: string | null;
   lastLogout: string | null;
@@ -69,12 +70,113 @@ export async function recordStaffLogin(profileId: string) {
 }
 
 /**
+ * Start a break for a staff member.
+ */
+export async function startStaffBreak(profileId: string) {
+  if (!profileId) return null;
+  const now = new Date().toISOString();
+  try {
+    // Find active attendance session
+    const { data: openSessions } = await supabase
+      .from('staff_attendance')
+      .select('id')
+      .eq('profile_id', profileId)
+      .is('logout_at', null)
+      .order('login_at', { ascending: false })
+      .limit(1);
+
+    const attendanceId = openSessions && openSessions.length > 0 ? openSessions[0].id : null;
+
+    // Check if there is already an unended break
+    const { data: openBreaks } = await supabase
+      .from('staff_breaks')
+      .select('id, start_at')
+      .eq('profile_id', profileId)
+      .is('end_at', null);
+
+    if (openBreaks && openBreaks.length > 0) {
+      return openBreaks[0];
+    }
+
+    const { data, error } = await supabase
+      .from('staff_breaks')
+      .insert({
+        profile_id: profileId,
+        attendance_id: attendanceId,
+        start_at: now,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error starting staff break:', error.message);
+    }
+    return data;
+  } catch (err) {
+    console.error('Error in startStaffBreak:', err);
+    return null;
+  }
+}
+
+/**
+ * End any active break for a staff member.
+ */
+export async function endStaffBreak(profileId: string) {
+  if (!profileId) return;
+  const now = new Date().toISOString();
+  try {
+    const { data: openBreaks } = await supabase
+      .from('staff_breaks')
+      .select('id')
+      .eq('profile_id', profileId)
+      .is('end_at', null);
+
+    if (openBreaks && openBreaks.length > 0) {
+      for (const b of openBreaks) {
+        await supabase
+          .from('staff_breaks')
+          .update({ end_at: now })
+          .eq('id', b.id);
+      }
+    }
+  } catch (err) {
+    console.error('Error in endStaffBreak:', err);
+  }
+}
+
+/**
+ * Check if the staff member has an active break.
+ */
+export async function getActiveStaffBreak(profileId: string) {
+  if (!profileId) return null;
+  try {
+    const { data, error } = await supabase
+      .from('staff_breaks')
+      .select('*')
+      .eq('profile_id', profileId)
+      .is('end_at', null)
+      .maybeSingle();
+
+    if (error && error.code !== 'PGRST116') {
+      console.error('Error fetching active break:', error.message);
+    }
+    return data;
+  } catch (err) {
+    console.error('Error in getActiveStaffBreak:', err);
+    return null;
+  }
+}
+
+/**
  * Record a logout event when the user signs out.
  */
 export async function recordStaffLogout(profileId: string) {
   if (!profileId) return;
   const now = new Date().toISOString();
   try {
+    // Automatically end any active break first
+    await endStaffBreak(profileId);
+
     const { data: openSessions } = await supabase
       .from('staff_attendance')
       .select('id')
@@ -166,8 +268,6 @@ export async function fetchStaffAttendanceForDate(dateStr: string): Promise<Staf
 
   if (!profiles || profiles.length === 0) return [];
 
-  // Filter: include all profiles with role === 'staff' OR non-admin profiles.
-  // If all profiles have role = 'staff', show them. If none match, show all profiles.
   const staffProfiles = profiles.filter((p: any) => (p.role || '').toLowerCase() === 'staff');
   const nonAdminProfiles = profiles.filter((p: any) => (p.role || '').toLowerCase() !== 'admin');
   const targetProfiles = staffProfiles.length > 0 ? staffProfiles : (nonAdminProfiles.length > 0 ? nonAdminProfiles : profiles);
@@ -192,10 +292,20 @@ export async function fetchStaffAttendanceForDate(dateStr: string): Promise<Staf
     }
   }
 
+  // Fetch staff breaks for this date
+  const { data: rawBreaks } = await supabase
+    .from('staff_breaks')
+    .select('*')
+    .gte('start_at', dayStart)
+    .lt('start_at', dayEnd)
+    .order('start_at', { ascending: true });
+
   const records = rawRecords ?? [];
+  const breakRecords = rawBreaks ?? [];
 
   return targetProfiles.map((p: any) => {
     const userRecords = records.filter((r: any) => r.profile_id === p.id);
+    const userBreaks = breakRecords.filter((b: any) => b.profile_id === p.id);
 
     if (userRecords.length === 0) {
       return {
@@ -215,8 +325,8 @@ export async function fetchStaffAttendanceForDate(dateStr: string): Promise<Staf
     }
 
     const sessions: StaffSession[] = [];
-    const breaks: StaffBreak[] = [];
-    let totalWorkingMinutes = 0;
+    const breaksList: StaffBreak[] = [];
+    let grossSessionMinutes = 0;
     let totalBreakMinutes = 0;
 
     userRecords.forEach((r: any, idx: number) => {
@@ -233,7 +343,7 @@ export async function fetchStaffAttendanceForDate(dateStr: string): Promise<Staf
         isActive,
       });
 
-      totalWorkingMinutes += dur;
+      grossSessionMinutes += dur;
 
       if (idx > 0) {
         const prevSession = userRecords[idx - 1];
@@ -241,7 +351,7 @@ export async function fetchStaffAttendanceForDate(dateStr: string): Promise<Staf
         if (prevEndIso) {
           const breakMins = diffMinutes(prevEndIso, r.login_at);
           if (breakMins > 0) {
-            breaks.push({
+            breaksList.push({
               startAt: prevEndIso,
               endAt: r.login_at,
               durationMinutes: breakMins,
@@ -252,23 +362,47 @@ export async function fetchStaffAttendanceForDate(dateStr: string): Promise<Staf
       }
     });
 
+    // Incorporate explicit staff breaks
+    userBreaks.forEach((b: any) => {
+      const endIso = b.end_at || new Date().toISOString();
+      const dur = diffMinutes(b.start_at, endIso);
+      breaksList.push({
+        id: b.id,
+        startAt: b.start_at,
+        endAt: b.end_at,
+        durationMinutes: dur,
+      });
+      totalBreakMinutes += dur;
+    });
+
     const firstSession = sessions[0];
     const lastSession = sessions[sessions.length - 1];
     const hasActiveSession = sessions.some((s) => s.isActive);
+    const hasActiveBreak = userBreaks.some((b: any) => !b.end_at);
+
+    let status: 'active' | 'on_break' | 'logged_out' | 'absent' = 'logged_out';
+    if (hasActiveBreak) {
+      status = 'on_break';
+    } else if (hasActiveSession) {
+      status = 'active';
+    }
+
+    const netWorkingMinutes = Math.max(0, grossSessionMinutes - totalBreakMinutes);
 
     return {
       profileId: p.id,
       fullName: p.full_name || p.email || 'Staff Member',
       email: p.email,
       role: p.role || 'staff',
-      status: hasActiveSession ? 'active' : 'logged_out',
+      status,
       firstLogin: firstSession ? firstSession.loginAt : null,
       firstLogout: firstSession ? firstSession.logoutAt : null,
       lastLogout: lastSession ? (lastSession.isActive ? null : lastSession.logoutAt) : null,
-      totalWorkingMinutes,
+      totalWorkingMinutes: netWorkingMinutes,
       totalBreakMinutes,
       sessions,
-      breaks,
+      breaks: breaksList,
     };
   });
 }
+

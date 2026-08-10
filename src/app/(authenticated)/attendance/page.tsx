@@ -189,7 +189,13 @@ export default function AttendancePage() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'staff_attendance' },
         () => {
-          // Reload staff attendance whenever any row changes
+          loadStaffAttendance(staffDate);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'staff_breaks' },
+        () => {
           loadStaffAttendance(staffDate);
         }
       )
@@ -490,13 +496,19 @@ export default function AttendancePage() {
             )}
 
             {/* Summary Metrics */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
               {[
                 {
                   label: 'Active Now',
                   count: staffAttendance.filter((s) => s.status === 'active').length,
                   color: 'emerald',
                   icon: UserCheck,
+                },
+                {
+                  label: 'On Break',
+                  count: staffAttendance.filter((s) => s.status === 'on_break').length,
+                  color: 'amber',
+                  icon: Coffee,
                 },
                 {
                   label: 'Logged Out',
@@ -571,6 +583,10 @@ export default function AttendancePage() {
                                 <Badge className="bg-emerald-500/15 text-emerald-500 border-emerald-500/30 font-medium text-[11px] mt-0.5">
                                   ● Active Now
                                 </Badge>
+                              ) : staff.status === 'on_break' ? (
+                                <Badge className="bg-amber-500/15 text-amber-500 border-amber-500/30 font-medium text-[11px] mt-0.5 animate-pulse inline-flex items-center gap-1">
+                                  <Coffee className="h-3 w-3" /> On Break
+                                </Badge>
                               ) : staff.status === 'logged_out' ? (
                                 <Badge variant="secondary" className="text-[11px] mt-0.5">
                                   Logged Out
@@ -622,47 +638,59 @@ export default function AttendancePage() {
                               Session & Break Timeline
                             </h4>
 
+                            {/* Explicit Staff Breaks */}
+                            {staff.breaks.length > 0 && (
+                              <div className="space-y-2">
+                                <p className="text-[11px] font-semibold text-amber-500 uppercase tracking-wider flex items-center gap-1">
+                                  <Coffee className="h-3 w-3" /> Recorded Breaks ({staff.breaks.length})
+                                </p>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                  {staff.breaks.map((b, bIdx) => (
+                                    <div key={b.id || bIdx} className="flex items-center justify-between p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs font-mono">
+                                      <div className="flex items-center gap-2">
+                                        <Coffee className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+                                        <span>
+                                          {formatTimeStr(b.startAt)} → {b.endAt ? formatTimeStr(b.endAt) : <span className="text-amber-400 animate-pulse font-bold">On Break Now</span>}
+                                        </span>
+                                      </div>
+                                      <span className="font-bold text-amber-500">
+                                        {formatMinutes(b.durationMinutes)}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
                             {staff.sessions.length === 0 ? (
                               <p className="text-xs text-muted-foreground italic">No sessions recorded today.</p>
                             ) : (
                               <div className="relative pl-6 space-y-3 border-l-2 border-primary/20">
-                                {staff.sessions.map((session, idx) => {
-                                  const breakInfo = staff.breaks[idx - 1];
-                                  return (
-                                    <div key={session.id} className="space-y-3">
-                                      {breakInfo && (
-                                        <div className="flex items-center gap-2 p-2 bg-amber-500/10 border border-amber-500/20 rounded-md text-xs text-amber-500 font-mono -ml-6 w-fit">
-                                          <Coffee className="h-3.5 w-3.5 shrink-0" />
-                                          Break: {formatTimeStr(breakInfo.startAt)} → {formatTimeStr(breakInfo.endAt)} (
-                                          <strong>{formatMinutes(breakInfo.durationMinutes)}</strong>)
-                                        </div>
-                                      )}
-                                      <div className="relative bg-accent/40 p-3 rounded-lg border border-border/50 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                                        <div className="absolute -left-[31px] top-3.5 h-3 w-3 rounded-full bg-primary ring-4 ring-background" />
-                                        <div>
-                                          <span className="font-semibold mr-2">Session {idx + 1}:</span>
-                                          <span className="font-mono text-muted-foreground">
-                                            Login: <strong className="text-foreground">{formatTimeStr(session.loginAt)}</strong>
-                                          </span>
-                                          <span className="mx-2 text-muted-foreground">•</span>
-                                          <span className="font-mono text-muted-foreground">
-                                            Logout:{' '}
-                                            {session.logoutAt ? (
-                                              <strong className="text-foreground">{formatTimeStr(session.logoutAt)}</strong>
-                                            ) : (
-                                              <Badge className="bg-emerald-500/20 text-emerald-500 border-none font-normal text-[10px]">
-                                                Active
-                                              </Badge>
-                                            )}
-                                          </span>
-                                        </div>
-                                        <div className="font-mono text-xs font-semibold text-primary">
-                                          {formatMinutes(session.durationMinutes)}
-                                        </div>
-                                      </div>
+                                {staff.sessions.map((session, idx) => (
+                                  <div key={session.id} className="relative bg-accent/40 p-3 rounded-lg border border-border/50 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                    <div className="absolute -left-[31px] top-3.5 h-3 w-3 rounded-full bg-primary ring-4 ring-background" />
+                                    <div>
+                                      <span className="font-semibold mr-2">Session {idx + 1}:</span>
+                                      <span className="font-mono text-muted-foreground">
+                                        Login: <strong className="text-foreground">{formatTimeStr(session.loginAt)}</strong>
+                                      </span>
+                                      <span className="mx-2 text-muted-foreground">•</span>
+                                      <span className="font-mono text-muted-foreground">
+                                        Logout:{' '}
+                                        {session.logoutAt ? (
+                                          <strong className="text-foreground">{formatTimeStr(session.logoutAt)}</strong>
+                                        ) : (
+                                          <Badge className="bg-emerald-500/20 text-emerald-500 border-none font-normal text-[10px]">
+                                            Active
+                                          </Badge>
+                                        )}
+                                      </span>
                                     </div>
-                                  );
-                                })}
+                                    <div className="font-mono text-xs font-semibold text-primary">
+                                      {formatMinutes(session.durationMinutes)}
+                                    </div>
+                                  </div>
+                                ))}
                               </div>
                             )}
 
@@ -681,7 +709,7 @@ export default function AttendancePage() {
                               <div className="flex items-center gap-3">
                                 <span>Work: <strong className="text-primary">{formatMinutes(staff.totalWorkingMinutes)}</strong></span>
                                 <span>|</span>
-                                <span>Break: <strong className="text-amber-500">{formatMinutes(staff.totalBreakMinutes)}</strong></span>
+                                <span>Total Break: <strong className="text-amber-500">{formatMinutes(staff.totalBreakMinutes)}</strong></span>
                               </div>
                             </div>
                           </div>

@@ -145,6 +145,58 @@ export async function POST(request: Request) {
       });
     }
 
+    if (action === 'delete') {
+      const { staff_id } = body;
+
+      if (!staff_id) {
+        return NextResponse.json({ error: 'staff_id is required' }, { status: 400 });
+      }
+
+      // Prevent self-deletion
+      if (staff_id === currentUser.id) {
+        return NextResponse.json({ error: 'You cannot delete your own account' }, { status: 400 });
+      }
+
+      // Use admin client (bypasses RLS) for all delete operations
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      const isServiceKeyValid = serviceRoleKey && serviceRoleKey !== 'your_service_role_key';
+
+      if (!isServiceKeyValid) {
+        return NextResponse.json({ error: 'Service role key is not configured. Cannot delete staff.' }, { status: 500 });
+      }
+
+      const supabaseAdmin = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        serviceRoleKey,
+        { auth: { autoRefreshToken: false, persistSession: false } }
+      );
+
+      // Unassign all members currently assigned to this staff
+      await supabaseAdmin
+        .from('members')
+        .update({ assigned_staff_id: null })
+        .eq('assigned_staff_id', staff_id);
+
+      // Delete profile record using admin client to bypass RLS
+      const { error: profileDeleteError } = await supabaseAdmin
+        .from('profiles')
+        .delete()
+        .eq('id', staff_id);
+
+      if (profileDeleteError) {
+        console.error('Error deleting profile:', profileDeleteError);
+        return NextResponse.json({ error: 'Failed to delete staff profile' }, { status: 500 });
+      }
+
+      // Delete auth user
+      const { error: deleteAuthError } = await supabaseAdmin.auth.admin.deleteUser(staff_id);
+      if (deleteAuthError) {
+        console.error('Error deleting auth user:', deleteAuthError);
+      }
+
+      return NextResponse.json({ success: true, deleted_staff_id: staff_id });
+    }
+
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   } catch (err: any) {
     console.error('Staff API Error:', err);

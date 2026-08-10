@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Settings, Save, Upload, Loader2, Users, Shield, Plus, Search, UserCheck, CheckSquare, Square, Pencil } from 'lucide-react';
+import { Settings, Save, Upload, Loader2, Users, Shield, Plus, Search, UserCheck, CheckSquare, Square, Pencil, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function SettingsPage() {
@@ -32,6 +32,7 @@ export default function SettingsPage() {
   const [newStaff, setNewStaff] = useState({ full_name: '', email: '', password: '', role: 'staff' });
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [memberSearch, setMemberSearch] = useState('');
+  const [deleteConfirmStaff, setDeleteConfirmStaff] = useState<{ id: string; full_name: string } | null>(null);
 
   // Fetch all profiles (staff users)
   const { data: profiles = [], isLoading: profilesLoading } = useQuery({
@@ -192,6 +193,31 @@ export default function SettingsPage() {
       setStaffDialogOpen(false);
     },
     onError: (e: any) => toast.error(e.message),
+  });
+
+  // Delete staff mutation
+  const deleteStaffMutation = useMutation({
+    mutationFn: async (staffId: string) => {
+      const res = await fetch('/api/staff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', staff_id: staffId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete staff member');
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['profiles'] });
+      queryClient.invalidateQueries({ queryKey: ['members-for-assignment'] });
+      queryClient.invalidateQueries({ queryKey: ['members'] });
+      toast.success('Staff member deleted successfully');
+      setDeleteConfirmStaff(null);
+    },
+    onError: (e: any) => {
+      toast.error(e.message);
+      setDeleteConfirmStaff(null);
+    },
   });
 
   // Toggle single member selection
@@ -393,6 +419,15 @@ export default function SettingsPage() {
                                 <SelectItem value="staff">Staff</SelectItem>
                               </SelectContent>
                             </Select>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 w-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                              onClick={() => setDeleteConfirmStaff({ id: p.id, full_name: p.full_name })}
+                              title="Delete Staff"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
                           </div>
                         </td>
                       </tr>
@@ -608,6 +643,38 @@ export default function SettingsPage() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={!!deleteConfirmStaff} onOpenChange={(open) => !open && setDeleteConfirmStaff(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-destructive flex items-center gap-2">
+              <Trash2 className="h-5 w-5" /> Delete Staff Member
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-sm text-muted-foreground">
+              Are you sure you want to delete <span className="font-semibold text-foreground">{deleteConfirmStaff?.full_name}</span>?
+            </p>
+            <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-3 text-xs text-destructive">
+              This action is permanent and cannot be undone. The staff member&apos;s account will be removed and all assigned members will be unassigned.
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setDeleteConfirmStaff(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteStaffMutation.isPending}
+              onClick={() => deleteConfirmStaff && deleteStaffMutation.mutate(deleteConfirmStaff.id)}
+            >
+              {deleteStaffMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Delete Staff
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
