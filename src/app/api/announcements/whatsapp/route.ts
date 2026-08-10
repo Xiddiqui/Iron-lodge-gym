@@ -2,14 +2,26 @@ import { NextRequest, NextResponse } from 'next/server';
 import { sendBulkWhatsAppMessages, getActiveProvider } from '@/lib/whatsapp';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 
+/**
+ * GET: Check if Twilio is configured
+ */
 export async function GET() {
   const provider = getActiveProvider();
+  const isConfigured = !!(
+    process.env.TWILIO_ACCOUNT_SID && 
+    process.env.TWILIO_AUTH_TOKEN && 
+    process.env.TWILIO_WHATSAPP_NUMBER
+  );
+
   return NextResponse.json({
     provider,
-    configured: provider !== undefined,
+    configured: isConfigured,
   });
 }
 
+/**
+ * POST: Send individual or bulk WhatsApp messages via Twilio
+ */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -57,14 +69,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Trigger bulk WhatsApp dispatch
+    // Trigger bulk WhatsApp dispatch using the Twilio-only library
     const result = await sendBulkWhatsAppMessages(finalRecipients, message, mediaUrl);
 
+    // If everything failed, provide the specific Twilio error from the first failed attempt
     if (result.totalSent === 0 && result.totalFailed > 0) {
       const firstError = result.failed[0]?.error || 'Failed to send WhatsApp messages.';
       return NextResponse.json(
         {
-          error: `${firstError} (Provider: ${result.provider})`,
+          error: `${firstError} (Provider: Twilio)`,
           details: result,
         },
         { status: 400 }
@@ -73,7 +86,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `Dispatched WhatsApp announcement to ${result.totalSent} recipients via ${result.provider}`,
+      message: `Dispatched WhatsApp announcement to ${result.totalSent} recipients via Twilio`,
       details: result,
     });
 
@@ -85,4 +98,3 @@ export async function POST(req: NextRequest) {
     );
   }
 }
-
