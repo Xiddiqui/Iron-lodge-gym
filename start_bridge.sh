@@ -5,7 +5,7 @@
 # Placed in ~/ironlodge-bridge/ to avoid macOS TCC restrictions
 # ─────────────────────────────────────────────────────────────
 
-DEVICE_IP="192.168.18.46"
+DEVICE_IP="192.168.18.215"
 DEVICE_PORT="4370"
 SERVER_URL="https://iron-lodge-gym.vercel.app"
 BRIDGE_DIR="$HOME/ironlodge-bridge"

@@ -57,7 +57,7 @@ interface Member {
   gender: string | null;
   phone: string | null;
   cnic: string | null;
-  email: string | null;
+  age: number | null;
   join_date: string;
   monthly_fee: number;
   training_fees: number;
@@ -200,7 +200,7 @@ export default function MembersPage() {
     gender: 'male',
     phone: '',
     cnic: '',
-    email: '',
+    age: '',
     join_date: new Date().toISOString().slice(0, 10),
     monthly_fee: '',
     training_fees: '0',
@@ -523,7 +523,7 @@ export default function MembersPage() {
         gender: data.gender || 'male',
         phone: data.phone || null,
         cnic: data.cnic || null,
-        email: data.email || null,
+        age: data.age ? Number(data.age) : null,
         join_date: data.join_date,
         monthly_fee: calcMonthly,
         training_fees: calcTraining,
@@ -928,7 +928,7 @@ export default function MembersPage() {
       gender: 'male',
       phone: '',
       cnic: '',
-      email: '',
+      age: '',
       join_date: new Date().toISOString().slice(0, 10),
       monthly_fee: '',
       training_fees: '',
@@ -950,7 +950,7 @@ export default function MembersPage() {
       gender: m.gender || 'male',
       phone: m.phone || '',
       cnic: m.cnic || '',
-      email: m.email || '',
+      age: m.age != null ? String(m.age) : '',
       join_date: m.join_date,
       monthly_fee: String(m.monthly_fee),
       training_fees: String(m.training_fees || 0),
@@ -1576,10 +1576,10 @@ export default function MembersPage() {
                 <Input value={form.cnic} onChange={(e) => setForm({ ...form, cnic: e.target.value })} placeholder="e.g. 42101-XXXXXXX-X" />
               </div>
 
-              {/* Email */}
+              {/* Age */}
               <div className="space-y-2">
-                <Label>Email</Label>
-                <Input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="client@example.com" />
+                <Label>Age</Label>
+                <Input type="number" value={form.age} onChange={(e) => setForm({ ...form, age: e.target.value })} placeholder="e.g. 25" min="1" max="120" />
               </div>
 
               {/* Join Date */}
@@ -1735,8 +1735,8 @@ export default function MembersPage() {
                   <div className="font-medium capitalize">{selectedMember?.gender || 'male'}</div>
                 </div>
                 <div>
-                  <div className="text-muted-foreground mb-1">Email</div>
-                  <div className="font-medium">{selectedMember?.email || '—'}</div>
+                  <div className="text-muted-foreground mb-1">Age</div>
+                  <div className="font-medium">{selectedMember?.age != null ? selectedMember.age : '—'}</div>
                 </div>
                 <div>
                   <div className="text-muted-foreground mb-1">Join Date</div>

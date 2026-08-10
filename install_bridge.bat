@@ -27,8 +27,8 @@ copy /Y "%~dp0zkteco_bridge.py" "%INSTALL_DIR%\" >nul
 
 :: 3. Ask for K50 Device IP
 echo.
-set /p K50_IP="Enter the K50 Device IP Address (default: 192.168.18.46): "
-if "%K50_IP%"=="" set K50_IP=192.168.18.46
+set /p K50_IP="Enter the K50 Device IP Address (default: 192.168.18.215): "
+if "%K50_IP%"=="" set K50_IP=192.168.18.215
 
 set /p VERCEL_URL="Enter your Web App URL (default: https://iron-lodge-gym.vercel.app): "
 if "%VERCEL_URL%"=="" set VERCEL_URL=https://iron-lodge-gym.vercel.app

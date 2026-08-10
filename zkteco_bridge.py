@@ -9,7 +9,7 @@ Usage:
     python3 zkteco_bridge.py --ip <K50_DEVICE_IP> --server <VERCEL_URL>
 
 Example:
-    python3 zkteco_bridge.py --ip 192.168.18.46 --server https://iron-lodge-gym.vercel.app
+    python3 zkteco_bridge.py --ip 192.168.18.215 --server https://iron-lodge-gym.vercel.app
 """
 
 import sys
@@ -51,7 +51,7 @@ def send_punch_to_webapp(server_url, user_id, timestamp_str):
 
 def main():
     parser = argparse.ArgumentParser(description="ZKTeco K50 Bridge to Iron Lodge Gym Web App")
-    parser.add_argument("--ip", required=True, help="IP address of the K50 device (e.g. 192.168.18.46)")
+    parser.add_argument("--ip", required=True, help="IP address of the K50 device (e.g. 192.168.18.215)")
     parser.add_argument("--port", type=int, default=4370, help="Port of K50 device (default: 4370)")
     parser.add_argument("--server", default="https://iron-lodge-gym.vercel.app", help="Live web app URL")
     args = parser.parse_args()
