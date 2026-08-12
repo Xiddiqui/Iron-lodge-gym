@@ -14,9 +14,21 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
   CalendarCheck, Plus, Search, Loader2, Clock, LogOut,
-  UserCheck, Shield, Coffee, ChevronDown, ChevronUp, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle
+  UserCheck, Shield, Coffee, ChevronDown, ChevronUp, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle, Banknote, X
 } from 'lucide-react';
 import { toast } from 'sonner';
+
+// ─────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────
+type FeeStatus = 'paid' | 'partial' | 'due' | 'overdue';
+interface MemberFeeInfo {
+  status: FeeStatus;
+  amountDue?: number;
+  amountPaid?: number;
+  totalAmount?: number;
+  paidPercent?: number;
+}
 
 export default function AttendancePage() {
   const queryClient = useQueryClient();
@@ -30,9 +42,15 @@ export default function AttendancePage() {
   const [memberSearch, setMemberSearch] = useState('');
   const [expandedStaffId, setExpandedStaffId] = useState<string | null>(null);
 
+  // 1-Day walk-in dialog state
+  const [oneDayDialogOpen, setOneDayDialogOpen] = useState(false);
+  const [oneDayName, setOneDayName] = useState('');
+  const [oneDayAmount, setOneDayAmount] = useState('');
+  const [oneDaySubmitting, setOneDaySubmitting] = useState(false);
+
   // --- Live data state (driven by realtime sockets) ---
   const [attendance, setAttendance] = useState<any[]>([]);
-  const [memberFeeStatuses, setMemberFeeStatuses] = useState<Record<string, { status: 'paid' | 'due' | 'overdue'; amountDue?: number }>>({});
+  const [memberFeeStatuses, setMemberFeeStatuses] = useState<Record<string, MemberFeeInfo>>({});
   const [isLoadingMemberAtt, setIsLoadingMemberAtt] = useState(true);
   const [members, setMembers] = useState<any[]>([]);
   const [staffAttendance, setStaffAttendance] = useState<StaffDayAttendance[]>([]);
@@ -42,6 +60,42 @@ export default function AttendancePage() {
   const [lastBiometricPing, setLastBiometricPing] = useState<string | null>(null);
 
   const isAdmin = userRole === 'admin';
+
+  // ─────────────────────────────────────────────────────────────────
+  // Compute fee status from a fee record
+  // ─────────────────────────────────────────────────────────────────
+  const computeFeeStatus = (fr: any): MemberFeeInfo => {
+    const feeAmount   = Number(fr.amount)      || 0;
+    const discount    = Number(fr.discount)    || 0;
+    const amountPaid  = Number(fr.amount_paid) || 0;
+    const isPaid      = fr.paid === true || fr.status === 'paid';
+    const netDue      = Math.max(0, feeAmount - discount - amountPaid);
+    const today       = new Date();
+
+    let status: FeeStatus;
+
+    if (isPaid || netDue === 0) {
+      status = 'paid';
+    } else if (amountPaid > 0 && netDue > 0) {
+      // Partial payment made
+      status = 'partial';
+    } else if (fr.period_end && new Date(fr.period_end) < today) {
+      status = 'overdue';
+    } else {
+      status = 'due';
+    }
+
+    const totalForPercent = Math.max(feeAmount - discount, 1);
+    const paidPercent = Math.round((amountPaid / totalForPercent) * 100);
+
+    return {
+      status,
+      amountDue: netDue > 0 ? netDue : undefined,
+      amountPaid: amountPaid > 0 ? amountPaid : undefined,
+      totalAmount: feeAmount - discount,
+      paidPercent: status === 'partial' ? paidPercent : undefined,
+    };
+  };
 
   // ─────────────────────────────────────────────────────────────────
   // Fetch member attendance for a date
@@ -56,6 +110,7 @@ export default function AttendancePage() {
       .gte('check_in', `${forDate}T00:00:00`)
       .lt('check_in', nextDay.toISOString().slice(0, 10) + 'T00:00:00')
       .order('check_in', { ascending: false });
+    // Note: guest_name and notes columns added in migration 019
 
     if (!error && data) {
       setAttendance(data ?? []);
@@ -74,30 +129,12 @@ export default function AttendancePage() {
           .order('period_month', { ascending: false });
 
         if (feeData) {
-          const today = new Date();
-          const feeMap: Record<string, { status: 'paid' | 'due' | 'overdue'; amountDue?: number }> = {};
+          const feeMap: Record<string, MemberFeeInfo> = {};
 
+          // Group by member_id, take the most recent record per member
           feeData.forEach((fr: any) => {
             if (!feeMap[fr.member_id]) {
-              const isPaid = fr.paid ?? (fr.status === 'paid');
-              const feeAmount = Number(fr.amount) || 0;
-              const discount = Number(fr.discount) || 0;
-              const amountPaid = Number(fr.amount_paid) || 0;
-              const effectiveDue = Math.max(0, feeAmount - discount - amountPaid);
-
-              let status: 'paid' | 'due' | 'overdue' = 'due';
-              if (isPaid || effectiveDue === 0) {
-                status = 'paid';
-              } else if (fr.period_end && new Date(fr.period_end) < today) {
-                status = 'overdue';
-              } else {
-                status = 'due';
-              }
-
-              feeMap[fr.member_id] = {
-                status,
-                amountDue: effectiveDue > 0 ? effectiveDue : feeAmount,
-              };
+              feeMap[fr.member_id] = computeFeeStatus(fr);
             }
           });
 
@@ -166,7 +203,6 @@ export default function AttendancePage() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'attendance' },
         () => {
-          // Reload member attendance whenever any row changes
           loadMemberAttendance(date);
         }
       )
@@ -221,7 +257,6 @@ export default function AttendancePage() {
     onSuccess: () => {
       toast.success('Attendance marked');
       setDialogOpen(false);
-      // Realtime will auto-reload
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -237,10 +272,52 @@ export default function AttendancePage() {
     onSuccess: () => {
       toast.success('Check-out marked');
       setDialogOpen(false);
-      // Realtime will auto-reload
     },
     onError: (e: any) => toast.error(e.message),
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // 1-Day walk-in handler
+  // ─────────────────────────────────────────────────────────────────
+  const handleOneDaySubmit = async () => {
+    const name = oneDayName.trim();
+    const amount = Number(oneDayAmount);
+
+    if (!name) {
+      toast.error('Please enter visitor name');
+      return;
+    }
+
+    setOneDaySubmitting(true);
+    try {
+      // Only use columns that actually exist in the DB schema.
+      // guest_name + notes added via migration 019.
+      // member_id is nullable after migration 019.
+      // Amount is stored in notes for reference.
+      const noteText = amount > 0
+        ? `1-Day PKR ${amount}`
+        : '1-Day Walk-in';
+
+      const { error } = await supabase.from('attendance').insert({
+        guest_name: name,
+        notes: noteText,
+        marked_by: currentUser?.id,
+        source: 'manual',
+        // member_id intentionally omitted — nullable after migration 019
+      });
+
+      if (error) throw error;
+
+      toast.success(`Walk-in attendance marked for ${name}`);
+      setOneDayDialogOpen(false);
+      setOneDayName('');
+      setOneDayAmount('');
+    } catch (e: any) {
+      toast.error(e.message || 'Failed to mark attendance');
+    } finally {
+      setOneDaySubmitting(false);
+    }
+  };
 
   // ─────────────────────────────────────────────────────────────────
   // Helpers
@@ -255,6 +332,83 @@ export default function AttendancePage() {
     return new Date(isoStr).toLocaleTimeString('en-US', {
       hour: '2-digit', minute: '2-digit', hour12: true,
     });
+  };
+
+  // ─────────────────────────────────────────────────────────────────
+  // Fee Status Badge Component
+  // ─────────────────────────────────────────────────────────────────
+  const FeeStatusBadge = ({ memberId, record }: { memberId: string | null; record?: any }) => {
+    // Determine fee info: prefer computed map, then inline record data
+    let feeInfo: MemberFeeInfo | undefined = memberId ? memberFeeStatuses[memberId] : undefined;
+
+    // Walk-in guests (no member_id, guest_name set) always count as Fee Paid
+    if (!memberId && record?.guest_name) {
+      feeInfo = { status: 'paid' };
+    }
+
+    // If still nothing and no member, show "No Record"
+    if (!feeInfo) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-muted/30 text-muted-foreground border border-border/40">
+          No Record
+        </span>
+      );
+    }
+
+    const { status, amountDue, amountPaid, totalAmount, paidPercent } = feeInfo;
+
+    if (status === 'paid') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+          <CheckCircle className="h-3.5 w-3.5" />
+          Fee Paid
+        </span>
+      );
+    }
+
+    if (status === 'partial') {
+      return (
+        <div className="flex flex-col gap-1">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-500/15 text-blue-400 border border-blue-500/30">
+            <Banknote className="h-3.5 w-3.5" />
+            Partial {paidPercent !== undefined ? `(${paidPercent}%)` : ''}
+          </span>
+          {(amountPaid !== undefined || amountDue !== undefined) && (
+            <div className="text-[10px] text-muted-foreground px-1">
+              {amountPaid !== undefined && <span className="text-blue-400">Paid: PKR {amountPaid.toLocaleString()}</span>}
+              {amountPaid !== undefined && amountDue !== undefined && <span className="mx-1">·</span>}
+              {amountDue !== undefined && <span>Remaining: PKR {amountDue.toLocaleString()}</span>}
+            </div>
+          )}
+          {/* Progress bar */}
+          {paidPercent !== undefined && (
+            <div className="w-24 h-1.5 bg-border/50 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-400 rounded-full transition-all"
+                style={{ width: `${Math.min(paidPercent, 100)}%` }}
+              />
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (status === 'overdue') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-500/15 text-red-400 border border-red-500/30">
+          <AlertCircle className="h-3.5 w-3.5" />
+          Overdue {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
+        </span>
+      );
+    }
+
+    // due
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+        <Clock className="h-3.5 w-3.5" />
+        Fee Due {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
+      </span>
+    );
   };
 
   // ─────────────────────────────────────────────────────────────────
@@ -338,13 +492,22 @@ export default function AttendancePage() {
             <Badge variant="secondary" className="px-3 py-1 text-sm font-medium">
               {attendance.length} Present Today
             </Badge>
-            <div className="flex gap-3 w-full sm:w-auto">
+            <div className="flex flex-wrap gap-3 w-full sm:w-auto">
               <Input
                 type="date"
                 value={date}
                 onChange={(e) => setDate(e.target.value)}
                 className="w-full sm:w-40"
               />
+              {/* 1-Day Walk-in Button */}
+              <Button
+                variant="outline"
+                onClick={() => setOneDayDialogOpen(true)}
+                className="gap-2 border-amber-500/40 text-amber-500 hover:bg-amber-500/10 hover:text-amber-400"
+              >
+                <Banknote className="h-4 w-4" />
+                1 Day
+              </Button>
               <Button onClick={() => setDialogOpen(true)}>
                 <Plus className="h-4 w-4 mr-1" /> Mark Member
               </Button>
@@ -378,76 +541,62 @@ export default function AttendancePage() {
                         </td>
                       </tr>
                     ) : (
-                      attendance.map((a: any) => (
-                        <tr key={a.id} className="border-b border-border/50 hover:bg-accent/30 transition-colors">
-                          <td className="p-4">
-                            <div className="flex items-center gap-3">
-                              <div className="h-9 w-9 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary">
-                                {(a.members?.full_name || '?').slice(0, 1).toUpperCase()}
-                              </div>
-                              <div>
-                                <p className="font-medium">{a.members?.full_name}</p>
-                                <p className="text-xs text-muted-foreground">{a.members?.phone}</p>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="p-4">
-                            <div className="flex items-center gap-2 font-mono text-xs">
-                              <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                              {new Date(a.check_in).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
-                            </div>
-                          </td>
-                          <td className="p-4">
-                            {(() => {
-                              const feeInfo = memberFeeStatuses[a.member_id];
-                              const rawStatus = a.fee_status || feeInfo?.status || 'due';
-                              const amountDue = a.fee_amount_due ?? feeInfo?.amountDue;
+                      attendance.map((a: any) => {
+                        // Determine display name
+                        const displayName = a.members?.full_name || a.guest_name || a.notes?.replace(/^1-Day Walk-in: /, '').split(' | ')[0] || 'Walk-in Guest';
+                        const displayPhone = a.members?.phone || (a.guest_name ? '1-Day Visit' : null);
 
-                              if (rawStatus === 'paid') {
-                                return (
-                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                                    <CheckCircle className="h-3.5 w-3.5" />
-                                    Fee Paid
-                                  </span>
-                                );
-                              }
-                              if (rawStatus === 'overdue') {
-                                return (
-                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-500/15 text-red-400 border border-red-500/30">
-                                    <AlertCircle className="h-3.5 w-3.5" />
-                                    Overdue {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
-                                  </span>
-                                );
-                              }
-                              return (
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
-                                  <Clock className="h-3.5 w-3.5" />
-                                  Fee Due {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
+                        return (
+                          <tr key={a.id} className="border-b border-border/50 hover:bg-accent/30 transition-colors">
+                            <td className="p-4">
+                              <div className="flex items-center gap-3">
+                                <div className={`h-9 w-9 rounded-full grid place-items-center text-xs font-semibold ${
+                                  a.member_id ? 'bg-primary/20 text-primary' : 'bg-amber-500/20 text-amber-400'
+                                }`}>
+                                  {displayName.slice(0, 1).toUpperCase()}
+                                </div>
+                                <div>
+                                  <p className="font-medium">{displayName}</p>
+                                  {displayPhone && <p className="text-xs text-muted-foreground">{displayPhone}</p>}
+                                  {!a.member_id && (
+                                    <span className="text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/20 rounded px-1.5 py-0.5">
+                                      Walk-in
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </td>
+                            <td className="p-4">
+                              <div className="flex items-center gap-2 font-mono text-xs">
+                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                                {new Date(a.check_in).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
+                              </div>
+                            </td>
+                            <td className="p-4">
+                              <FeeStatusBadge memberId={a.member_id} record={a} />
+                            </td>
+                            <td className="p-4 hidden md:table-cell">
+                              {a.source === 'biometric' ? (
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-violet-500/15 text-violet-400 border border-violet-500/25">
+                                  <Fingerprint className="h-3 w-3" />
+                                  Biometric
                                 </span>
-                              );
-                            })()}
-                          </td>
-                          <td className="p-4 hidden md:table-cell">
-                            {a.source === 'biometric' ? (
-                              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-violet-500/15 text-violet-400 border border-violet-500/25">
-                                <Fingerprint className="h-3 w-3" />
-                                Biometric
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-accent text-muted-foreground border border-border/50">
-                                ✍️ Manual
-                              </span>
-                            )}
-                          </td>
-                          <td className="p-4 hidden sm:table-cell text-muted-foreground">
-                            {a.source === 'biometric' ? (
-                              <span className="text-violet-400/70 text-xs italic">Fingerprint Device</span>
-                            ) : (
-                              a.profiles?.full_name || '—'
-                            )}
-                          </td>
-                        </tr>
-                      ))
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-accent text-muted-foreground border border-border/50">
+                                  ✍️ Manual
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-4 hidden sm:table-cell text-muted-foreground">
+                              {a.source === 'biometric' ? (
+                                <span className="text-violet-400/70 text-xs italic">Fingerprint Device</span>
+                              ) : (
+                                a.profiles?.full_name || '—'
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
@@ -464,7 +613,7 @@ export default function AttendancePage() {
               <div>
                 <div className="flex items-center gap-2">
                   <Shield className="h-4 w-4 text-primary" />
-                  <h2 className="font-semibold text-base">Automatic Staff Attendance & Sessions</h2>
+                  <h2 className="font-semibold text-base">Automatic Staff Attendance &amp; Sessions</h2>
                   <span className="flex items-center gap-1 text-[11px] text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 rounded-full px-2 py-0.5">
                     <Wifi className="h-2.5 w-2.5" /> Live
                   </span>
@@ -635,7 +784,7 @@ export default function AttendancePage() {
                           <div className="mt-5 pt-4 border-t border-border/50 space-y-4">
                             <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
                               <Clock className="h-3.5 w-3.5 text-primary" />
-                              Session & Break Timeline
+                              Session &amp; Break Timeline
                             </h4>
 
                             {/* Explicit Staff Breaks */}
@@ -724,7 +873,7 @@ export default function AttendancePage() {
         )}
       </Tabs>
 
-      {/* Mark Member Dialog */}
+      {/* ═══ Mark Member Dialog ═══ */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent>
           <DialogHeader>
@@ -769,6 +918,96 @@ export default function AttendancePage() {
                 </div>
               );
             })}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ═══ 1-Day Walk-in Dialog ═══ */}
+      <Dialog open={oneDayDialogOpen} onOpenChange={(open) => {
+        setOneDayDialogOpen(open);
+        if (!open) { setOneDayName(''); setOneDayAmount(''); }
+      }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <div className="h-8 w-8 rounded-lg bg-amber-500/15 grid place-items-center">
+                <Banknote className="h-4 w-4 text-amber-400" />
+              </div>
+              1-Day Walk-in Attendance
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <p className="text-sm text-muted-foreground">
+              Mark attendance for a walk-in visitor with a one-day fee payment.
+            </p>
+
+            {/* Name Field */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="oneday-name">
+                Visitor Name <span className="text-red-400">*</span>
+              </label>
+              <div className="relative">
+                <UserCheck className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  id="oneday-name"
+                  placeholder="Enter visitor name"
+                  value={oneDayName}
+                  onChange={(e) => setOneDayName(e.target.value)}
+                  className="pl-10"
+                  onKeyDown={(e) => e.key === 'Enter' && handleOneDaySubmit()}
+                />
+              </div>
+            </div>
+
+            {/* Amount Field */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="oneday-amount">
+                Amount Paid (PKR)
+              </label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground font-mono">₨</span>
+                <Input
+                  id="oneday-amount"
+                  type="number"
+                  placeholder="e.g. 200"
+                  value={oneDayAmount}
+                  onChange={(e) => setOneDayAmount(e.target.value)}
+                  className="pl-8"
+                  min={0}
+                  onKeyDown={(e) => e.key === 'Enter' && handleOneDaySubmit()}
+                />
+              </div>
+              {/* <p className="text-xs text-muted-foreground">Leave blank if no fee charged</p> */}
+            </div>
+
+            {/* Info box */}
+            {/* <div className="flex items-start gap-2.5 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-400">
+              <CheckCircle className="h-4 w-4 shrink-0 mt-0.5" />
+              <span>Attendance will be marked as <strong>Fee Paid</strong> automatically.</span>
+            </div> */}
+          </div>
+
+          <div className="flex gap-3 pt-2">
+            <Button
+              variant="outline"
+              className="flex-1"
+              onClick={() => setOneDayDialogOpen(false)}
+              disabled={oneDaySubmitting}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="flex-1 bg-amber-500 hover:bg-amber-600 text-white"
+              onClick={handleOneDaySubmit}
+              disabled={oneDaySubmitting || !oneDayName.trim()}
+            >
+              {oneDaySubmitting ? (
+                <><Loader2 className="h-4 w-4 animate-spin mr-2" /> Marking...</>
+              ) : (
+                <><CheckCircle className="h-4 w-4 mr-2" /> Mark Attended</>
+              )}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

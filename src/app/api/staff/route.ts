@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createClient } from '@supabase/supabase-js';
+import { getAssignedStaffIds, embedStaffIdsInNotes } from '@/lib/staff-assignments';
 
 export async function POST(request: Request) {
   try {
@@ -26,7 +27,7 @@ export async function POST(request: Request) {
     const action = body.action || 'create';
 
     if (action === 'create') {
-      const { full_name, email, password, role = 'staff', assigned_member_ids = [] } = body;
+      const { full_name, email, password, role = 'staff', assigned_member_ids = [], auto_assign_male = false, auto_assign_female = false } = body;
 
       if (!full_name || !email || !password) {
         return NextResponse.json({ error: 'Full name, email, and password are required' }, { status: 400 });
@@ -77,27 +78,57 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'Failed to create user account' }, { status: 500 });
       }
 
-      // Upsert profile record to ensure profile exists
+      // Upsert profile record to ensure profile exists with gender auto assign flags
+      const profileData: Record<string, any> = {
+        id: createdUserId,
+        full_name,
+        email,
+        role,
+        auto_assign_male: Boolean(auto_assign_male),
+        auto_assign_female: Boolean(auto_assign_female),
+      };
+
       const { error: profileError } = await supabase
         .from('profiles')
-        .upsert({
-          id: createdUserId,
-          full_name,
-          email,
-          role,
-        });
+        .upsert(profileData);
 
       if (profileError) {
-        console.error('Error upserting profile:', profileError);
+        console.error('Error upserting profile with auto-assign flags, falling back:', profileError);
+        // Fallback if auto_assign columns don't exist yet
+        delete profileData.auto_assign_male;
+        delete profileData.auto_assign_female;
+        await supabase.from('profiles').upsert(profileData);
       }
 
       // Assign members if any were selected
       if (Array.isArray(assigned_member_ids) && assigned_member_ids.length > 0) {
-        // Set assigned_staff_id for selected members
-        await supabase
+        const { data: targetMembers } = await supabase
           .from('members')
-          .update({ assigned_staff_id: createdUserId })
+          .select('*')
           .in('id', assigned_member_ids);
+
+        if (targetMembers) {
+          for (const m of targetMembers) {
+            const currentArr = getAssignedStaffIds(m);
+            if (!currentArr.includes(createdUserId)) {
+              currentArr.push(createdUserId);
+            }
+            const primary = m.assigned_staff_id || createdUserId;
+            const updatedNotes = embedStaffIdsInNotes(m.notes, currentArr);
+
+            const { error: err } = await supabase
+              .from('members')
+              .update({ assigned_staff_ids: currentArr, assigned_staff_id: primary, notes: updatedNotes })
+              .eq('id', m.id);
+
+            if (err) {
+              await supabase
+                .from('members')
+                .update({ assigned_staff_id: primary, notes: updatedNotes })
+                .eq('id', m.id);
+            }
+          }
+        }
       }
 
       return NextResponse.json({
@@ -108,34 +139,86 @@ export async function POST(request: Request) {
     }
 
     if (action === 'update_assignments') {
-      const { staff_id, assigned_member_ids = [] } = body;
+      const { staff_id, assigned_member_ids = [], auto_assign_male, auto_assign_female } = body;
 
       if (!staff_id) {
         return NextResponse.json({ error: 'staff_id is required' }, { status: 400 });
       }
 
-      // First, remove staff assignment for members currently assigned to this staff that are NOT in assigned_member_ids
-      const { data: currentlyAssigned } = await supabase
-        .from('members')
-        .select('id')
-        .eq('assigned_staff_id', staff_id);
+      // Update profile gender auto assign flags if provided
+      if (typeof auto_assign_male !== 'undefined' || typeof auto_assign_female !== 'undefined') {
+        const updateObj: Record<string, any> = {};
+        if (typeof auto_assign_male !== 'undefined') updateObj.auto_assign_male = Boolean(auto_assign_male);
+        if (typeof auto_assign_female !== 'undefined') updateObj.auto_assign_female = Boolean(auto_assign_female);
 
-      const currentIds = (currentlyAssigned || []).map((m: any) => m.id);
-      const toRemove = currentIds.filter((id: string) => !assigned_member_ids.includes(id));
+        const { error: updateProfileErr } = await supabase
+          .from('profiles')
+          .update(updateObj)
+          .eq('id', staff_id);
 
-      if (toRemove.length > 0) {
-        await supabase
-          .from('members')
-          .update({ assigned_staff_id: null })
-          .in('id', toRemove);
+        if (updateProfileErr) {
+          // Columns may not exist yet — store flags in section_access as JSON fallback
+          console.error('Error updating staff profile auto assign flags (will use fallback):', updateProfileErr.message);
+          try {
+            const flagsJson = JSON.stringify({
+              auto_assign_male: Boolean(auto_assign_male),
+              auto_assign_female: Boolean(auto_assign_female),
+            });
+            await supabase
+              .from('profiles')
+              .update({ section_access: `auto_assign:${flagsJson}` })
+              .eq('id', staff_id);
+          } catch (fbErr) {
+            console.error('Fallback also failed:', fbErr);
+          }
+        }
       }
 
-      // Next, set assigned_staff_id for selected members
-      if (assigned_member_ids.length > 0) {
-        await supabase
-          .from('members')
-          .update({ assigned_staff_id: staff_id })
-          .in('id', assigned_member_ids);
+      // Update member assignments for staff_id supporting multi-staff assignments
+      const { data: allCurrentMembers } = await supabase
+        .from('members')
+        .select('*');
+
+      if (allCurrentMembers) {
+        for (const m of allCurrentMembers) {
+          const currentArr = getAssignedStaffIds(m);
+          const isSelected = assigned_member_ids.includes(m.id);
+          const hasStaff = currentArr.includes(staff_id);
+
+          if (isSelected && !hasStaff) {
+            const nextArr = [...currentArr, staff_id];
+            const primary = m.assigned_staff_id || staff_id;
+            const updatedNotes = embedStaffIdsInNotes(m.notes, nextArr);
+
+            const { error: err } = await supabase
+              .from('members')
+              .update({ assigned_staff_ids: nextArr, assigned_staff_id: primary, notes: updatedNotes })
+              .eq('id', m.id);
+
+            if (err) {
+              await supabase
+                .from('members')
+                .update({ assigned_staff_id: primary, notes: updatedNotes })
+                .eq('id', m.id);
+            }
+          } else if (!isSelected && hasStaff) {
+            const nextArr = currentArr.filter((id) => id !== staff_id);
+            const primary = m.assigned_staff_id === staff_id ? (nextArr[0] || null) : m.assigned_staff_id;
+            const updatedNotes = embedStaffIdsInNotes(m.notes, nextArr);
+
+            const { error: err } = await supabase
+              .from('members')
+              .update({ assigned_staff_ids: nextArr, assigned_staff_id: primary, notes: updatedNotes })
+              .eq('id', m.id);
+
+            if (err) {
+              await supabase
+                .from('members')
+                .update({ assigned_staff_id: primary, notes: updatedNotes })
+                .eq('id', m.id);
+            }
+          }
+        }
       }
 
       return NextResponse.json({
@@ -172,10 +255,32 @@ export async function POST(request: Request) {
       );
 
       // Unassign all members currently assigned to this staff
-      await supabaseAdmin
+      const { data: membersToClean } = await supabaseAdmin
         .from('members')
-        .update({ assigned_staff_id: null })
-        .eq('assigned_staff_id', staff_id);
+        .select('*');
+
+      if (membersToClean) {
+        for (const m of membersToClean) {
+          const currentArr = getAssignedStaffIds(m);
+          if (currentArr.includes(staff_id)) {
+            const nextArr = currentArr.filter((id) => id !== staff_id);
+            const primary = m.assigned_staff_id === staff_id ? (nextArr[0] || null) : m.assigned_staff_id;
+            const updatedNotes = embedStaffIdsInNotes(m.notes, nextArr);
+
+            const { error: err } = await supabaseAdmin
+              .from('members')
+              .update({ assigned_staff_ids: nextArr, assigned_staff_id: primary, notes: updatedNotes })
+              .eq('id', m.id);
+
+            if (err) {
+              await supabaseAdmin
+                .from('members')
+                .update({ assigned_staff_id: primary, notes: updatedNotes })
+                .eq('id', m.id);
+            }
+          }
+        }
+      }
 
       // Delete profile record using admin client to bypass RLS
       const { error: profileDeleteError } = await supabaseAdmin

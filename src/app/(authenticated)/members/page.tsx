@@ -16,6 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert } from 'lucide-react';
 import { toast } from 'sonner';
+import { isMemberAssignedToStaff, embedStaffIdsInNotes } from '@/lib/staff-assignments';
 import { PAYMENT_METHODS } from '@/lib/constants';
 
 interface MessageTemplate {
@@ -68,6 +69,7 @@ interface Member {
   photo_url: string | null;
   created_at: string;
   assigned_staff_id: string | null;
+  assigned_staff_ids?: string[] | null;
   created_by?: string | null;
 }
 
@@ -546,8 +548,37 @@ export default function MembersPage() {
         return { isPendingEdit: true };
       }
 
-      if (!editing && currentUser?.id) {
-        payload.created_by = currentUser.id;
+      if (!editing) {
+        if (currentUser?.id) {
+          payload.created_by = currentUser.id;
+        }
+
+        // Auto-assign staff based on gender auto-assignment rules if not manually specified
+        if (!payload.assigned_staff_id && (!payload.assigned_staff_ids || payload.assigned_staff_ids.length === 0) && profiles.length > 0) {
+          const memberGender = (payload.gender || 'male').toLowerCase();
+          const matchingStaffIds = profiles
+            .filter((p: any) => {
+              // Check native columns first
+              if (memberGender === 'male' && p.auto_assign_male) return true;
+              if (memberGender === 'female' && p.auto_assign_female) return true;
+              // Fall back to section_access JSON
+              if (typeof p.section_access === 'string' && p.section_access.startsWith('auto_assign:')) {
+                try {
+                  const flags = JSON.parse(p.section_access.replace('auto_assign:', ''));
+                  if (memberGender === 'male' && flags.auto_assign_male) return true;
+                  if (memberGender === 'female' && flags.auto_assign_female) return true;
+                } catch { /* ignore */ }
+              }
+              return false;
+            })
+            .map((p: any) => p.id);
+
+          if (matchingStaffIds.length > 0) {
+            payload.assigned_staff_ids = matchingStaffIds;
+            payload.assigned_staff_id = matchingStaffIds[0];
+            payload.notes = embedStaffIdsInNotes(payload.notes, matchingStaffIds);
+          }
+        }
       }
 
       let currentPayload: Record<string, any> = { ...payload };
@@ -999,7 +1030,7 @@ export default function MembersPage() {
   // Staff users only see members assigned to them; admins see all
   const staffFilteredMembers = useMemo(() => {
     if (isAdmin || !currentUser?.id) return members;
-    return members.filter((m) => m.assigned_staff_id === currentUser.id);
+    return members.filter((m) => isMemberAssignedToStaff(m, currentUser.id));
   }, [members, isAdmin, currentUser?.id]);
 
   const filtered = staffFilteredMembers.filter((m) => {
@@ -1017,14 +1048,46 @@ export default function MembersPage() {
   });
 
   // Helper to get payment status info for a member
+  // Uses the member's join_date to determine their billing day (e.g. joined Aug 10 → due on 10th each month)
   function getMemberPaymentStatus(m: Member) {
-    const currentFee = memberCurrentFee[m.id];
-    const unpaidFees = memberUnpaidFees[m.id] || [];
+    const now = new Date();
+    const today = now.getDate();
+
+    // Determine the member's billing day from their join_date
+    const joinDay = m.join_date ? new Date(m.join_date).getDate() : 1;
+
+    // Check if this month's fee is actually due yet based on the member's billing day
+    // e.g. if member joined on Aug 10 and today is Sep 1, fee isn't due until Sep 10
+    const feeNotDueYet = today < joinDay;
+
+    let currentFee = memberCurrentFee[m.id];
+    let unpaidFees = memberUnpaidFees[m.id] || [];
+
+    if (feeNotDueYet) {
+      // Fee for current month is not due yet — use previous month's record as "current"
+      const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}-01`;
+      currentFee = allFeeRecords.find(fr => fr.member_id === m.id && fr.period_month === prevMonthKey);
+
+      // Exclude current month's fee record from unpaid list since it's not due yet
+      unpaidFees = unpaidFees.filter(fr => fr.period_month !== currentMonthKey);
+    }
+
     const unpaidMonths = unpaidFees.length;
     const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
 
     if (!currentFee) {
-      // No fee record for current month — treated as unpaid
+      // No fee record for the relevant month — treated as unpaid
+      // But if fee is not due yet and there's no previous month either (new member), show as paid
+      if (feeNotDueYet && unpaidMonths === 0) {
+        return {
+          status: 'paid' as const,
+          percentage: 100,
+          label: 'Not Due Yet',
+          unpaidMonths: 0,
+          totalDue: 0,
+        };
+      }
       return {
         status: 'unpaid' as const,
         percentage: 0,
@@ -1044,7 +1107,7 @@ export default function MembersPage() {
       return {
         status: 'paid' as const,
         percentage: 100,
-        label: '100% Paid',
+        label: feeNotDueYet ? 'Not Due Yet' : '100% Paid',
         unpaidMonths: Math.max(0, unpaidMonths),
         totalDue: 0,
       };

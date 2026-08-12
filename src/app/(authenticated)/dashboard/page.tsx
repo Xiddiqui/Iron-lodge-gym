@@ -105,6 +105,44 @@ export default function DashboardPage() {
     },
   });
 
+  // ── Helper: parse walk-in PKR amount from notes string ("1-Day PKR 200")
+  const parseWalkinAmount = (notes: string | null): number => {
+    if (!notes) return 0;
+    const match = notes.match(/PKR\s*([\d.]+)/i);
+    return match ? Number(match[1]) || 0 : 0;
+  };
+
+  // ── Query: walk-in (1-day) attendance records that have guest_name set
+  const { data: walkinRecords = [] } = useQuery({
+    queryKey: ['dash-walkin-records'],
+    enabled: role === 'admin',
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('attendance')
+        .select('id, guest_name, notes, check_in, source')
+        .not('guest_name', 'is', null)
+        .order('check_in', { ascending: false })
+        .limit(500);
+      // If the column doesn't exist yet (migration not run), return empty
+      if (error?.code === '42703') return [];
+      if (error) throw error;
+      return data ?? [];
+    },
+  });
+
+  // ── Walk-in stats for selected month
+  const walkinThisMonth = walkinRecords.filter((w: any) => {
+    const d = new Date(w.check_in);
+    return d >= new Date(monthStart) && d < new Date(monthEnd);
+  });
+  const walkinMonthRevenue = walkinThisMonth.reduce((s: number, w: any) => s + parseWalkinAmount(w.notes), 0);
+  const walkinAvgPerHead = walkinThisMonth.length > 0 ? Math.round(walkinMonthRevenue / walkinThisMonth.length) : 0;
+
+  // ── Walk-ins today
+  const walkinToday = walkinRecords.filter((w: any) => isToday(w.check_in));
+  const walkinTodayRevenue = walkinToday.reduce((s: number, w: any) => s + parseWalkinAmount(w.notes), 0);
+
+
   // Fee records for the month with auto-sync for missing member records
   const { data: fees = [] } = useQuery({
     queryKey: ['dash-fees', monthStart, monthEnd],
@@ -271,7 +309,8 @@ export default function DashboardPage() {
     const paidAmt = Number(f.amount_paid);
     if (!isNaN(paidAmt) && paidAmt > 0) return s + paidAmt;
     return s + (f.paid ? Number(f.amount) || 0 : 0);
-  }, 0);
+  }, 0) + walkinMonthRevenue;  // ← include walk-in revenue
+
   const totalExpenses = expenses.reduce((s: number, e: any) => s + Number(e.amount), 0);
   const netProfit = totalRevenue - totalExpenses;
   const reserve = netProfit > 0 ? (netProfit * (settings?.reserve_percentage || 0) / 100) : 0
@@ -280,13 +319,36 @@ export default function DashboardPage() {
   const unpaidCount = fees.filter((f: any) => !f.paid && (Number(f.amount_paid) || 0) === 0).length;
 
   // Payments calculations for Today's Card & Modal
-  const todayPayments = allPaymentRecords.filter((f: any) => isToday(f.paid_at));
+  // Merge fee-record payments + walk-in attendance payments into one combined list
+  const allWalkinPayments = walkinRecords.map((w: any) => ({
+    id: `walkin-${w.id}`,
+    _isWalkin: true,
+    guest_name: w.guest_name,
+    amount: parseWalkinAmount(w.notes),
+    amount_paid: parseWalkinAmount(w.notes),
+    paid: true,
+    paid_at: w.check_in,
+    payment_method: 'cash',
+    members: null,
+  }));
+
+  const combinedPaymentRecords = [
+    ...allPaymentRecords,
+    ...allWalkinPayments,
+  ].sort((a: any, b: any) => {
+    const timeA = a.paid_at ? new Date(a.paid_at).getTime() : 0;
+    const timeB = b.paid_at ? new Date(b.paid_at).getTime() : 0;
+    return timeB - timeA;
+  });
+
+  const todayPayments = combinedPaymentRecords.filter((f: any) => isToday(f.paid_at));
+
   const todayTotalCollected = todayPayments.reduce((sum: number, f: any) => {
     const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
     return sum + amtPaid;
   }, 0);
 
-  const filteredModalPayments = allPaymentRecords.filter((f: any) => {
+  const filteredModalPayments = combinedPaymentRecords.filter((f: any) => {
     if (modalFilter === 'today') return isToday(f.paid_at);
     if (modalFilter === '7days') return isPastNDays(f.paid_at, 7);
     if (modalFilter === '30days') return isPastNDays(f.paid_at, 30);
@@ -348,6 +410,45 @@ export default function DashboardPage() {
             ))}
           </SelectContent>
         </Select>
+      </div>
+
+      {/* Daily Payments Banner */}
+      <div className="relative overflow-hidden rounded-xl border border-primary/30 bg-gradient-to-r from-primary/10 via-primary/5 to-transparent p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-4">
+          <div className="h-12 w-12 rounded-xl bg-primary/20 grid place-items-center shrink-0">
+            <Wallet className="h-6 w-6 text-primary" />
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Today's Collections</p>
+            <p className="text-3xl font-display font-bold text-primary">
+              <AnimatedNumber value={todayTotalCollected} format={formatCurrency} />
+            </p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {todayPayments.length} {todayPayments.length === 1 ? 'payment' : 'payments'} received today
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="text-right">
+            <p className="text-xs text-muted-foreground">Full Payments</p>
+            <p className="text-xl font-bold text-emerald-400">{todayPayments.filter((f: any) => { const a = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0); return f.paid || (a >= Number(f.amount) && Number(f.amount) > 0); }).length}</p>
+          </div>
+          <div className="w-px h-10 bg-border/50" />
+          <div className="text-right">
+            <p className="text-xs text-muted-foreground">Partial</p>
+            <p className="text-xl font-bold text-amber-400">{todayPayments.filter((f: any) => { const a = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0); return !f.paid && a > 0 && a < Number(f.amount); }).length}</p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => { setModalFilter('today'); setIsModalOpen(true); }}
+            className="ml-2 border-primary/30 text-primary hover:bg-primary/10 text-xs"
+          >
+            View Details <ArrowUpRight className="h-3 w-3 ml-1" />
+          </Button>
+        </div>
+        {/* decorative glow */}
+        <div className="pointer-events-none absolute right-0 top-0 h-full w-32 bg-gradient-to-l from-primary/5 to-transparent" />
       </div>
 
       {/* Stat Cards */}
@@ -486,6 +587,71 @@ export default function DashboardPage() {
         </Card>
       </div>
 
+      {/* Walk-in Customers Card */}
+      <Card className="border-amber-500/20 bg-gradient-to-r from-amber-500/5 to-transparent">
+        <CardContent className="p-5">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            {/* Left: header */}
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-xl bg-amber-500/20 grid place-items-center shrink-0">
+                <UserCheck className="h-5 w-5 text-amber-400" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-foreground">Walk-in / 1-Day Customers</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Daily pass visitors for {new Date(monthStart).toLocaleString('en-US', { month: 'long', year: 'numeric' })}</p>
+              </div>
+            </div>
+            {/* Right: stats */}
+            <div className="flex flex-wrap items-center gap-4 sm:gap-6">
+              <div className="text-center">
+                <p className="text-2xl font-display font-bold text-amber-400">{walkinThisMonth.length}</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Total Visitors</p>
+              </div>
+              <div className="w-px h-10 bg-border/50 hidden sm:block" />
+              <div className="text-center">
+                <p className="text-2xl font-display font-bold text-primary">{formatCurrency(walkinMonthRevenue)}</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Walk-in Revenue</p>
+              </div>
+              <div className="w-px h-10 bg-border/50 hidden sm:block" />
+              <div className="text-center">
+                <p className="text-2xl font-display font-bold text-emerald-400">{walkinAvgPerHead > 0 ? formatCurrency(walkinAvgPerHead) : '—'}</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Avg Per Head</p>
+              </div>
+              <div className="w-px h-10 bg-border/50 hidden sm:block" />
+              <div className="text-center">
+                <p className="text-2xl font-display font-bold text-violet-400">{walkinToday.length}</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Today's Walk-ins</p>
+              </div>
+            </div>
+          </div>
+          {/* Today's walk-in list */}
+          {walkinToday.length > 0 && (
+            <div className="mt-4 pt-3 border-t border-amber-500/15">
+              <p className="text-xs font-semibold text-amber-400 mb-2 uppercase tracking-wider">Today's Walk-in Visitors</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {walkinToday.map((w: any) => {
+                  const amt = parseWalkinAmount(w.notes);
+                  return (
+                    <div key={w.id} className="flex items-center justify-between p-2.5 rounded-lg bg-amber-500/8 border border-amber-500/15 text-xs">
+                      <div className="flex items-center gap-2">
+                        <div className="h-6 w-6 rounded-full bg-amber-500/20 grid place-items-center text-[10px] font-bold text-amber-400">
+                          {(w.guest_name || 'G').slice(0, 1).toUpperCase()}
+                        </div>
+                        <span className="font-medium">{w.guest_name}</span>
+                      </div>
+                      <span className="font-bold text-primary">{amt > 0 ? formatCurrency(amt) : 'Free'}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {walkinThisMonth.length === 0 && (
+            <p className="text-xs text-muted-foreground mt-3 text-center">No walk-in visitors recorded this month. Use the <strong>1 Day</strong> button on the Attendance page to add them.</p>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Bottom Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Today's Payments */}
@@ -494,6 +660,11 @@ export default function DashboardPage() {
             <CardTitle className="text-base flex items-center gap-2">
               <History className="h-4 w-4 text-primary" />
               Today's Payments
+              {todayPayments.length > 0 && (
+                <span className="ml-1 text-xs bg-primary/15 text-primary border border-primary/20 rounded-full px-2 py-0.5 font-medium">
+                  {todayPayments.length}
+                </span>
+              )}
             </CardTitle>
             <Button
               variant="ghost"
@@ -504,58 +675,77 @@ export default function DashboardPage() {
               }}
               className="text-xs text-primary hover:text-primary hover:bg-primary/10 h-7 px-2 font-medium"
             >
-              View All <ArrowUpRight className="h-3 w-3 ml-1" />
+              Full History <ArrowUpRight className="h-3 w-3 ml-1" />
             </Button>
           </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {todayPayments.slice(0, 5).map((f: any) => {
-                const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
-                const totalAmount = Number(f.amount) || 0;
-                const isFullyPaid = f.paid || (amtPaid >= totalAmount && totalAmount > 0);
-                const isPartial = !isFullyPaid && amtPaid > 0;
-
-                return (
-                  <div key={f.id} className="flex items-center justify-between py-2 border-b border-border/50 last:border-0">
-                    <div>
-                      <p className="text-sm font-medium">{(f.members as any)?.full_name ?? 'Unknown Member'}</p>
-                      <div className="flex items-center gap-2 mt-0.5">
-                        <p className="text-xs text-muted-foreground">{formatPaymentTime(f.paid_at)}</p>
-                        {f.payment_method && (
-                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-muted text-muted-foreground uppercase font-mono">
-                            {f.payment_method}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-semibold text-primary">{formatCurrency(amtPaid)}</p>
-                      {isPartial ? (
-                        <div className="flex items-center justify-end gap-1 mt-0.5">
-                          <span className="text-[10px] text-muted-foreground">of {formatCurrency(totalAmount)}</span>
-                          <Badge variant="warning" className="text-[10px] px-1.5 py-0">Partial</Badge>
-                        </div>
-                      ) : (
-                        <Badge variant="success" className="text-[10px] px-1.5 py-0 mt-0.5">Paid</Badge>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-
-              {todayPayments.length === 0 && (
-                <div className="text-center py-6 text-muted-foreground">
-                  <Receipt className="h-8 w-8 mx-auto mb-2 opacity-40 text-muted-foreground" />
-                  <p className="text-sm">No payments received today</p>
-                </div>
-              )}
-            </div>
-
-            {todayPayments.length > 0 && (
-              <div className="mt-4 pt-3 border-t border-border/50 flex items-center justify-between text-xs text-muted-foreground">
-                <span>Today's Total ({todayPayments.length} {todayPayments.length === 1 ? 'payment' : 'payments'}):</span>
-                <span className="font-bold text-primary text-sm">{formatCurrency(todayTotalCollected)}</span>
+          <CardContent className="p-0">
+            {todayPayments.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground px-6">
+                <Receipt className="h-8 w-8 mx-auto mb-2 opacity-40" />
+                <p className="text-sm">No payments received today</p>
+                <p className="text-xs mt-1 opacity-70">Payments will appear here as they are collected</p>
               </div>
+            ) : (
+              <>
+                {/* Daily total bar */}
+                <div className="px-5 py-3 bg-primary/5 border-b border-primary/10 flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground font-medium">Total Collected Today</span>
+                  <span className="text-lg font-bold text-primary">{formatCurrency(todayTotalCollected)}</span>
+                </div>
+                {/* Scrollable list — show ALL today's payments */}
+                <div className="max-h-[280px] overflow-y-auto divide-y divide-border/40">
+                  {todayPayments.map((f: any) => {
+                    const isWalkin = !!f._isWalkin;
+                    const displayName = isWalkin
+                      ? (f.guest_name || 'Walk-in Guest')
+                      : ((f.members as any)?.full_name ?? 'Unknown Member');
+                    const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
+                    const totalAmount = Number(f.amount) || 0;
+                    const isFullyPaid = f.paid || (amtPaid >= totalAmount && totalAmount > 0);
+                    const isPartial = !isFullyPaid && amtPaid > 0;
+
+                    return (
+                      <div key={f.id} className="flex items-center justify-between px-5 py-3 hover:bg-accent/30 transition-colors">
+                        <div className="flex items-center gap-3">
+                          <div className={`h-8 w-8 rounded-full grid place-items-center text-xs font-bold shrink-0 ${
+                            isWalkin ? 'bg-amber-500/20 text-amber-400' :
+                            isFullyPaid ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'
+                          }`}>
+                            {displayName.slice(0, 1).toUpperCase()}
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-sm font-medium">{displayName}</p>
+                              {isWalkin && (
+                                <span className="text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/20 rounded px-1.5 py-0.5 font-medium">1-Day</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              <p className="text-xs text-muted-foreground font-mono">{formatPaymentTime(f.paid_at)}</p>
+                              {f.payment_method && (
+                                <span className="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground uppercase font-mono">
+                                  {f.payment_method}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-sm font-bold text-primary">{amtPaid > 0 ? formatCurrency(amtPaid) : '—'}</p>
+                          {isPartial ? (
+                            <div className="flex items-center justify-end gap-1 mt-0.5">
+                              <span className="text-[10px] text-muted-foreground">of {formatCurrency(totalAmount)}</span>
+                              <Badge variant="warning" className="text-[10px] px-1.5 py-0">Partial</Badge>
+                            </div>
+                          ) : (
+                            <Badge variant="success" className="text-[10px] px-1.5 py-0 mt-0.5">Paid</Badge>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
@@ -572,10 +762,10 @@ export default function DashboardPage() {
                   <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
                   <XAxis dataKey="category" tick={{ fill: '#8c8c8c', fontSize: 12 }} />
                   <YAxis tick={{ fill: '#8c8c8c', fontSize: 12 }} />
-                  <Tooltip contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
-                  <Bar dataKey="amount" radius={[4, 4, 0, 0]}>
+                  <Tooltip cursor={false} contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
+                  <Bar dataKey="amount" radius={[4, 4, 0, 0]} maxBarSize={48} activeBar={false}>
                     {expenseChartData.map((entry, i) => (
-                      <Cell width={70} key={i} fill={categoryColors[entry.category] || '#6b7280'} />
+                      <Cell key={i} fill={categoryColors[entry.category] || '#6b7280'} />
                     ))}
                   </Bar>
                 </BarChart>
@@ -610,7 +800,7 @@ export default function DashboardPage() {
                   : 'text-muted-foreground hover:text-foreground'
               )}
             >
-              Today ({todayPayments.length})
+              Today ({combinedPaymentRecords.filter((f: any) => isToday(f.paid_at)).length})
             </button>
             <button
               type="button"
@@ -622,7 +812,7 @@ export default function DashboardPage() {
                   : 'text-muted-foreground hover:text-foreground'
               )}
             >
-              Past 7 Days ({allPaymentRecords.filter((f: any) => isPastNDays(f.paid_at, 7)).length})
+              Past 7 Days ({combinedPaymentRecords.filter((f: any) => isPastNDays(f.paid_at, 7)).length})
             </button>
             <button
               type="button"
@@ -634,7 +824,7 @@ export default function DashboardPage() {
                   : 'text-muted-foreground hover:text-foreground'
               )}
             >
-              Past 30 Days ({allPaymentRecords.filter((f: any) => isPastNDays(f.paid_at, 30)).length})
+              Past 30 Days ({combinedPaymentRecords.filter((f: any) => isPastNDays(f.paid_at, 30)).length})
             </button>
           </div>
 
@@ -663,6 +853,10 @@ export default function DashboardPage() {
               </div>
             ) : (
               filteredModalPayments.map((f: any) => {
+                const isWalkin = !!f._isWalkin;
+                const displayName = isWalkin
+                  ? (f.guest_name || '1-Day Guest')
+                  : ((f.members as any)?.full_name ?? 'Unknown Member');
                 const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
                 const totalAmount = Number(f.amount) || 0;
                 const remaining = Math.max(0, totalAmount - amtPaid);
@@ -674,20 +868,32 @@ export default function DashboardPage() {
                     key={f.id}
                     className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-lg border border-border/50 bg-accent/20 hover:bg-accent/40 transition-colors gap-2"
                   >
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-semibold">{(f.members as any)?.full_name ?? 'Unknown Member'}</p>
-                        {(f.members as any)?.phone && (
-                          <span className="text-xs text-muted-foreground">({(f.members as any)?.phone})</span>
-                        )}
+                    <div className="flex items-center gap-3">
+                      <div className={`h-8 w-8 rounded-full grid place-items-center text-xs font-bold shrink-0 ${
+                        isWalkin ? 'bg-amber-500/20 text-amber-400' :
+                        isFullyPaid ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'
+                      }`}>
+                        {displayName.slice(0, 1).toUpperCase()}
                       </div>
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                        <span>{formatPaymentDateTime(f.paid_at)}</span>
-                        {f.payment_method && (
-                          <span className="px-1.5 py-0.5 rounded bg-muted text-[10px] uppercase font-mono text-muted-foreground">
-                            {f.payment_method}
-                          </span>
-                        )}
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-semibold">{displayName}</p>
+                          {isWalkin ? (
+                            <span className="text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/20 rounded px-1.5 py-0.5 font-medium">1-Day</span>
+                          ) : (
+                            (f.members as any)?.phone && (
+                              <span className="text-xs text-muted-foreground">({(f.members as any)?.phone})</span>
+                            )
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <span>{formatPaymentDateTime(f.paid_at)}</span>
+                          {f.payment_method && (
+                            <span className="px-1.5 py-0.5 rounded bg-muted text-[10px] uppercase font-mono text-muted-foreground">
+                              {f.payment_method}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
 
@@ -706,7 +912,9 @@ export default function DashboardPage() {
                         </p>
                       )}
                       {isFullyPaid && totalAmount > 0 && (
-                        <p className="text-[11px] text-muted-foreground">Total Fee: {formatCurrency(totalAmount)}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {isWalkin ? '1-Day Fee' : `Total Fee: ${formatCurrency(totalAmount)}`}
+                        </p>
                       )}
                     </div>
                   </div>

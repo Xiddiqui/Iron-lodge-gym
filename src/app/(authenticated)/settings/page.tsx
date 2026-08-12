@@ -16,6 +16,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Settings, Save, Upload, Loader2, Users, Shield, Plus, Search, UserCheck, CheckSquare, Square, Pencil, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { isMemberAssignedToStaff } from '@/lib/staff-assignments';
+
 export default function SettingsPage() {
   const { data: role } = useRole();
   const { data: settings } = useGymSettings();
@@ -28,20 +30,26 @@ export default function SettingsPage() {
 
   // Staff management state
   const [staffDialogOpen, setStaffDialogOpen] = useState(false);
-  const [editingStaff, setEditingStaff] = useState<{ id: string; full_name: string; email: string; role: string } | null>(null);
+  const [editingStaff, setEditingStaff] = useState<any | null>(null);
   const [newStaff, setNewStaff] = useState({ full_name: '', email: '', password: '', role: 'staff' });
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [autoAssignMale, setAutoAssignMale] = useState(false);
+  const [autoAssignFemale, setAutoAssignFemale] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const [deleteConfirmStaff, setDeleteConfirmStaff] = useState<{ id: string; full_name: string } | null>(null);
 
-  // Fetch all profiles (staff users)
+  // Fetch staff profiles (excluding admin users)
   const { data: profiles = [], isLoading: profilesLoading } = useQuery({
     queryKey: ['profiles'],
     enabled: role === 'admin',
     queryFn: async () => {
-      const { data, error } = await supabase.from('profiles').select('*').order('created_at', { ascending: true });
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .neq('role', 'admin')
+        .order('created_at', { ascending: true });
       if (error) throw error;
-      return data || [];
+      return (data || []).filter((p: any) => (p.role || '').toLowerCase() !== 'admin');
     },
   });
 
@@ -50,13 +58,21 @@ export default function SettingsPage() {
     queryKey: ['members-for-assignment'],
     enabled: role === 'admin',
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('members')
-        .select('id, full_name, gender, phone, active, assigned_staff_id, photo_url')
-        .eq('active', true)
-        .order('full_name', { ascending: true });
-      if (error) throw error;
-      return data || [];
+      try {
+        const { data, error } = await supabase
+          .from('members')
+          .select('*')
+          .eq('active', true)
+          .order('full_name', { ascending: true });
+        if (error) {
+          console.error('Error fetching members for assignment:', error);
+          return [];
+        }
+        return data || [];
+      } catch (err) {
+        console.error('Failed to fetch members for assignment:', err);
+        return [];
+      }
     },
   });
 
@@ -67,36 +83,50 @@ export default function SettingsPage() {
 
     try {
       let logoUrl = settings?.logo_url || null;
+      const targetGymName = gymName.trim() || settings?.gym_name || 'Iron Lodge Gym';
 
       if (logoFile) {
         const ext = logoFile.name.split('.').pop();
-        const path = `gym-logo/logo.${ext}`;
-        const { error: uploadError } = await supabase.storage
-          .from('gym-assets')
-          .upload(path, logoFile, { upsert: true });
+        const timestamp = Date.now();
+        const path = `gym-logo/logo_${timestamp}.${ext}`;
 
-        if (uploadError) {
-          if (uploadError.message.includes('not found')) {
-            toast.error('Storage bucket "gym-assets" not found. Please create it in Supabase dashboard.');
-            setSaving(false);
-            return;
+        try {
+          const { error: uploadError } = await supabase.storage
+            .from('gym-assets')
+            .upload(path, logoFile, { upsert: true });
+
+          if (!uploadError) {
+            const { data: urlData } = supabase.storage.from('gym-assets').getPublicUrl(path);
+            logoUrl = urlData.publicUrl;
+          } else {
+            // Base64 fallback if storage bucket missing or error
+            const base64 = await new Promise<string>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.readAsDataURL(logoFile);
+            });
+            logoUrl = base64;
           }
-          throw uploadError;
+        } catch {
+          const base64 = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.readAsDataURL(logoFile);
+          });
+          logoUrl = base64;
         }
-
-        const { data: urlData } = supabase.storage.from('gym-assets').getPublicUrl(path);
-        logoUrl = urlData.publicUrl;
       }
 
       const { error } = await supabase
         .from('gym_settings')
-        .update({ gym_name: gymName, logo_url: logoUrl, updated_at: new Date().toISOString() })
+        .update({ gym_name: targetGymName, logo_url: logoUrl, updated_at: new Date().toISOString() })
         .eq('id', 1);
 
       if (error) throw error;
 
       queryClient.invalidateQueries({ queryKey: ['gym-settings'] });
-      toast.success('Settings saved');
+      queryClient.invalidateQueries({ queryKey: ['public-gym-settings'] });
+      toast.success('Settings saved successfully');
     } catch (err: any) {
       toast.error(err.message || 'Failed to save settings');
     } finally {
@@ -132,6 +162,8 @@ export default function SettingsPage() {
     setEditingStaff(null);
     setNewStaff({ full_name: '', email: '', password: '', role: 'staff' });
     setSelectedMemberIds([]);
+    setAutoAssignMale(false);
+    setAutoAssignFemale(false);
     setMemberSearch('');
     setStaffDialogOpen(true);
   };
@@ -141,9 +173,22 @@ export default function SettingsPage() {
     setEditingStaff(staff);
     // Find member IDs currently assigned to this staff
     const currentlyAssigned = allMembers
-      .filter((m) => m.assigned_staff_id === staff.id)
+      .filter((m: any) => isMemberAssignedToStaff(m, staff.id))
       .map((m) => m.id);
     setSelectedMemberIds(currentlyAssigned);
+
+    // Read auto-assign flags: first try native columns, then section_access fallback
+    let autoMale = Boolean(staff.auto_assign_male);
+    let autoFemale = Boolean(staff.auto_assign_female);
+    if (!autoMale && !autoFemale && typeof staff.section_access === 'string' && staff.section_access.startsWith('auto_assign:')) {
+      try {
+        const parsed = JSON.parse(staff.section_access.replace('auto_assign:', ''));
+        autoMale = Boolean(parsed.auto_assign_male);
+        autoFemale = Boolean(parsed.auto_assign_female);
+      } catch { /* ignore */ }
+    }
+    setAutoAssignMale(autoMale);
+    setAutoAssignFemale(autoFemale);
     setMemberSearch('');
     setStaffDialogOpen(true);
   };
@@ -160,6 +205,8 @@ export default function SettingsPage() {
             action: 'update_assignments',
             staff_id: editingStaff.id,
             assigned_member_ids: selectedMemberIds,
+            auto_assign_male: autoAssignMale,
+            auto_assign_female: autoAssignFemale,
           }),
         });
         const data = await res.json();
@@ -174,6 +221,8 @@ export default function SettingsPage() {
             action: 'create',
             ...newStaff,
             assigned_member_ids: selectedMemberIds,
+            auto_assign_male: autoAssignMale,
+            auto_assign_female: autoAssignFemale,
           }),
         });
         const data = await res.json();
@@ -233,7 +282,8 @@ export default function SettingsPage() {
       .filter((m) => (m.gender || 'male').toLowerCase() === 'male')
       .map((m) => m.id);
     setSelectedMemberIds((prev) => Array.from(new Set([...prev, ...maleIds])));
-    toast.info(`Selected all male members (${maleIds.length})`);
+    setAutoAssignMale(true);
+    toast.info(`Selected all male members (${maleIds.length}) & enabled auto-assign for future Male members`);
   };
 
   // Quick Select: All Female members
@@ -242,7 +292,8 @@ export default function SettingsPage() {
       .filter((m) => (m.gender || '').toLowerCase() === 'female')
       .map((m) => m.id);
     setSelectedMemberIds((prev) => Array.from(new Set([...prev, ...femaleIds])));
-    toast.info(`Selected all female members (${femaleIds.length})`);
+    setAutoAssignFemale(true);
+    toast.info(`Selected all female members (${femaleIds.length}) & enabled auto-assign for future Female members`);
   };
 
   // Select all members
@@ -373,7 +424,7 @@ export default function SettingsPage() {
                   </tr>
                 ) : (
                   profiles.map((p: any) => {
-                    const assignedCount = allMembers.filter((m) => m.assigned_staff_id === p.id).length;
+                    const assignedCount = allMembers.filter((m: any) => isMemberAssignedToStaff(m, p.id)).length;
                     return (
                       <tr key={p.id} className="border-b border-border/50 hover:bg-accent/30 transition-colors">
                         <td className="p-4">
@@ -386,10 +437,24 @@ export default function SettingsPage() {
                         </td>
                         <td className="p-4 hidden sm:table-cell text-muted-foreground">{p.email}</td>
                         <td className="p-4">
-                          <Badge variant="outline" className="gap-1.5 font-normal">
-                            <UserCheck className="h-3.5 w-3.5 text-primary" />
-                            {assignedCount} Member{assignedCount !== 1 ? 's' : ''}
-                          </Badge>
+                          <div className="flex flex-col gap-1 items-start">
+                            <Badge variant="outline" className="gap-1.5 font-normal">
+                              <UserCheck className="h-3.5 w-3.5 text-primary" />
+                              {assignedCount} Member{assignedCount !== 1 ? 's' : ''}
+                            </Badge>
+                            <div className="flex flex-wrap gap-1 mt-0.5">
+                              {p.auto_assign_male && (
+                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-blue-500/40 text-blue-600 dark:text-blue-400 bg-blue-500/10">
+                                  Auto: Male
+                                </Badge>
+                              )}
+                              {p.auto_assign_female && (
+                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-pink-500/40 text-pink-600 dark:text-pink-400 bg-pink-500/10">
+                                  Auto: Female
+                                </Badge>
+                              )}
+                            </div>
+                          </div>
                         </td>
                         <td className="p-4">
                           <Badge variant={p.role === 'admin' ? 'default' : 'secondary'} className="gap-1">
@@ -577,6 +642,31 @@ export default function SettingsPage() {
                 </div>
               </div>
 
+              {/* Auto Assign Options */}
+              <div className="bg-primary/5 p-3 rounded-xl border border-primary/20 space-y-2">
+                <p className="text-xs font-semibold text-primary">Auto-Assignment Rules for Future Members:</p>
+                <div className="flex flex-wrap items-center gap-4 text-xs">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={autoAssignMale}
+                      onChange={(e) => setAutoAssignMale(e.target.checked)}
+                      className="h-4 w-4 rounded border-primary text-primary focus:ring-primary"
+                    />
+                    <span className="font-medium text-foreground">Auto-assign future Male members</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={autoAssignFemale}
+                      onChange={(e) => setAutoAssignFemale(e.target.checked)}
+                      className="h-4 w-4 rounded border-primary text-primary focus:ring-primary"
+                    />
+                    <span className="font-medium text-foreground">Auto-assign future Female members</span>
+                  </label>
+                </div>
+              </div>
+
               {/* Members Checklist */}
               <div className="max-h-64 overflow-y-auto border border-border rounded-xl divide-y divide-border/40">
                 {filteredMembers.length === 0 ? (
@@ -621,11 +711,19 @@ export default function SettingsPage() {
                           </div>
                         </div>
 
-                        {m.assigned_staff_id && m.assigned_staff_id !== editingStaff?.id && (
-                          <span className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded">
-                            Assigned to another staff
-                          </span>
-                        )}
+                        {(() => {
+                          const assignedStaff = profiles.filter((p: any) => isMemberAssignedToStaff(m, p.id));
+                          if (assignedStaff.length === 0) return null;
+                          const otherStaffNames = assignedStaff
+                            .filter((p: any) => p.id !== editingStaff?.id)
+                            .map((p: any) => p.full_name);
+                          if (otherStaffNames.length === 0) return null;
+                          return (
+                            <span className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded truncate max-w-[160px]" title={`Also assigned to: ${otherStaffNames.join(', ')}`}>
+                              Also assigned: {otherStaffNames.join(', ')}
+                            </span>
+                          );
+                        })()}
                       </div>
                     );
                   })
