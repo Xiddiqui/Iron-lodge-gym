@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
-import { MessageSquare, Loader2, Mail, Phone, Eye, User, CalendarDays, MessageCircle } from 'lucide-react';
+import { MessageSquare, Loader2, Mail, Phone, Eye, User, CalendarDays, MessageCircle, IdCard } from 'lucide-react';
 
 export default function EnquiriesPage() {
   const queryClient = useQueryClient();
@@ -117,7 +117,7 @@ export default function EnquiriesPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border">
-                  <th className="text-left p-4 font-medium text-muted-foreground">Name</th>
+                  <th className="text-left p-4 font-medium text-muted-foreground">Name / Member #</th>
                   <th className="text-left p-4 font-medium text-muted-foreground hidden sm:table-cell">Contact Info</th>
                   <th className="text-left p-4 font-medium text-muted-foreground hidden lg:table-cell">Message</th>
                   <th className="text-left p-4 font-medium text-muted-foreground">Status</th>
@@ -132,7 +132,14 @@ export default function EnquiriesPage() {
                 ) : enquiries.map((e: any) => (
                   <tr key={e.id} onClick={() => openView(e)} className="border-b border-border/50 hover:bg-accent/30 transition-colors cursor-pointer">
                     <td className="p-4 font-medium">
-                      <div>{e.name}</div>
+                      <div className="flex items-center gap-2">
+                        <span>{e.name}</span>
+                        {e.member_number && (
+                          <Badge variant="outline" className="font-mono text-[10px] py-0 px-1.5 h-4 border-primary/40 text-primary">
+                            #{e.member_number}
+                          </Badge>
+                        )}
+                      </div>
                       <div className="text-xs text-muted-foreground lg:hidden mt-0.5 truncate max-w-[200px]">{e.message || 'No message'}</div>
                     </td>
                     <td className="p-4 hidden sm:table-cell text-muted-foreground">
@@ -164,12 +171,19 @@ export default function EnquiriesPage() {
           </DialogHeader>
           {viewing && (
             <div className="space-y-5 pt-2">
-              {/* Name */}
+              {/* Name & Member # */}
               <div className="flex items-start gap-3">
                 <User className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
-                <div>
+                <div className="space-y-0.5">
                   <p className="text-xs text-muted-foreground">Name</p>
-                  <p className="text-sm font-medium">{viewing.name}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium">{viewing.name}</p>
+                    {viewing.member_number && (
+                      <Badge variant="outline" className="font-mono text-xs border-primary/40 text-primary">
+                        Member #{viewing.member_number}
+                      </Badge>
+                    )}
+                  </div>
                 </div>
               </div>
 

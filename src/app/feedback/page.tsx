@@ -7,13 +7,14 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Send, CheckCircle2, Loader2, MessageSquareHeart } from 'lucide-react';
+import { Send, CheckCircle2, Loader2, MessageSquareHeart, IdCard, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function FeedbackPage() {
-  const [form, setForm] = useState({ name: '', phone: '', email: '', message: '' });
+  const [form, setForm] = useState({ member_number: '', name: '', phone: '', email: '', message: '' });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Fetch public gym settings for branding
   const { data: settings } = useQuery({
@@ -26,6 +27,14 @@ export default function FeedbackPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setErrorMessage(null);
+
+    const inputMemberNum = form.member_number.trim();
+    if (!inputMemberNum) {
+      toast.error('Please enter your Member Number / ID');
+      return;
+    }
+
     if (!form.name.trim() || !form.message.trim()) {
       toast.error('Please fill in your name and message');
       return;
@@ -33,34 +42,107 @@ export default function FeedbackPage() {
 
     setIsSubmitting(true);
     try {
+      // 1. Try server API route first
+      let res: Response | null = null;
+      try {
+        res = await fetch('/api/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            member_number: inputMemberNum,
+            name: form.name.trim(),
+            phone: form.phone.trim() || null,
+            email: form.email.trim() || null,
+            message: form.message.trim(),
+          }),
+        });
+      } catch (fetchErr) {
+        console.warn('API fetch failed, trying client verification fallback', fetchErr);
+      }
+
+      if (res) {
+        const data = await res.json();
+
+        if (!res.ok) {
+          const msg = data.error || 'Failed to submit feedback. Please check your Member ID.';
+          setErrorMessage(msg);
+          toast.error(msg);
+          return;
+        }
+
+        setSubmitted(true);
+        toast.success('Feedback submitted successfully!');
+        return;
+      }
+
+      // 2. Client-side fallback if API route is unreachable
+      const { data: rpcData, error: rpcError } = await supabase.rpc('verify_member_exists', {
+        p_member_number: inputMemberNum,
+      });
+
+      let isMember = false;
+      let matchedMemberId: string | null = null;
+      let matchedMemberNum: string | null = inputMemberNum;
+
+      if (!rpcError && rpcData && rpcData.length > 0 && rpcData[0].exists) {
+        isMember = true;
+        matchedMemberId = rpcData[0].member_id;
+        matchedMemberNum = rpcData[0].member_number || inputMemberNum;
+      } else {
+        const { data: memberData } = await supabase
+          .from('members')
+          .select('id, member_number')
+          .eq('member_number', inputMemberNum)
+          .maybeSingle();
+
+        if (memberData) {
+          isMember = true;
+          matchedMemberId = memberData.id;
+          matchedMemberNum = memberData.member_number;
+        }
+      }
+
+      if (!isMember) {
+        const msg = `No active member found with Member Number / ID "${inputMemberNum}". Only registered members can submit suggestions.`;
+        setErrorMessage(msg);
+        toast.error(msg);
+        return;
+      }
+
       const payload: Record<string, any> = {
         name: form.name.trim(),
         phone: form.phone.trim() || null,
         email: form.email.trim() || null,
         message: form.message.trim(),
         status: 'new',
+        member_number: matchedMemberNum,
+        member_id: matchedMemberId,
       };
 
-      const { error } = await supabase.from('enquiries').insert(payload);
-
-      if (error) {
-        console.error('Feedback insert error:', error);
-        throw error;
+      const { error: insertErr } = await supabase.from('enquiries').insert(payload);
+      if (insertErr) {
+        delete payload.member_number;
+        delete payload.member_id;
+        const { error: retryErr } = await supabase.from('enquiries').insert(payload);
+        if (retryErr) throw retryErr;
       }
 
       setSubmitted(true);
       toast.success('Feedback submitted successfully!');
     } catch (err: any) {
       console.error('Submission error:', err);
-      toast.error(err.message || err.details || 'Failed to submit feedback. Please try again.');
+      const msg = err.message || 'Failed to submit feedback. Please try again.';
+      setErrorMessage(msg);
+      toast.error(msg);
     } finally {
       setIsSubmitting(false);
     }
   }
 
   function handleReset() {
-    setForm({ name: '', phone: '', email: '', message: '' });
+    setForm({ member_number: '', name: '', phone: '', email: '', message: '' });
     setSubmitted(false);
+    setErrorMessage(null);
   }
 
   const gymName = settings?.gym_name ?? 'Iron Lodge Gym';
@@ -77,7 +159,7 @@ export default function FeedbackPage() {
           <img src={settings?.logo_url || '/logo.png'} alt={gymName} className="h-16 w-20 rounded-2xl object-cover shadow-elegant bg-primary border border-border" />
           <h1 className="text-3xl font-display font-bold tracking-tight text-foreground">{gymName}</h1>
           <p className="text-sm text-muted-foreground max-w-sm">
-            We value your feedback and inquiries. Fill out the form below to get in touch with us!
+            We value member feedback & suggestions. Enter your Member ID below to get in touch with us!
           </p>
         </div>
 
@@ -85,9 +167,11 @@ export default function FeedbackPage() {
           <CardHeader className="pb-4">
             <div className="flex items-center gap-2 text-primary">
               <MessageSquareHeart className="h-5 w-5" />
-              <CardTitle className="text-xl">Client Feedback & Enquiry</CardTitle>
+              <CardTitle className="text-xl">Member Feedback & Suggestion</CardTitle>
             </div>
-            <CardDescription>No login required. We will get back to you as soon as possible.</CardDescription>
+            <CardDescription>
+              Member verification required. Only registered members can submit feedback.
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {submitted ? (
@@ -98,7 +182,7 @@ export default function FeedbackPage() {
                 <div className="space-y-1">
                   <h2 className="text-xl font-semibold">Thank You!</h2>
                   <p className="text-sm text-muted-foreground">
-                    Your feedback/enquiry has been submitted successfully to our team.
+                    Your feedback for Member <span className="font-mono font-bold text-foreground">#{form.member_number}</span> has been submitted successfully to our team.
                   </p>
                 </div>
                 <Button variant="outline" onClick={handleReset} className="mt-4">
@@ -107,11 +191,42 @@ export default function FeedbackPage() {
               </div>
             ) : (
               <form onSubmit={handleSubmit} className="space-y-4">
+                {errorMessage && (
+                  <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/30 text-destructive text-sm flex items-start gap-2.5">
+                    <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-medium">Member Match Failed</p>
+                      <p className="text-xs opacity-90">{errorMessage}</p>
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <Label htmlFor="member_number" className="flex items-center gap-1.5 font-medium">
+                    <IdCard className="h-4 w-4 text-primary" />
+                    Member Number / ID *
+                  </Label>
+                  <Input
+                    id="member_number"
+                    placeholder="e.g. 101 or your Member ID"
+                    value={form.member_number}
+                    onChange={(e) => {
+                      setForm({ ...form, member_number: e.target.value });
+                      if (errorMessage) setErrorMessage(null);
+                    }}
+                    required
+                    className="font-mono"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Must match a valid member ID in our database to submit suggestions.
+                  </p>
+                </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="name">Full Name *</Label>
                   <Input
                     id="name"
-                    placeholder="Enter your name"
+                    placeholder="Enter your full name"
                     value={form.name}
                     onChange={(e) => setForm({ ...form, name: e.target.value })}
                     required
@@ -147,7 +262,7 @@ export default function FeedbackPage() {
                     id="message"
                     rows={4}
                     className="flex min-h-[100px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                    placeholder="Share your questions, feedback, or membership enquiries..."
+                    placeholder="Share your feedback, suggestions, or gym enquiries..."
                     value={form.message}
                     onChange={(e) => setForm({ ...form, message: e.target.value })}
                     required
@@ -157,7 +272,7 @@ export default function FeedbackPage() {
                 <Button type="submit" disabled={isSubmitting} className="w-full gap-2">
                   {isSubmitting ? (
                     <>
-                      <Loader2 className="h-4 w-4 animate-spin" /> Submitting...
+                      <Loader2 className="h-4 w-4 animate-spin" /> Verifying Member & Submitting...
                     </>
                   ) : (
                     <>
@@ -177,3 +292,4 @@ export default function FeedbackPage() {
     </div>
   );
 }
+
