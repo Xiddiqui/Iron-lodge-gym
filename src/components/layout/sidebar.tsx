@@ -5,12 +5,14 @@ import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard, Users, CalendarCheck, MessageSquare,
-  Receipt, Settings, LogOut, Dumbbell, Menu, X, Landmark
+  Receipt, Settings, LogOut, Dumbbell, Menu, X, Landmark,
+  Coffee, Lock
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useRole } from '@/hooks/use-role';
 import { useCurrentUser } from '@/hooks/use-session';
 import { useGymSettings } from '@/hooks/use-gym-settings';
+import { useStaffBreak } from '@/hooks/use-staff-break';
 import { supabase } from '@/lib/supabase/client';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -35,6 +37,7 @@ export function Sidebar() {
   const { data: role, isLoading: roleLoading } = useRole();
   const { data: user } = useCurrentUser();
   const { data: settings } = useGymSettings();
+  const { isOnBreak, startBreak, loading: breakLoading } = useStaffBreak();
   const queryClient = useQueryClient();
 
   // Fetch unread enquiries count for admin badge
@@ -86,9 +89,6 @@ export function Sidebar() {
 
   const sidebarContent = (
     <aside className="flex h-full w-64 flex-col bg-gradient-sidebar text-sidebar-foreground border-r border-sidebar-border relative overflow-hidden">
-      {/* Glow effect */}
-      <div className="pointer-events-none absolute -top-24 -left-16 h-64 w-64 rounded-full opacity-30 blur-3xl" style={{ background: 'linear-gradient(135deg, #a3e635 0%, #65a30d 100%)' }} />
-
       {/* Header */}
       <div className="relative px-5 py-5 flex items-center gap-3 border-b border-sidebar-border">
         <img src={settings?.logo_url || '/logo.png'} alt="Iron Lodge Gym" className="h-11 w-15 rounded-xl object-cover shadow-elegant bg-primary" />
@@ -140,19 +140,28 @@ export function Sidebar() {
       </nav>
 
       {/* User section */}
-      <div className="relative border-t border-sidebar-border p-3">
-        {/* <div className="px-3 py-2 mb-2 flex items-center gap-3">
-          <div className="h-9 w-9 rounded-full bg-sidebar-accent grid place-items-center text-sm font-semibold">
-            {userName.slice(0, 1).toUpperCase()}
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm truncate">{userName}</p>
-            <p className="text-[10px] uppercase tracking-widest text-sidebar-foreground/50">{role ?? '…'}</p>
-          </div>
-        </div> */}
+      <div className="relative border-t border-sidebar-border p-3 space-y-2">
+        {/* Break Button for staff */}
+        {role !== 'admin' && (
+          <Button
+            onClick={startBreak}
+            disabled={breakLoading || isOnBreak}
+            size="sm"
+            className={`w-full justify-center h-9 px-3 rounded-xl font-medium text-xs shadow-sm transition-all flex items-center gap-2 ${
+              isOnBreak
+                ? 'bg-amber-500/20 text-amber-500 border border-amber-500/40 cursor-not-allowed'
+                : 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-slate-950 hover:shadow-amber-500/20'
+            }`}
+          >
+            <Coffee className="h-4 w-4 shrink-0" />
+            <span>{isOnBreak ? 'On Break' : 'Take Break'}</span>
+            {!isOnBreak && <Lock className="h-3 w-3 opacity-70" />}
+          </Button>
+        )}
+
         <Button variant="ghost" onClick={handleSignOut} className="w-full justify-start text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground">
           <LogOut className="h-4 w-4" /> Sign out
-          <p className="text-[15px] uppercase tracking-widest text-sidebar-foreground/50">{role ?? '…'}</p>
+          <p className="text-[15px] uppercase tracking-widest text-sidebar-foreground/50 ml-auto">{role ?? '…'}</p>
         </Button>
       </div>
     </aside>

@@ -29,6 +29,7 @@ import {
   Pencil,
   Trash2,
   Calendar,
+  Upload,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -180,6 +181,28 @@ export default function TrainersPage() {
       stopCamera();
       toast.success('Photo captured!');
     }
+  };
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select a valid image file');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      if (dataUrl) {
+        setForm((prev) => ({ ...prev, photo_url: dataUrl }));
+        stopCamera();
+        toast.success('Image selected from device');
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
   };
 
   const saveMutation = useMutation({
@@ -459,6 +482,14 @@ export default function TrainersPage() {
               )}
             </div>
 
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept="image/*"
+              className="hidden"
+              onChange={handleFileUpload}
+            />
+
             <div className="flex flex-wrap items-center justify-center gap-2">
               {isCameraActive ? (
                 <>
@@ -473,6 +504,9 @@ export default function TrainersPage() {
                 <>
                   <Button type="button" size="sm" variant="outline" onClick={startCamera} className="gap-1.5">
                     <Camera className="h-4 w-4" /> {form.photo_url ? 'Retake Photo' : 'Take Photo (Webcam)'}
+                  </Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => fileInputRef.current?.click()} className="gap-1.5">
+                    <Upload className="h-4 w-4" /> Select from Device
                   </Button>
                   {form.photo_url && (
                     <Button

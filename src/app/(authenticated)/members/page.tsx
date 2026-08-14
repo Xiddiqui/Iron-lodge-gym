@@ -14,7 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert } from 'lucide-react';
+import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { isMemberAssignedToStaff, embedStaffIdsInNotes } from '@/lib/staff-assignments';
 import { PAYMENT_METHODS } from '@/lib/constants';
@@ -439,6 +439,28 @@ export default function MembersPage() {
       stopCamera();
       toast.success('Photo captured!');
     }
+  };
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select a valid image file');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      if (dataUrl) {
+        setForm((prev) => ({ ...prev, photo_url: dataUrl }));
+        stopCamera();
+        toast.success('Image selected from device');
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
   };
 
   // Calculations for form summary
@@ -1561,7 +1583,15 @@ export default function MembersPage() {
               )}
             </div>
 
-            <div className="flex items-center gap-2">
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept="image/*"
+              className="hidden"
+              onChange={handleFileUpload}
+            />
+
+            <div className="flex flex-wrap items-center justify-center gap-2">
               {isCameraActive ? (
                 <>
                   <Button type="button" size="sm" onClick={capturePhoto} className="bg-green-600 hover:bg-green-700 text-white">
@@ -1575,6 +1605,9 @@ export default function MembersPage() {
                 <>
                   <Button type="button" size="sm" variant="secondary" onClick={startCamera}>
                     <Camera className="h-4 w-4 mr-2" /> {form.photo_url ? 'Retake Photo' : 'Open Webcam'}
+                  </Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => fileInputRef.current?.click()}>
+                    <Upload className="h-4 w-4 mr-2" /> Select from Device
                   </Button>
                   {form.photo_url && (
                     <Button type="button" size="sm" variant="ghost" className="text-destructive" onClick={() => setForm((prev) => ({ ...prev, photo_url: null }))}>

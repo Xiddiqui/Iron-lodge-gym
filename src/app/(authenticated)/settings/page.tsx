@@ -1,6 +1,6 @@
 'use client';
 export const dynamic = 'force-dynamic';
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { useRole } from '@/hooks/use-role';
@@ -13,8 +13,9 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Settings, Save, Upload, Loader2, Users, Shield, Plus, Search, UserCheck, CheckSquare, Square, Pencil, Trash2 } from 'lucide-react';
+import { Settings, Save, Upload, Loader2, Users, Shield, Plus, Search, UserCheck, CheckSquare, Square, Pencil, Trash2, Camera, User, X, Globe, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
+import OnePagerCustomizer from '@/components/settings/one-pager-customizer';
 
 import { isMemberAssignedToStaff } from '@/lib/staff-assignments';
 
@@ -22,6 +23,9 @@ export default function SettingsPage() {
   const { data: role } = useRole();
   const { data: settings } = useGymSettings();
   const queryClient = useQueryClient();
+
+  const [settingsTab, setSettingsTab] = useState<'general' | 'one-pager'>('general');
+
 
   const [gymName, setGymName] = useState('');
   const [logoFile, setLogoFile] = useState<File | null>(null);
@@ -31,12 +35,87 @@ export default function SettingsPage() {
   // Staff management state
   const [staffDialogOpen, setStaffDialogOpen] = useState(false);
   const [editingStaff, setEditingStaff] = useState<any | null>(null);
-  const [newStaff, setNewStaff] = useState({ full_name: '', email: '', password: '', role: 'staff' });
+  const [newStaff, setNewStaff] = useState({ full_name: '', email: '', password: '', role: 'staff', photo_url: null as string | null });
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
   const [autoAssignMale, setAutoAssignMale] = useState(false);
   const [autoAssignFemale, setAutoAssignFemale] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const [deleteConfirmStaff, setDeleteConfirmStaff] = useState<{ id: string; full_name: string } | null>(null);
+
+  // Staff photo camera & device upload state
+  const [isStaffCameraActive, setIsStaffCameraActive] = useState(false);
+  const staffVideoRef = useRef<HTMLVideoElement>(null);
+  const staffStreamRef = useRef<MediaStream | null>(null);
+  const staffFileInputRef = useRef<HTMLInputElement>(null);
+
+  const stopStaffCamera = () => {
+    if (staffStreamRef.current) {
+      staffStreamRef.current.getTracks().forEach((track) => track.stop());
+      staffStreamRef.current = null;
+    }
+    setIsStaffCameraActive(false);
+  };
+
+  const startStaffCamera = async () => {
+    try {
+      stopStaffCamera();
+      const mediaStream = await navigator.mediaDevices.getUserMedia({ video: { width: 400, height: 400, facingMode: 'user' } });
+      staffStreamRef.current = mediaStream;
+      if (staffVideoRef.current) {
+        staffVideoRef.current.srcObject = mediaStream;
+      }
+      setIsStaffCameraActive(true);
+    } catch (err) {
+      toast.error('Unable to access camera. Please check permissions.');
+    }
+  };
+
+  useEffect(() => {
+    if (isStaffCameraActive && staffVideoRef.current && staffStreamRef.current) {
+      staffVideoRef.current.srcObject = staffStreamRef.current;
+    }
+  }, [isStaffCameraActive]);
+
+  useEffect(() => {
+    if (!staffDialogOpen) {
+      stopStaffCamera();
+    }
+  }, [staffDialogOpen]);
+
+  const captureStaffPhoto = () => {
+    if (!staffVideoRef.current) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = staffVideoRef.current.videoWidth || 300;
+    canvas.height = staffVideoRef.current.videoHeight || 300;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(staffVideoRef.current, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      setNewStaff((prev) => ({ ...prev, photo_url: dataUrl }));
+      stopStaffCamera();
+      toast.success('Photo captured!');
+    }
+  };
+
+  const handleStaffFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select a valid image file');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      if (dataUrl) {
+        setNewStaff((prev) => ({ ...prev, photo_url: dataUrl }));
+        stopStaffCamera();
+        toast.success('Image selected from device');
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
 
   // Fetch staff profiles (excluding admin users)
   const { data: profiles = [], isLoading: profilesLoading } = useQuery({
@@ -160,11 +239,12 @@ export default function SettingsPage() {
   // Open staff dialog for adding
   const handleOpenAddStaff = () => {
     setEditingStaff(null);
-    setNewStaff({ full_name: '', email: '', password: '', role: 'staff' });
+    setNewStaff({ full_name: '', email: '', password: '', role: 'staff', photo_url: null });
     setSelectedMemberIds([]);
     setAutoAssignMale(false);
     setAutoAssignFemale(false);
     setMemberSearch('');
+    stopStaffCamera();
     setStaffDialogOpen(true);
   };
 
@@ -331,12 +411,46 @@ export default function SettingsPage() {
   return (
     <div className="p-4 md:p-6 lg:p-8 space-y-8">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <Settings className="h-6 w-6 text-primary" />
-        <h1 className="text-2xl font-display font-bold tracking-tight">Settings</h1>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <Settings className="h-6 w-6 text-primary" />
+          <h1 className="text-2xl font-display font-bold tracking-tight">Settings</h1>
+        </div>
+
+        {/* Tab Selection Switcher */}
+        <div className="flex items-center gap-2 bg-muted/60 p-1.5 rounded-xl border border-border">
+          <Button
+            type="button"
+            variant={settingsTab === 'general' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setSettingsTab('general')}
+            className="gap-2 font-semibold text-xs"
+          >
+            <Settings className="h-4 w-4" />
+            General & Staff
+          </Button>
+          <Button
+            type="button"
+            variant={settingsTab === 'one-pager' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setSettingsTab('one-pager')}
+            className={`gap-2 font-semibold text-xs transition-all ${
+              settingsTab === 'one-pager'
+                ? 'bg-primary text-primary-foreground shadow-md'
+                : 'hover:text-primary'
+            }`}
+          >
+            <Globe className="h-4 w-4 text-primary" />
+            One-Pager Customizer
+          </Button>
+        </div>
       </div>
 
-      {/* Gym Settings */}
+      {settingsTab === 'one-pager' ? (
+        <OnePagerCustomizer />
+      ) : (
+        <>
+          {/* Gym Settings */}
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">Gym Settings</CardTitle>
@@ -360,7 +474,7 @@ export default function SettingsPage() {
                     <img
                       src={logoPreview || settings?.logo_url || ''}
                       alt="Logo preview"
-                      className="h-14 w-14 rounded-xl object-cover border border-border"
+                      className="h-14 w-14 rounded-xl object-contain border border-border bg-slate-100 dark:bg-slate-800 p-1"
                     />
                   ) : (
                     <div className="h-14 w-14 rounded-xl bg-accent grid place-items-center">
@@ -429,9 +543,13 @@ export default function SettingsPage() {
                       <tr key={p.id} className="border-b border-border/50 hover:bg-accent/30 transition-colors">
                         <td className="p-4">
                           <div className="flex items-center gap-3">
-                            <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary">
-                              {(p.full_name || '?').slice(0, 1).toUpperCase()}
-                            </div>
+                            {p.photo_url ? (
+                              <img src={p.photo_url} alt={p.full_name} className="h-8 w-8 rounded-full object-cover border border-border" />
+                            ) : (
+                              <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary">
+                                {(p.full_name || '?').slice(0, 1).toUpperCase()}
+                              </div>
+                            )}
                             <span className="font-medium">{p.full_name}</span>
                           </div>
                         </td>
@@ -504,6 +622,8 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+        </>
+      )}
 
       {/* Add / Edit Staff & Member Assignment Dialog */}
       <Dialog open={staffDialogOpen} onOpenChange={setStaffDialogOpen}>
@@ -524,6 +644,63 @@ export default function SettingsPage() {
             {/* Account Information (Only required when adding new staff) */}
             {!editingStaff && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-muted/30 p-4 rounded-xl border border-border/50">
+                {/* Photo / Avatar Capture & Select */}
+                <div className="sm:col-span-2 flex flex-col items-center justify-center p-3 bg-muted/40 rounded-lg border border-border/60 gap-3">
+                  <div className="relative w-32 h-32 rounded-full overflow-hidden border-2 border-primary/40 bg-slate-100 dark:bg-slate-800 shadow-inner grid place-items-center">
+                    {isStaffCameraActive ? (
+                      <video ref={staffVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+                    ) : newStaff.photo_url ? (
+                      <img src={newStaff.photo_url} alt="Staff Preview" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="text-center p-2">
+                        <User className="h-10 w-10 mx-auto text-muted-foreground opacity-40 mb-1" />
+                        <p className="text-[10px] text-muted-foreground">No photo set</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <input
+                    type="file"
+                    ref={staffFileInputRef}
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleStaffFileUpload}
+                  />
+
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    {isStaffCameraActive ? (
+                      <>
+                        <Button type="button" size="sm" onClick={captureStaffPhoto} className="gap-1.5 bg-green-600 hover:bg-green-700 text-white">
+                          <Camera className="h-4 w-4" /> Capture Photo
+                        </Button>
+                        <Button type="button" size="sm" variant="outline" onClick={stopStaffCamera}>
+                          <X className="h-4 w-4 mr-1" /> Cancel
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <Button type="button" size="sm" variant="outline" onClick={startStaffCamera} className="gap-1.5">
+                          <Camera className="h-4 w-4" /> {newStaff.photo_url ? 'Retake Photo' : 'Open Webcam'}
+                        </Button>
+                        <Button type="button" size="sm" variant="outline" onClick={() => staffFileInputRef.current?.click()} className="gap-1.5">
+                          <Upload className="h-4 w-4" /> Select from Device
+                        </Button>
+                        {newStaff.photo_url && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="text-destructive hover:bg-destructive/10"
+                            onClick={() => setNewStaff((prev) => ({ ...prev, photo_url: null }))}
+                          >
+                            Remove Photo
+                          </Button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+
                 <div className="space-y-2 sm:col-span-2">
                   <Label>Full Name *</Label>
                   <Input

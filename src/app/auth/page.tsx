@@ -62,7 +62,7 @@ export default function AuthPage() {
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
       {/* Background glow */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 h-96 w-96 rounded-full opacity-20 blur-[100px]" style={{ background: 'linear-gradient(135deg, #a3e635 0%, #65a30d 100%)' }} />
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 h-96 w-96 rounded-full opacity-20" style={{ background: 'radial-gradient(circle, #a3e635 0%, transparent 70%)' }} />
       </div>
       <Card className="w-full max-w-md relative z-10 border-border/50">
         <CardHeader className="text-center space-y-4">

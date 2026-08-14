@@ -110,8 +110,8 @@ export function StaffBreakOverlay({
           className="fixed inset-0 z-[100] flex items-center justify-center bg-background/95 p-4 sm:p-6 overflow-hidden select-none"
         >
           {/* Glowing background ambient lights */}
-          <div className="pointer-events-none absolute -top-32 -left-32 h-96 w-96 rounded-full opacity-25 blur-3xl bg-amber-500/30 animate-pulse" />
-          <div className="pointer-events-none absolute -bottom-32 -right-32 h-96 w-96 rounded-full opacity-20 blur-3xl bg-primary/30 animate-pulse" />
+          <div className="pointer-events-none absolute -top-32 -left-32 h-96 w-96 rounded-full opacity-25" style={{ background: 'radial-gradient(circle, rgba(245,158,11,0.3) 0%, transparent 70%)' }} />
+          <div className="pointer-events-none absolute -bottom-32 -right-32 h-96 w-96 rounded-full opacity-20" style={{ background: 'radial-gradient(circle, rgba(163,230,53,0.3) 0%, transparent 70%)' }} />
 
           <motion.div
             initial={{ scale: 0.92, opacity: 0, y: 16 }}

@@ -27,7 +27,7 @@ export async function POST(request: Request) {
     const action = body.action || 'create';
 
     if (action === 'create') {
-      const { full_name, email, password, role = 'staff', assigned_member_ids = [], auto_assign_male = false, auto_assign_female = false } = body;
+      const { full_name, email, password, role = 'staff', photo_url = null, assigned_member_ids = [], auto_assign_male = false, auto_assign_female = false } = body;
 
       if (!full_name || !email || !password) {
         return NextResponse.json({ error: 'Full name, email, and password are required' }, { status: 400 });
@@ -78,12 +78,13 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'Failed to create user account' }, { status: 500 });
       }
 
-      // Upsert profile record to ensure profile exists with gender auto assign flags
+      // Upsert profile record to ensure profile exists with gender auto assign flags & photo_url
       const profileData: Record<string, any> = {
         id: createdUserId,
         full_name,
         email,
         role,
+        photo_url: photo_url || null,
         auto_assign_male: Boolean(auto_assign_male),
         auto_assign_female: Boolean(auto_assign_female),
       };

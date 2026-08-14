@@ -52,7 +52,7 @@
 }
 
 .bg-gradient-sidebar {
-  background: linear-gradient(180deg, #0f0f12 0%, #09090b 100%);
+  background: radial-gradient(circle at 10% 10%, rgba(163, 230, 53, 0.12) 0%, transparent 60%), linear-gradient(180deg, #0f0f12 0%, #09090b 100%);
 }
 
 .shadow-elegant {
