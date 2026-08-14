@@ -113,7 +113,7 @@ export interface LandingPageData {
 
 export const defaultLandingPageData: LandingPageData = {
   theme: {
-    primaryColor: '#f97316',
+    primaryColor: '#a3e635',
     tagline: 'Transform Your Body, Mind & Spirit',
     announcementText: '🔥 Special Offer: Join today & get 20% off annual memberships!',
     showAnnouncement: true,

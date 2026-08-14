@@ -29,6 +29,7 @@ import {
   Sparkles,
   ArrowRight,
   Building2,
+  Loader2,
 } from 'lucide-react';
 
 function InstagramIcon({ className = 'h-5 w-5' }: { className?: string }) {
@@ -93,7 +94,7 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
     }
   };
 
-  const primaryColor = data.theme?.primaryColor || '#f97316';
+  const primaryColor = data.theme?.primaryColor || '#a3e635';
 
   // Converts any Google Maps URL to an embeddable iframe src
   function toEmbedUrl(url: string): string {
@@ -116,11 +117,66 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
     return url;
   }
 
+  const displayLogo = logoUrl || '/logo.png';
+
   if (isLoading && !overrideData) {
     return (
-      <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <img src={logoUrl} alt={gymName} className="h-10 w-10" />
+      <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center relative overflow-hidden">
+        {/* Ambient background glow */}
+        <div
+          className="absolute w-72 h-72 sm:w-96 sm:h-96 rounded-full blur-3xl opacity-25 animate-pulse pointer-events-none"
+          style={{ backgroundColor: primaryColor }}
+        />
+
+        <div className="relative z-10 flex flex-col items-center gap-6 p-4">
+          {/* Animated Logo Container with glowing ring */}
+          <div className="relative flex items-center justify-center">
+            {/* Pulsing outer aura ring */}
+            <div
+              className="absolute -inset-4 rounded-3xl opacity-50 blur-md animate-pulse"
+              style={{ backgroundColor: primaryColor }}
+            />
+
+            {/* Rotating gradient ring border */}
+            <div
+              className="absolute -inset-2 rounded-2xl animate-spin border-2 border-transparent"
+              style={{
+                borderTopColor: primaryColor,
+                borderRightColor: primaryColor,
+                animationDuration: '3s',
+              }}
+            />
+
+            {/* Logo Badge Container */}
+            <div className="relative h-24 w-24 sm:h-28 sm:w-28 rounded-2xl bg-white p-3.5 shadow-2xl backdrop-blur-xl flex items-center justify-center overflow-hidden">
+              <img
+                src={displayLogo}
+                alt={gymName}
+                className="h-full w-full object-contain filter drop-shadow-lg animate-pulse"
+                onError={(e) => {
+                  (e.currentTarget as HTMLElement).style.display = 'none';
+                  const fallback = e.currentTarget.parentElement?.querySelector('.landing-logo-fallback');
+                  if (fallback) (fallback as HTMLElement).style.display = 'flex';
+                }}
+              />
+              <div className="landing-logo-fallback hidden h-full w-full items-center justify-center text-green-500">
+                <Dumbbell className="h-12 w-12 animate-bounce" />
+              </div>
+            </div>
+          </div>
+
+          {/* Animated Brand Text & Spinner */}
+          <div className="flex flex-col items-center gap-2 text-center">
+            <h2 className="text-xl sm:text-2xl font-extrabold tracking-wider uppercase font-display bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
+              {gymName}
+            </h2>
+            <div className="flex items-center gap-2 text-xs text-slate-400 font-medium">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" 
+              style={{ color: primaryColor }} 
+              />
+              <span>Loading experience...</span>
+            </div>
+          </div>
         </div>
       </div>
     );

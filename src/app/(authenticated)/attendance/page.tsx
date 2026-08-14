@@ -1,6 +1,6 @@
 'use client';
 export const dynamic = 'force-dynamic';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { useCurrentUser } from '@/hooks/use-session';
@@ -58,6 +58,9 @@ export default function AttendancePage() {
   const [staffAttError, setStaffAttError] = useState<string | null>(null);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [lastBiometricPing, setLastBiometricPing] = useState<string | null>(null);
+  // --- Member attendance search & fee status filtering ---
+  const [feeFilter, setFeeFilter] = useState<'all' | 'unpaid' | 'paid' | 'overdue' | 'due' | 'partial'>('all');
+  const [attSearch, setAttSearch] = useState('');
 
   const isAdmin = userRole === 'admin';
 
@@ -327,6 +330,43 @@ export default function AttendancePage() {
     (m.phone || '').includes(memberSearch)
   );
 
+  const presentUnpaidCount = useMemo(() => {
+    return attendance.filter((a: any) => {
+      if (!a.member_id && a.guest_name) return false;
+      const status = a.member_id ? memberFeeStatuses[a.member_id]?.status : undefined;
+      return status !== 'paid';
+    }).length;
+  }, [attendance, memberFeeStatuses]);
+
+  const presentPaidCount = useMemo(() => {
+    return Math.max(0, attendance.length - presentUnpaidCount);
+  }, [attendance.length, presentUnpaidCount]);
+
+  const filteredAttendance = useMemo(() => {
+    return attendance.filter((a: any) => {
+      const displayName = a.members?.full_name || a.guest_name || a.notes?.replace(/^1-Day Walk-in: /, '').split(' | ')[0] || 'Walk-in Guest';
+      const displayPhone = a.members?.phone || '';
+
+      if (attSearch.trim()) {
+        const q = attSearch.toLowerCase();
+        const matchName = displayName.toLowerCase().includes(q);
+        const matchPhone = displayPhone.toLowerCase().includes(q);
+        if (!matchName && !matchPhone) return false;
+      }
+
+      const isPaid = (!a.member_id && a.guest_name) || (a.member_id ? memberFeeStatuses[a.member_id]?.status === 'paid' : false);
+      const status = a.member_id ? (memberFeeStatuses[a.member_id]?.status || 'due') : (isPaid ? 'paid' : 'due');
+
+      if (feeFilter === 'unpaid') return !isPaid;
+      if (feeFilter === 'paid') return isPaid;
+      if (feeFilter === 'overdue') return status === 'overdue';
+      if (feeFilter === 'due') return status === 'due';
+      if (feeFilter === 'partial') return status === 'partial';
+
+      return true;
+    });
+  }, [attendance, memberFeeStatuses, attSearch, feeFilter]);
+
   const formatTimeStr = (isoStr: string | null) => {
     if (!isoStr) return '—';
     return new Date(isoStr).toLocaleTimeString('en-US', {
@@ -410,7 +450,6 @@ export default function AttendancePage() {
       </span>
     );
   };
-
   // ─────────────────────────────────────────────────────────────────
   // Render
   // ─────────────────────────────────────────────────────────────────
@@ -488,28 +527,83 @@ export default function AttendancePage() {
             </div>
           </div>
 
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-card p-4 rounded-xl border border-border/60 shadow-sm">
-            <Badge variant="secondary" className="px-3 py-1 text-sm font-medium">
-              {attendance.length} Present Today
-            </Badge>
-            <div className="flex flex-wrap gap-3 w-full sm:w-auto">
+          <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4 bg-card p-4 rounded-xl border border-border/60 shadow-sm">
+            <div className="flex flex-wrap items-center gap-2 flex-1">
+              <div className="relative min-w-[200px] max-w-xs flex-1">
+                <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search present members..."
+                  value={attSearch}
+                  onChange={(e) => setAttSearch(e.target.value)}
+                  className="pl-9 h-9 text-xs bg-background/50"
+                />
+              </div>
+
+              {/* Fee status filter pills */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <Button
+                  type="button"
+                  variant={feeFilter === 'all' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  onClick={() => setFeeFilter('all')}
+                  className="h-8 text-xs font-medium px-2.5"
+                >
+                  All ({attendance.length})
+                </Button>
+
+                <Button
+                  type="button"
+                  variant={feeFilter === 'unpaid' ? 'destructive' : 'outline'}
+                  size="sm"
+                  onClick={() => setFeeFilter('unpaid')}
+                  className={`h-8 text-xs font-medium px-2.5 gap-1.5 transition-colors ${
+                    feeFilter === 'unpaid'
+                      ? 'bg-red-600 text-white hover:bg-red-700'
+                      : presentUnpaidCount > 0
+                      ? 'border-red-500/40 text-red-400 bg-red-500/10 hover:bg-red-500/20'
+                      : 'text-muted-foreground'
+                  }`}
+                >
+                  <AlertCircle className="h-3.5 w-3.5" />
+                  Unpaid ({presentUnpaidCount})
+                </Button>
+
+                <Button
+                  type="button"
+                  variant={feeFilter === 'paid' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setFeeFilter('paid')}
+                  className={`h-8 text-xs font-medium px-2.5 gap-1.5 transition-colors ${
+                    feeFilter === 'paid'
+                      ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                      : 'border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10'
+                  }`}
+                >
+                  <CheckCircle className="h-3.5 w-3.5" />
+                  Paid ({presentPaidCount})
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2.5 items-center shrink-0">
               <Input
                 type="date"
                 value={date}
                 onChange={(e) => setDate(e.target.value)}
-                className="w-full sm:w-40"
+                className="w-36 h-9 text-xs"
               />
               {/* 1-Day Walk-in Button */}
               <Button
                 variant="outline"
+                size="sm"
                 onClick={() => setOneDayDialogOpen(true)}
-                className="gap-2 border-amber-500/40 text-amber-500 hover:bg-amber-500/10 hover:text-amber-400"
+                className="h-9 gap-1.5 border-amber-500/40 text-amber-500 hover:bg-amber-500/10 hover:text-amber-400 text-xs"
               >
-                <Banknote className="h-4 w-4" />
+                <Banknote className="h-3.5 w-3.5" />
                 1 Day
               </Button>
-              <Button onClick={() => setDialogOpen(true)}>
-                <Plus className="h-4 w-4 mr-1" /> Mark Member
+              <Button size="sm" onClick={() => setDialogOpen(true)} className="h-9 text-xs">
+                <Plus className="h-3.5 w-3.5 mr-1" /> Mark Member
               </Button>
             </div>
           </div>
@@ -540,9 +634,22 @@ export default function AttendancePage() {
                           No member attendance records for this date
                         </td>
                       </tr>
+                    ) : filteredAttendance.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="text-center py-12 text-muted-foreground">
+                          {feeFilter === 'unpaid' ? (
+                            <div className="flex flex-col items-center gap-2">
+                              <CheckCircle className="h-8 w-8 text-emerald-500/60" />
+                              <p className="font-medium text-foreground">No unpaid members present today!</p>
+                              <p className="text-xs text-muted-foreground">All present members have paid their fees.</p>
+                            </div>
+                          ) : (
+                            <p>No matching attendance records found</p>
+                          )}
+                        </td>
+                      </tr>
                     ) : (
-                      attendance.map((a: any) => {
-                        // Determine display name
+                      filteredAttendance.map((a: any) => {
                         const displayName = a.members?.full_name || a.guest_name || a.notes?.replace(/^1-Day Walk-in: /, '').split(' | ')[0] || 'Walk-in Guest';
                         const displayPhone = a.members?.phone || (a.guest_name ? '1-Day Visit' : null);
 

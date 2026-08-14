@@ -24,8 +24,14 @@ export function useLandingPageSettings() {
 
       // Merge saved DB landing page data with default values to ensure no missing keys
       const savedData = data.landing_page_data as Partial<LandingPageData>;
+      const mergedTheme = { ...defaultLandingPageData.theme, ...(savedData.theme || {}) };
+
+      if (mergedTheme.primaryColor && typeof window !== 'undefined') {
+        try { localStorage.setItem('gym_primary_color', mergedTheme.primaryColor); } catch {}
+      }
+
       return {
-        theme: { ...defaultLandingPageData.theme, ...(savedData.theme || {}) },
+        theme: mergedTheme,
         hero: { ...defaultLandingPageData.hero, ...(savedData.hero || {}) },
         about: { ...defaultLandingPageData.about, ...(savedData.about || {}) },
         features: savedData.features || defaultLandingPageData.features,
@@ -54,6 +60,9 @@ export function useUpdateLandingPageSettings() {
         .eq('id', 1);
 
       if (error) throw error;
+      if (newData.theme?.primaryColor && typeof window !== 'undefined') {
+        try { localStorage.setItem('gym_primary_color', newData.theme.primaryColor); } catch {}
+      }
       return newData;
     },
     onSuccess: () => {
