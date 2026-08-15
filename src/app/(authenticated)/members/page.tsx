@@ -180,9 +180,16 @@ export default function MembersPage() {
           if (isAdmin) {
             const reqUserId = payload.new?.requested_by;
             const staffName = profiles.find((p) => p.id === reqUserId)?.full_name || 'Staff member';
-            toast.info(`🔔 New member edit request from ${staffName}!`, {
-              duration: 6000,
-            });
+            const isDelete = payload.new?.changes?.action === 'delete';
+            if (isDelete) {
+              toast.error(`🚨 Deletion request for member submitted by ${staffName}!`, {
+                duration: 6000,
+              });
+            } else {
+              toast.info(`🔔 New member edit request from ${staffName}!`, {
+                duration: 6000,
+              });
+            }
           }
         }
       )
@@ -703,26 +710,51 @@ export default function MembersPage() {
 
   const approveEditMutation = useMutation({
     mutationFn: async (pendingEdit: MemberPendingEdit) => {
-      const { error: updateError } = await supabase
-        .from('members')
-        .update(pendingEdit.changes)
-        .eq('id', pendingEdit.member_id);
-      if (updateError) throw updateError;
+      const isDelete = pendingEdit.changes?.action === 'delete';
 
-      const { error: editError } = await supabase
-        .from('member_pending_edits')
-        .update({
-          status: 'approved',
-          reviewed_by: currentUser?.id || null,
-          reviewed_at: new Date().toISOString(),
-        })
-        .eq('id', pendingEdit.id);
-      if (editError) throw editError;
+      if (isDelete) {
+        // Mark approved, then delete member (which will cascade delete pending edit)
+        await supabase
+          .from('member_pending_edits')
+          .update({
+            status: 'approved',
+            reviewed_by: currentUser?.id || null,
+            reviewed_at: new Date().toISOString(),
+          })
+          .eq('id', pendingEdit.id);
+
+        const { error: delError } = await supabase
+          .from('members')
+          .delete()
+          .eq('id', pendingEdit.member_id);
+        if (delError) throw delError;
+      } else {
+        const { error: updateError } = await supabase
+          .from('members')
+          .update(pendingEdit.changes)
+          .eq('id', pendingEdit.member_id);
+        if (updateError) throw updateError;
+
+        const { error: editError } = await supabase
+          .from('member_pending_edits')
+          .update({
+            status: 'approved',
+            reviewed_by: currentUser?.id || null,
+            reviewed_at: new Date().toISOString(),
+          })
+          .eq('id', pendingEdit.id);
+        if (editError) throw editError;
+      }
+      return { isDelete };
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['members'] });
       queryClient.invalidateQueries({ queryKey: ['member_pending_edits'] });
-      toast.success('Member details updated successfully!');
+      if (result?.isDelete) {
+        toast.success('Member deleted successfully upon approval!');
+      } else {
+        toast.success('Member details updated successfully!');
+      }
     },
     onError: (err: any) => {
       toast.error(`Approval failed: ${err.message}`);
@@ -740,10 +772,15 @@ export default function MembersPage() {
         })
         .eq('id', pendingEdit.id);
       if (error) throw error;
+      return { isDelete: pendingEdit.changes?.action === 'delete' };
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['member_pending_edits'] });
-      toast.info('Pending edit request rejected.');
+      if (result?.isDelete) {
+        toast.info('Member deletion request rejected.');
+      } else {
+        toast.info('Pending edit request rejected.');
+      }
     },
     onError: (err: any) => {
       toast.error(`Rejection failed: ${err.message}`);
@@ -763,12 +800,42 @@ export default function MembersPage() {
 
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
+      if (!isAdmin) {
+        // Staff member attempting to delete — submit to pending approvals instead of direct deletion
+        const existingPending = pendingEdits.find(
+          (pe) => pe.member_id === id && pe.status === 'pending'
+        );
+        if (existingPending) {
+          throw new Error(
+            existingPending.changes?.action === 'delete'
+              ? 'A deletion request for this member is already pending admin approval.'
+              : 'An edit request for this member is currently pending admin approval.'
+          );
+        }
+
+        const { error } = await supabase.from('member_pending_edits').insert({
+          member_id: id,
+          requested_by: currentUser?.id,
+          status: 'pending',
+          changes: { action: 'delete' },
+        });
+        if (error) throw error;
+        return { isPendingDelete: true };
+      }
+
+      // Admin direct deletion
       const { error } = await supabase.from('members').delete().eq('id', id);
       if (error) throw error;
+      return { isPendingDelete: false };
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['members'] });
-      toast.success('Member deleted successfully');
+      queryClient.invalidateQueries({ queryKey: ['member_pending_edits'] });
+      if (result?.isPendingDelete) {
+        toast.success('Deletion request submitted! Waiting for admin approval.');
+      } else {
+        toast.success('Member deleted successfully');
+      }
       setMemberToDelete(null);
     },
     onError: (e: Error) => toast.error(e.message),
@@ -1307,10 +1374,11 @@ export default function MembersPage() {
                 const targetMember = members.find((m) => m.id === pe.member_id);
                 const staffProfile = profiles.find((p) => p.id === pe.requested_by);
                 const changes = pe.changes || {};
+                const isDeleteReq = changes.action === 'delete';
 
                 // Calculate diffs between targetMember & proposed changes
                 const diffs: { field: string; oldVal: string; newVal: string }[] = [];
-                if (targetMember) {
+                if (targetMember && !isDeleteReq) {
                   if (changes.full_name && changes.full_name !== targetMember.full_name) {
                     diffs.push({ field: 'Full Name', oldVal: targetMember.full_name, newVal: changes.full_name });
                   }
@@ -1346,7 +1414,14 @@ export default function MembersPage() {
                 }
 
                 return (
-                  <Card key={pe.id} className="border border-amber-500/40 bg-amber-500/5 shadow-sm overflow-hidden">
+                  <Card
+                    key={pe.id}
+                    className={
+                      isDeleteReq
+                        ? 'border border-destructive/60 bg-destructive/5 shadow-sm overflow-hidden'
+                        : 'border border-amber-500/40 bg-amber-500/5 shadow-sm overflow-hidden'
+                    }
+                  >
                     <CardContent className="p-4 sm:p-5">
                       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-border/60">
                         <div className="flex items-center gap-3">
@@ -1363,36 +1438,56 @@ export default function MembersPage() {
                               <Badge variant="outline" className="font-mono text-xs">#{targetMember?.member_number || changes.member_number || '—'}</Badge>
                             </div>
                             <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
-                              <span>Edited by: <strong className="text-foreground">{staffProfile?.full_name || 'Staff Member'}</strong></span>
+                              <span>Requested by: <strong className="text-foreground">{staffProfile?.full_name || 'Staff Member'}</strong></span>
                               <span>•</span>
                               <span>{new Date(pe.created_at).toLocaleString()}</span>
                             </div>
                           </div>
                         </div>
 
-                        <Badge className="bg-amber-500 text-white font-bold px-3 py-1">
-                          ⏳ Waiting for Approval
-                        </Badge>
+                        {isDeleteReq ? (
+                          <Badge variant="destructive" className="font-bold px-3 py-1 animate-pulse">
+                            🚨 Deletion Approval Requested
+                          </Badge>
+                        ) : (
+                          <Badge className="bg-amber-500 text-white font-bold px-3 py-1">
+                            ⏳ Waiting for Approval
+                          </Badge>
+                        )}
                       </div>
 
-                      {/* Proposed Changes */}
+                      {/* Proposed Changes / Deletion Warning */}
                       <div className="py-4 space-y-2">
-                        <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">Proposed Changes</h4>
-                        {diffs.length === 0 ? (
-                          <p className="text-xs text-muted-foreground italic">Member details update submitted.</p>
-                        ) : (
-                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                            {diffs.map((d, idx) => (
-                              <div key={idx} className="p-2.5 rounded-lg bg-background border border-border text-xs">
-                                <span className="font-semibold text-muted-foreground block mb-1">{d.field}</span>
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="line-through text-muted-foreground">{d.oldVal}</span>
-                                  <span>→</span>
-                                  <span className="font-bold text-green-600 dark:text-green-400">{d.newVal}</span>
-                                </div>
-                              </div>
-                            ))}
+                        {isDeleteReq ? (
+                          <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/30 flex items-start gap-3">
+                            <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                            <div>
+                              <p className="text-sm font-bold text-destructive">Member Deletion Requested</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                Staff member <strong>{staffProfile?.full_name || 'Staff'}</strong> has requested to permanently delete this member record. Approving will delete <strong>{targetMember?.full_name || 'this member'}</strong> and all associated data.
+                              </p>
+                            </div>
                           </div>
+                        ) : (
+                          <>
+                            <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">Proposed Changes</h4>
+                            {diffs.length === 0 ? (
+                              <p className="text-xs text-muted-foreground italic">Member details update submitted.</p>
+                            ) : (
+                              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                                {diffs.map((d, idx) => (
+                                  <div key={idx} className="p-2.5 rounded-lg bg-background border border-border text-xs">
+                                    <span className="font-semibold text-muted-foreground block mb-1">{d.field}</span>
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="line-through text-muted-foreground">{d.oldVal}</span>
+                                      <span>→</span>
+                                      <span className="font-bold text-green-600 dark:text-green-400">{d.newVal}</span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
 
@@ -1411,15 +1506,27 @@ export default function MembersPage() {
                             </Button>
                             <Button
                               size="sm"
-                              className="bg-green-600 hover:bg-green-700 text-white font-semibold shadow-sm"
+                              className={
+                                isDeleteReq
+                                  ? 'bg-destructive hover:bg-destructive/90 text-white font-semibold shadow-sm'
+                                  : 'bg-green-600 hover:bg-green-700 text-white font-semibold shadow-sm'
+                              }
                               disabled={approveEditMutation.isPending}
                               onClick={() => approveEditMutation.mutate(pe)}
                             >
-                              <Check className="h-4 w-4 mr-1.5" /> Approve & Update Member
+                              {isDeleteReq ? (
+                                <>
+                                  <Trash2 className="h-4 w-4 mr-1.5" /> Approve & Delete Member
+                                </>
+                              ) : (
+                                <>
+                                  <Check className="h-4 w-4 mr-1.5" /> Approve & Update Member
+                                </>
+                              )}
                             </Button>
                           </>
                         ) : (
-                          <p className="text-xs text-amber-600 dark:text-amber-400 italic">Only admins can approve or reject edit requests.</p>
+                          <p className="text-xs text-amber-600 dark:text-amber-400 italic">Only admins can approve or reject edit/delete requests.</p>
                         )}
                       </div>
                     </CardContent>
@@ -1482,9 +1589,15 @@ export default function MembersPage() {
                             <div className="flex flex-col">
                               <span className="font-medium">{m.full_name}</span>
                               {pendingEditReq && (
-                                <Badge variant="outline" className="w-fit border-amber-500 text-amber-600 bg-amber-500/10 font-bold text-[10px] px-1.5 py-0 mt-0.5 animate-pulse">
-                                  ⏳ Waiting for Approval
-                                </Badge>
+                                pendingEditReq.changes?.action === 'delete' ? (
+                                  <Badge variant="destructive" className="w-fit font-bold text-[10px] px-1.5 py-0 mt-0.5 animate-pulse">
+                                    🚨 Deletion Pending
+                                  </Badge>
+                                ) : (
+                                  <Badge variant="outline" className="w-fit border-amber-500 text-amber-600 bg-amber-500/10 font-bold text-[10px] px-1.5 py-0 mt-0.5 animate-pulse">
+                                    ⏳ Waiting for Approval
+                                  </Badge>
+                                )
                               )}
                             </div>
                           </div>
@@ -2596,12 +2709,20 @@ export default function MembersPage() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-destructive font-bold">
               <AlertTriangle className="h-5 w-5" />
-              Delete Member
+              {isAdmin ? 'Delete Member' : 'Request Member Deletion'}
             </DialogTitle>
           </DialogHeader>
           <div className="py-3 text-sm text-muted-foreground">
-            Are you sure you want to delete <strong className="text-foreground">{memberToDelete?.full_name}</strong> (Member #{memberToDelete?.member_number || 'N/A'})?
-            This will permanently remove the member and their associated records.
+            {isAdmin ? (
+              <>
+                Are you sure you want to delete <strong className="text-foreground">{memberToDelete?.full_name}</strong> (Member #{memberToDelete?.member_number || 'N/A'})?
+                This will permanently remove the member and their associated records.
+              </>
+            ) : (
+              <>
+                As a staff member, your request to delete <strong className="text-foreground">{memberToDelete?.full_name}</strong> (Member #{memberToDelete?.member_number || 'N/A'}) will be submitted for admin approval. The member will not be deleted until an admin approves it.
+              </>
+            )}
           </div>
           <DialogFooter className="gap-2 sm:gap-0">
             <Button type="button" variant="outline" onClick={() => setMemberToDelete(null)}>
@@ -2614,7 +2735,7 @@ export default function MembersPage() {
               onClick={() => memberToDelete && deleteMutation.mutate(memberToDelete.id)}
             >
               {deleteMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Delete Member
+              {isAdmin ? 'Delete Member' : 'Submit Deletion Request'}
             </Button>
           </DialogFooter>
         </DialogContent>
