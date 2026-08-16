@@ -98,7 +98,14 @@ export default function Loading() {
               />
             )}
             <div className="root-logo-fallback hidden h-full w-full items-center justify-center">
-              <Dumbbell className="h-12 w-12 animate-bounce" style={{ color: primaryColor }} />
+              {/* <Dumbbell className="h-12 w-12 animate-bounce" style={{ color: primaryColor }} /> */}
+              <img
+                src={'/logo.png'}
+                alt={gymName}
+                className={`absolute inset-0 h-full w-full object-contain p-3.5 filter drop-shadow-lg transition-opacity duration-300 ${remoteLogoLoaded ? 'opacity-100 animate-pulse' : 'opacity-0'}`}
+                onLoad={() => setRemoteLogoLoaded(true)}
+                onError={() => setRemoteLogoError(true)}
+              />
             </div>
           </div>
         </div>

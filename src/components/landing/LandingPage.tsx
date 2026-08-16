@@ -99,22 +99,65 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
   // Converts any Google Maps URL to an embeddable iframe src
   function toEmbedUrl(url: string): string {
     if (!url) return '';
-    // Already an embed URL
-    if (url.includes('output=embed') || url.includes('/maps/embed')) return url;
-    // Extract coordinates from @lat,lng in place URLs e.g. /@33.6456933,72.9617991,17z
-    const coordMatch = url.match(/\/@(-?\d+\.?\d*),(-?\d+\.?\d*),([\d.]+)z/);
+    const trimmed = url.trim();
+
+    // 1. Already an embed URL — pass through
+    if (trimmed.includes('output=embed') || trimmed.includes('/maps/embed')) return trimmed;
+
+    // 2. If it's a full iframe HTML tag, extract src
+    const iframeSrcMatch = trimmed.match(/src=["']([^"']+)["']/i);
+    if (iframeSrcMatch) return iframeSrcMatch[1];
+
+    // 3. Extract coordinates from @lat,lng,z in place URLs e.g. /@33.6456933,72.9617991,17z
+    const coordMatch = trimmed.match(/\/@(-?\d+\.?\d*),(-?\d+\.?\d*),([\d.]+)z/);
     if (coordMatch) {
       const lat = coordMatch[1];
       const lng = coordMatch[2];
       const zoom = coordMatch[3];
       return `https://maps.google.com/maps?q=${lat},${lng}&z=${zoom}&output=embed`;
     }
-    // Fallback: append output=embed if it's a google maps URL
-    if (url.includes('google.com/maps')) {
-      const separator = url.includes('?') ? '&' : '?';
-      return `${url}${separator}output=embed`;
+
+    // 4. Place URL: google.com/maps/place/PLACE_NAME/...
+    const placeMatch = trimmed.match(/google\.com\/maps\/place\/([^/@]+)/);
+    if (placeMatch) {
+      const placeName = decodeURIComponent(placeMatch[1].replace(/\+/g, ' '));
+      return `https://maps.google.com/maps?q=${encodeURIComponent(placeName)}&output=embed`;
     }
-    return url;
+
+    // 5. Search URL: google.com/maps/search/QUERY/...
+    const searchMatch = trimmed.match(/google\.com\/maps\/search\/([^/@]+)/);
+    if (searchMatch) {
+      const query = decodeURIComponent(searchMatch[1].replace(/\+/g, ' '));
+      return `https://maps.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
+    }
+
+    // 6. Short link (maps.app.goo.gl or goo.gl/maps) — these can't be embedded directly,
+    //    so we use the URL as a search query for the embed
+    if (trimmed.includes('goo.gl/') || trimmed.includes('maps.app.goo.gl')) {
+      return `https://maps.google.com/maps?q=${encodeURIComponent(trimmed)}&output=embed`;
+    }
+
+    // 7. Generic google maps URL with ?q= parameter
+    try {
+      const parsed = new URL(trimmed);
+      const q = parsed.searchParams.get('q');
+      if (q && trimmed.includes('google')) {
+        return `https://maps.google.com/maps?q=${encodeURIComponent(q)}&output=embed`;
+      }
+    } catch {}
+
+    // 8. Fallback: if it looks like a Google Maps URL, append output=embed
+    if (trimmed.includes('google.com/maps') || trimmed.includes('google.co')) {
+      const separator = trimmed.includes('?') ? '&' : '?';
+      return `${trimmed}${separator}output=embed`;
+    }
+
+    // 9. If it's just a plain address or place name text, use it as a query
+    if (!trimmed.startsWith('http')) {
+      return `https://maps.google.com/maps?q=${encodeURIComponent(trimmed)}&output=embed`;
+    }
+
+    return trimmed;
   }
 
   const displayLogo = logoUrl || '/logo.png';
@@ -798,9 +841,9 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
 
               {/* Map Embed or Call Card */}
               <div className="lg:col-span-7 h-[420px] rounded-2xl overflow-hidden border border-slate-800 bg-slate-950 flex items-center justify-center relative">
-                {contact.mapEmbedUrl ? (
+                {(contact.mapEmbedUrl?.trim() || contact.address?.trim()) ? (
                   <iframe
-                    src={toEmbedUrl(contact.mapEmbedUrl)}
+                    src={toEmbedUrl(contact.mapEmbedUrl?.trim() || contact.address?.trim() || '')}
                     className="w-full h-full border-0"
                     loading="lazy"
                     allowFullScreen
@@ -810,7 +853,7 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
                   <div className="text-center p-8 space-y-4">
                     <MapPin className="h-16 w-16 mx-auto" style={{ color: primaryColor }} />
                     <h4 className="text-xl font-bold text-white">{gymName}</h4>
-                    <p className="text-slate-400 text-sm max-w-sm">{contact.address || 'Visit us for a free tour & fitness consultation.'}</p>
+                    <p className="text-slate-400 text-sm max-w-sm">Visit us for a free tour & fitness consultation.</p>
                     {contact.whatsappNumber && (
                       <a
                         href={`https://wa.me/${contact.whatsappNumber.replace(/[^0-9]/g, '')}`}
