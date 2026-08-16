@@ -117,7 +117,7 @@ export default function SettingsPage() {
     e.target.value = '';
   };
 
-  // Fetch staff profiles (excluding admin users)
+  // Fetch all profiles (staff + admin)
   const { data: profiles = [], isLoading: profilesLoading } = useQuery({
     queryKey: ['profiles'],
     enabled: role === 'admin',
@@ -125,10 +125,9 @@ export default function SettingsPage() {
       const { data, error } = await supabase
         .from('profiles')
         .select('*')
-        .neq('role', 'admin')
         .order('created_at', { ascending: true });
       if (error) throw error;
-      return (data || []).filter((p: any) => (p.role || '').toLowerCase() !== 'admin');
+      return data || [];
     },
   });
 
@@ -501,14 +500,14 @@ export default function SettingsPage() {
 
       <Separator />
 
-      {/* Staff Management */}
+      {/* Staff & Admin Management */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="text-lg flex items-center gap-2">
-            <Users className="h-5 w-5" /> Staff Management
+            <Users className="h-5 w-5" /> Staff &amp; Admin Management
           </CardTitle>
           <Button size="sm" onClick={handleOpenAddStaff}>
-            <Plus className="h-4 w-4" /> Add Staff
+            <Plus className="h-4 w-4" /> Add Account
           </Button>
         </CardHeader>
         <CardContent className="p-0">

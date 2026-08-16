@@ -109,7 +109,7 @@ export default function AttendancePage() {
     nextDay.setDate(nextDay.getDate() + 1);
     const { data, error } = await supabase
       .from('attendance')
-      .select('*, members(full_name, phone), profiles(full_name)')
+      .select('*, members(full_name, phone, member_number), profiles(full_name)')
       .gte('check_in', `${forDate}T00:00:00`)
       .lt('check_in', nextDay.toISOString().slice(0, 10) + 'T00:00:00')
       .order('check_in', { ascending: false });
@@ -156,7 +156,7 @@ export default function AttendancePage() {
   const loadMembers = useCallback(async () => {
     const { data } = await supabase
       .from('members')
-      .select('id, full_name, phone')
+      .select('id, full_name, phone, member_number')
       .eq('active', true)
       .order('full_name');
     setMembers(data ?? []);
@@ -327,7 +327,8 @@ export default function AttendancePage() {
   // ─────────────────────────────────────────────────────────────────
   const filteredMembers = members.filter((m: any) =>
     m.full_name.toLowerCase().includes(memberSearch.toLowerCase()) ||
-    (m.phone || '').includes(memberSearch)
+    (m.phone || '').includes(memberSearch) ||
+    (m.member_number || '').toLowerCase().includes(memberSearch.toLowerCase())
   );
 
   const presentUnpaidCount = useMemo(() => {
@@ -351,7 +352,8 @@ export default function AttendancePage() {
         const q = attSearch.toLowerCase();
         const matchName = displayName.toLowerCase().includes(q);
         const matchPhone = displayPhone.toLowerCase().includes(q);
-        if (!matchName && !matchPhone) return false;
+        const matchMemberNum = (a.members?.member_number || '').toLowerCase().includes(q);
+        if (!matchName && !matchPhone && !matchMemberNum) return false;
       }
 
       const isPaid = (!a.member_id && a.guest_name) || (a.member_id ? memberFeeStatuses[a.member_id]?.status === 'paid' : false);
@@ -665,6 +667,9 @@ export default function AttendancePage() {
                                 <div>
                                   <p className="font-medium">{displayName}</p>
                                   {displayPhone && <p className="text-xs text-muted-foreground">{displayPhone}</p>}
+                                  {a.members?.member_number && (
+                                    <p className="text-xs font-mono text-muted-foreground/70"># {a.members.member_number}</p>
+                                  )}
                                   {!a.member_id && (
                                     <span className="text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/20 rounded px-1.5 py-0.5">
                                       Walk-in
@@ -989,7 +994,7 @@ export default function AttendancePage() {
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search member..."
+              placeholder="Search by name, phone or member #..."
               value={memberSearch}
               onChange={(e) => setMemberSearch(e.target.value)}
               className="pl-10"
@@ -1007,6 +1012,9 @@ export default function AttendancePage() {
                     <div>
                       <p className="text-sm font-medium">{m.full_name}</p>
                       <p className="text-xs text-muted-foreground">{m.phone}</p>
+                      {m.member_number && (
+                        <p className="text-xs font-mono text-muted-foreground/70"># {m.member_number}</p>
+                      )}
                     </div>
                   </div>
                   {existingRecord ? (
