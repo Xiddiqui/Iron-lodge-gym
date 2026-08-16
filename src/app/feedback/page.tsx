@@ -15,6 +15,8 @@ export default function FeedbackPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [logoLoaded, setLogoLoaded] = useState(false);
+  const [logoError, setLogoError] = useState(false);
 
   // Fetch public gym settings for branding
   const { data: settings } = useQuery({
@@ -37,6 +39,11 @@ export default function FeedbackPage() {
 
     if (!form.name.trim() || !form.message.trim()) {
       toast.error('Please fill in your name and message');
+      return;
+    }
+
+    if (!form.phone.trim()) {
+      toast.error('Please enter your phone number');
       return;
     }
 
@@ -156,7 +163,22 @@ export default function FeedbackPage() {
       <div className="w-full max-w-lg space-y-6 relative z-10">
         {/* Header Branding */}
         <div className="flex flex-col items-center text-center space-y-3">
-          <img src={settings?.logo_url || '/logo.png'} alt={gymName} className="h-16 w-20 rounded-2xl object-cover shadow-elegant bg-primary border border-border" />
+          <div className="relative h-16 w-20 rounded-2xl shadow-elegant bg-primary border border-border overflow-hidden">
+            {/* Always show local logo as base layer */}
+            {(!logoLoaded || logoError) && (
+              <img src="/logo.png" alt={gymName} className="absolute inset-0 h-full w-full object-cover" />
+            )}
+            {/* Load remote logo on top; hidden until loaded */}
+            {settings?.logo_url && !logoError && (
+              <img
+                src={settings.logo_url}
+                alt={gymName}
+                className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-300 ${logoLoaded ? 'opacity-100' : 'opacity-0'}`}
+                onLoad={() => setLogoLoaded(true)}
+                onError={() => setLogoError(true)}
+              />
+            )}
+          </div>
           <h1 className="text-3xl font-display font-bold tracking-tight text-foreground">{gymName}</h1>
           <p className="text-sm text-muted-foreground max-w-sm">
             We value member feedback & suggestions. Enter your Member ID below to get in touch with us!
@@ -235,13 +257,14 @@ export default function FeedbackPage() {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="phone">Phone Number</Label>
+                    <Label htmlFor="phone">Phone Number *</Label>
                     <Input
                       id="phone"
                       type="tel"
                       placeholder="e.g. +92 300 1234567"
                       value={form.phone}
                       onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                      required
                     />
                   </div>
                   <div className="space-y-2">

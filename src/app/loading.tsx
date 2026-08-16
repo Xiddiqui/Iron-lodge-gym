@@ -5,7 +5,9 @@ import { Dumbbell, Loader2 } from 'lucide-react';
 
 export default function Loading() {
   const [gymName, setGymName] = useState('Iron Lodge Gym');
-  const [logoUrl, setLogoUrl] = useState<string | null>('/logo.png');
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [remoteLogoLoaded, setRemoteLogoLoaded] = useState(false);
+  const [remoteLogoError, setRemoteLogoError] = useState(false);
   const [primaryColor, setPrimaryColor] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('gym_primary_color') || '#10b981';
@@ -27,7 +29,11 @@ export default function Loading() {
       .then(({ data }) => {
         if (data) {
           if (data.gym_name) setGymName(data.gym_name);
-          if (data.logo_url) setLogoUrl(data.logo_url);
+          if (data.logo_url) {
+            setLogoUrl(data.logo_url);
+            setRemoteLogoLoaded(false);
+            setRemoteLogoError(false);
+          }
           const color = data.landing_page_data?.theme?.primaryColor;
           if (color) {
             setPrimaryColor(color);
@@ -37,7 +43,7 @@ export default function Loading() {
       });
   }, []);
 
-  const displayLogo = logoUrl || '/logo.png';
+  // Always use /logo.png as the visible base; remote logo overlays when loaded
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center relative overflow-hidden">
@@ -68,16 +74,29 @@ export default function Loading() {
 
           {/* Logo Badge Container */}
           <div className="relative h-24 w-24 sm:h-28 sm:w-28 rounded-2xl bg-white p-3.5 shadow-2xl backdrop-blur-xl flex items-center justify-center overflow-hidden">
-            <img
-              src={displayLogo}
-              alt={gymName}
-              className="h-full w-full object-contain filter drop-shadow-lg animate-pulse"
-              onError={(e) => {
-                (e.currentTarget as HTMLElement).style.display = 'none';
-                const fallback = e.currentTarget.parentElement?.querySelector('.root-logo-fallback');
-                if (fallback) (fallback as HTMLElement).style.display = 'flex';
-              }}
-            />
+            {/* Always show local logo as base layer */}
+            {(!remoteLogoLoaded || remoteLogoError || !logoUrl) && (
+              <img
+                src="/logo.png"
+                alt={gymName}
+                className="absolute inset-0 h-full w-full object-contain p-3.5 filter drop-shadow-lg animate-pulse"
+                onError={(e) => {
+                  (e.currentTarget as HTMLElement).style.display = 'none';
+                  const fallback = e.currentTarget.parentElement?.querySelector('.root-logo-fallback');
+                  if (fallback) (fallback as HTMLElement).style.display = 'flex';
+                }}
+              />
+            )}
+            {/* Load remote logo on top; hidden until loaded */}
+            {logoUrl && !remoteLogoError && (
+              <img
+                src={logoUrl}
+                alt={gymName}
+                className={`absolute inset-0 h-full w-full object-contain p-3.5 filter drop-shadow-lg transition-opacity duration-300 ${remoteLogoLoaded ? 'opacity-100 animate-pulse' : 'opacity-0'}`}
+                onLoad={() => setRemoteLogoLoaded(true)}
+                onError={() => setRemoteLogoError(true)}
+              />
+            )}
             <div className="root-logo-fallback hidden h-full w-full items-center justify-center">
               <Dumbbell className="h-12 w-12 animate-bounce" style={{ color: primaryColor }} />
             </div>

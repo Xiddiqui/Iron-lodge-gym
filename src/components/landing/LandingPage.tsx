@@ -231,7 +231,7 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
           </nav>
 
           {/* Action / Dashboard Button */}
-          <div className="hidden sm:flex items-center gap-4">
+          {/* <div className="hidden sm:flex items-center gap-4">
             <button
               onClick={handleDashboardClick}
               className="px-5 py-2.5 rounded-xl font-semibold text-sm text-white flex items-center gap-2 transition-all shadow-lg hover:shadow-orange-500/20 active:scale-95"
@@ -249,7 +249,7 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
                 </>
               )}
             </button>
-          </div>
+          </div> */}
 
           {/* Mobile Menu Button */}
           <div className="lg:hidden flex items-center gap-3">
