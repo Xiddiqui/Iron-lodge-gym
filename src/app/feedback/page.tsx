@@ -165,7 +165,7 @@ export default function FeedbackPage() {
         <div className="flex flex-col items-center text-center space-y-3">
           <div className="relative h-16 w-20 rounded-2xl shadow-elegant bg-primary border border-border overflow-hidden">
             {/* Always show local logo as base layer */}
-            {(!logoLoaded || logoError) && (
+            {(!logoLoaded || logoError ||!settings?.logo_url) && (
               <img src="/logo.png" alt={gymName} className="absolute inset-0 h-full w-full object-cover" />
             )}
             {/* Load remote logo on top; hidden until loaded */}

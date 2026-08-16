@@ -141,8 +141,7 @@ export function Sidebar() {
 
       {/* User section */}
       <div className="relative border-t border-sidebar-border p-3 space-y-2">
-        {/* Break Button for staff */}
-        {role !== 'admin' && (
+        {/* {role !== 'admin' && (
           <Button
             onClick={startBreak}
             disabled={breakLoading || isOnBreak}
@@ -157,7 +156,7 @@ export function Sidebar() {
             <span>{isOnBreak ? 'On Break' : 'Take Break'}</span>
             {!isOnBreak && <Lock className="h-3 w-3 opacity-70" />}
           </Button>
-        )}
+        )} */}
 
         <Button variant="ghost" onClick={handleSignOut} className="w-full justify-start text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground">
           <LogOut className="h-4 w-4" /> Sign out
