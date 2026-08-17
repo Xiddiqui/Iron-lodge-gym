@@ -729,10 +729,37 @@ export default function MembersPage() {
           .eq('id', pendingEdit.member_id);
         if (delError) throw delError;
       } else {
-        const { error: updateError } = await supabase
-          .from('members')
-          .update(pendingEdit.changes)
-          .eq('id', pendingEdit.member_id);
+        // Apply changes with a retry loop that strips columns missing from the DB schema
+        let applyPayload: Record<string, any> = { ...pendingEdit.changes };
+        let updateError: any = null;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const { error } = await supabase
+            .from('members')
+            .update(applyPayload)
+            .eq('id', pendingEdit.member_id);
+          if (!error) { updateError = null; break; }
+          updateError = error;
+          // Detect column that doesn't exist and strip it, then retry
+          const missingCol = (
+            error.message?.match(/Could not find the '([^']+)' column/i)?.[1] ||
+            error.message?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1] ||
+            error.details?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1]
+          );
+          if (missingCol && missingCol in applyPayload) {
+            delete applyPayload[missingCol];
+            continue;
+          }
+          // Fallback: strip known optional columns that might not exist
+          let removed = false;
+          for (const col of ['age', 'gender', 'cnic', 'member_number', 'training_fees', 'trainer_id', 'amount_paid', 'created_by']) {
+            if (col in applyPayload && (error.message?.includes(col) || error.details?.includes(col))) {
+              delete applyPayload[col];
+              removed = true;
+            }
+          }
+          if (removed) continue;
+          break; // non-recoverable error
+        }
         if (updateError) throw updateError;
 
         const { error: editError } = await supabase
@@ -1393,6 +1420,12 @@ export default function MembersPage() {
                   }
                   if (changes.gender && changes.gender !== targetMember.gender) {
                     diffs.push({ field: 'Gender', oldVal: targetMember.gender || 'male', newVal: changes.gender });
+                  }
+                  if (changes.age !== undefined && Number(changes.age || 0) !== Number(targetMember.age || 0)) {
+                    diffs.push({ field: 'Age', oldVal: targetMember.age != null ? String(targetMember.age) : '—', newVal: changes.age != null ? String(changes.age) : '—' });
+                  }
+                  if (changes.join_date !== undefined && changes.join_date !== targetMember.join_date) {
+                    diffs.push({ field: 'Join Date', oldVal: formatDate(targetMember.join_date), newVal: formatDate(changes.join_date) });
                   }
                   if (changes.monthly_fee !== undefined && Number(changes.monthly_fee) !== Number(targetMember.monthly_fee)) {
                     diffs.push({ field: 'Monthly Fee', oldVal: formatCurrency(targetMember.monthly_fee), newVal: formatCurrency(Number(changes.monthly_fee)) });
