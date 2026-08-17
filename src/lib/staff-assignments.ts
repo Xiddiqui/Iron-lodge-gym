@@ -49,3 +49,9 @@ export function embedStaffIdsInNotes(existingNotes: string | null | undefined, s
   if (!tag) return notesText || null;
   return notesText ? `${notesText}\n${tag}` : tag;
 }
+
+export function stripStaffIdsFromNotes(existingNotes: string | null | undefined): string {
+  if (!existingNotes) return '';
+  return existingNotes.replace(/\[STAFF_ASSIGNMENTS:[^\]]*\]/g, '').trim();
+}
+

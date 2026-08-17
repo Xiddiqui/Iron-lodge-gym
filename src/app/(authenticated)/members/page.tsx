@@ -17,7 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { toast } from 'sonner';
-import { isMemberAssignedToStaff, embedStaffIdsInNotes } from '@/lib/staff-assignments';
+import { isMemberAssignedToStaff, embedStaffIdsInNotes, stripStaffIdsFromNotes, getAssignedStaffIds } from '@/lib/staff-assignments';
 import { PAYMENT_METHODS } from '@/lib/constants';
 
 interface MessageTemplate {
@@ -522,11 +522,11 @@ export default function MembersPage() {
   };
 
   // Calculations for form summary
-  const currentMonthlyFee = Number(form.monthly_fee) || 0;
-  const currentTrainingFee = Number(form.training_fees) || 0;
   const currentTenureMonths = Number(form.tenure_months) || 1;
-  const totalTenureMonthlyFee = currentMonthlyFee * currentTenureMonths;
-  const totalPayable = totalTenureMonthlyFee + currentTrainingFee;
+  const currentEnteredFee = Number(form.monthly_fee) || 0;
+  const currentMonthlyFee = currentTenureMonths > 0 ? (currentEnteredFee / currentTenureMonths) : currentEnteredFee;
+  const currentTrainingFee = Number(form.training_fees) || 0;
+  const totalPayable = currentEnteredFee + currentTrainingFee;
   const currentAmountPaid = form.amount_paid === '' ? totalPayable : (isNaN(Number(form.amount_paid)) ? 0 : Number(form.amount_paid));
   const remainingFees = Math.max(0, totalPayable - currentAmountPaid);
 
@@ -596,9 +596,10 @@ export default function MembersPage() {
       }
 
       const tenureMonths = Number(data.tenure_months) || 1;
-      const calcMonthly = Number(data.monthly_fee) || 0;
+      const enteredFee = Number(data.monthly_fee) || 0;
+      const calcMonthly = tenureMonths > 0 ? (enteredFee / tenureMonths) : enteredFee;
       const calcTraining = Number(data.training_fees) || 0;
-      const totalPayableForTenure = (calcMonthly * tenureMonths) + calcTraining;
+      const totalPayableForTenure = enteredFee + calcTraining;
       const rawPaid = data.amount_paid === '' ? totalPayableForTenure : Number(data.amount_paid);
       const paidAmount = isNaN(rawPaid) ? totalPayableForTenure : rawPaid;
 
@@ -611,7 +612,7 @@ export default function MembersPage() {
         age: data.age ? Number(data.age) : null,
         join_date: data.join_date,
         tenure_months: tenureMonths,
-        monthly_fee: calcMonthly,
+        monthly_fee: Math.round(calcMonthly * 100) / 100,
         training_fees: calcTraining,
         trainer_id: data.trainer_id || null,
         amount_paid: paidAmount,
@@ -619,6 +620,13 @@ export default function MembersPage() {
         photo_url: data.photo_url || null,
         active: data.active,
       };
+
+      if (editing) {
+        const existingStaffIds = getAssignedStaffIds(editing);
+        if (existingStaffIds.length > 0) {
+          payload.notes = embedStaffIdsInNotes(payload.notes, existingStaffIds);
+        }
+      }
 
       if (editing && !isAdmin) {
         // Staff member attempting to edit — submit to pending approvals instead of direct update
@@ -1172,6 +1180,8 @@ export default function MembersPage() {
   function openEdit(m: Member) {
     setEditing(m);
     stopCamera();
+    const tenure = m.tenure_months || 1;
+    const totalFee = (m.monthly_fee || 0) * tenure;
     setForm({
       member_number: m.member_number || '',
       full_name: m.full_name,
@@ -1180,12 +1190,12 @@ export default function MembersPage() {
       cnic: m.cnic || '',
       age: m.age != null ? String(m.age) : '',
       join_date: m.join_date,
-      tenure_months: m.tenure_months || 1,
-      monthly_fee: String(m.monthly_fee),
+      tenure_months: tenure,
+      monthly_fee: String(totalFee),
       training_fees: String(m.training_fees || 0),
       trainer_id: m.trainer_id || null,
-      amount_paid: String(m.amount_paid ?? (m.monthly_fee + (m.training_fees || 0))),
-      notes: m.notes || '',
+      amount_paid: String(m.amount_paid ?? (totalFee + (m.training_fees || 0))),
+      notes: stripStaffIdsFromNotes(m.notes),
       photo_url: m.photo_url || null,
       active: m.active,
     });
@@ -1526,8 +1536,12 @@ export default function MembersPage() {
                   if (changes.active !== undefined && changes.active !== targetMember.active) {
                     diffs.push({ field: 'Status', oldVal: targetMember.active ? 'Active' : 'Inactive', newVal: changes.active ? 'Active' : 'Inactive' });
                   }
-                  if (changes.notes !== undefined && changes.notes !== targetMember.notes) {
-                    diffs.push({ field: 'Notes', oldVal: targetMember.notes || '—', newVal: changes.notes || '—' });
+                  if (changes.notes !== undefined) {
+                    const oldNotes = stripStaffIdsFromNotes(targetMember.notes);
+                    const newNotes = stripStaffIdsFromNotes(changes.notes);
+                    if (oldNotes !== newNotes) {
+                      diffs.push({ field: 'Notes', oldVal: oldNotes || '—', newVal: newNotes || '—' });
+                    }
                   }
                 }
 
@@ -1973,11 +1987,19 @@ export default function MembersPage() {
                 <Select 
                   value={String(form.tenure_months || 1)} 
                   onValueChange={(val) => {
-                    const tenure = Number(val) || 1;
-                    const mFee = Number(form.monthly_fee) || 0;
+                    const newTenure = Number(val) || 1;
+                    const oldTenure = Number(form.tenure_months) || 1;
+                    const currentTotalFee = Number(form.monthly_fee) || 0;
                     const tFee = Number(form.training_fees) || 0;
-                    const newTotal = (mFee * tenure) + tFee;
-                    setForm({ ...form, tenure_months: tenure, amount_paid: String(newTotal) });
+                    
+                    if (form.monthly_fee !== '' && !isNaN(currentTotalFee)) {
+                      const monthlyRate = currentTotalFee / oldTenure;
+                      const newTotalFee = Math.round(monthlyRate * newTenure);
+                      const newTotalPayable = newTotalFee + tFee;
+                      setForm({ ...form, tenure_months: newTenure, monthly_fee: String(newTotalFee), amount_paid: String(newTotalPayable) });
+                    } else {
+                      setForm({ ...form, tenure_months: newTenure });
+                    }
                   }}
                 >
                   <SelectTrigger>
@@ -1991,22 +2013,44 @@ export default function MembersPage() {
                 </Select>
               </div>
 
-              {/* Monthly Fee */}
+              {/* Fee Input */}
               <div className="space-y-2">
-                <Label>Monthly Fee (PKR) *</Label>
+                <div className="flex items-center justify-between">
+                  <Label>
+                    {currentTenureMonths > 1 
+                      ? `${currentTenureMonths}-Month Total Fee (PKR) *` 
+                      : 'Monthly Fee (PKR) *'}
+                  </Label>
+                  {currentTenureMonths > 1 && currentEnteredFee > 0 && (
+                    <span className="text-xs font-semibold text-primary bg-primary/10 px-2 py-0.5 rounded border border-primary/30">
+                      {formatCurrency(Math.round(currentMonthlyFee))}/month
+                    </span>
+                  )}
+                </div>
                 <Input 
                   type="number" 
                   required 
                   value={form.monthly_fee} 
                   onChange={(e) => {
-                    const mFee = Number(e.target.value) || 0;
-                    const tenure = Number(form.tenure_months) || 1;
+                    const feeVal = e.target.value;
+                    const enteredFee = Number(feeVal) || 0;
                     const tFee = Number(form.training_fees) || 0;
-                    const newTotal = (mFee * tenure) + tFee;
-                    setForm({ ...form, monthly_fee: e.target.value, amount_paid: String(newTotal) });
+                    const newTotal = enteredFee + tFee;
+                    setForm({ ...form, monthly_fee: feeVal, amount_paid: String(newTotal) });
                   }} 
-                  placeholder="e.g. 4000" 
+                  placeholder={currentTenureMonths > 1 ? `e.g. ${4000 * currentTenureMonths}` : 'e.g. 4000'} 
                 />
+                {currentTenureMonths > 1 && (
+                  <p className="text-[12px] text-muted-foreground">
+                    {currentEnteredFee > 0 ? (
+                      <>
+                        Takes <strong className="text-foreground">{formatCurrency(currentEnteredFee)}</strong> for {currentTenureMonths} months = <strong className="text-primary font-semibold">{formatCurrency(Math.round(currentMonthlyFee))}/month</strong>
+                      </>
+                    ) : (
+                      <>Enter total fee for {currentTenureMonths} months. It will be divided by {currentTenureMonths} to calculate the monthly fee.</>
+                    )}
+                  </p>
+                )}
               </div>
 
               {/* Training Fees */}
@@ -2017,9 +2061,8 @@ export default function MembersPage() {
                   value={form.training_fees} 
                   onChange={(e) => {
                     const tFee = Number(e.target.value) || 0;
-                    const mFee = Number(form.monthly_fee) || 0;
-                    const tenure = Number(form.tenure_months) || 1;
-                    const newTotal = (mFee * tenure) + tFee;
+                    const enteredFee = Number(form.monthly_fee) || 0;
+                    const newTotal = enteredFee + tFee;
                     setForm({ ...form, training_fees: e.target.value, amount_paid: String(newTotal) });
                   }} 
                   placeholder="e.g. 10000" 
@@ -2069,7 +2112,7 @@ export default function MembersPage() {
                   <div className="text-base font-bold text-primary">{formatCurrency(totalPayable)}</div>
                   <div className="text-[11px] text-muted-foreground">
                     {currentTenureMonths > 1 ? (
-                      <>{formatCurrency(currentMonthlyFee)}/mo × {currentTenureMonths} mos{currentTrainingFee > 0 ? ` + ${formatCurrency(currentTrainingFee)} training` : ''}</>
+                      <>{formatCurrency(Math.round(currentMonthlyFee))}/mo × {currentTenureMonths} mos ({formatCurrency(currentEnteredFee)}){currentTrainingFee > 0 ? ` + ${formatCurrency(currentTrainingFee)} training` : ''}</>
                     ) : (
                       <>Monthly ({formatCurrency(currentMonthlyFee)}){currentTrainingFee > 0 ? ` + Training (${formatCurrency(currentTrainingFee)})` : ''}</>
                     )}
@@ -2218,7 +2261,7 @@ export default function MembersPage() {
                 </div>
                 <div className="sm:col-span-2">
                   <div className="text-muted-foreground mb-1">Notes</div>
-                  <div className="font-medium">{selectedMember?.notes || '—'}</div>
+                  <div className="font-medium whitespace-pre-wrap">{stripStaffIdsFromNotes(selectedMember?.notes) || '—'}</div>
                 </div>
               </div>
             </TabsContent>
