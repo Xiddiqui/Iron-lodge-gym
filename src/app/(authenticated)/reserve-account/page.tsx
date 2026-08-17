@@ -137,7 +137,7 @@ export default function ReserveAccountPage() {
         const amtPaid = Number(f.amount_paid);
         const actualCollected = (!isNaN(amtPaid) && amtPaid > 0) ? amtPaid : (f.paid ? Number(f.amount) || 0 : 0);
         if (actualCollected <= 0) return;
-        const key = f.paid_at ? f.paid_at.slice(0, 7) : f.period_month ? f.period_month.slice(0, 7) : null;
+        const key = f.period_month ? f.period_month.slice(0, 7) : (f.paid_at ? f.paid_at.slice(0, 7) : null);
         if (!key) return;
         revenueByMonth.set(key, (revenueByMonth.get(key) || 0) + actualCollected);
       });

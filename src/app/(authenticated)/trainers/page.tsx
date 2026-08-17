@@ -30,7 +30,9 @@ import {
   Trash2,
   Calendar,
   Upload,
+  ZoomIn,
 } from 'lucide-react';
+import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { toast } from 'sonner';
 
 interface Trainer {
@@ -87,6 +89,24 @@ export default function TrainersPage() {
   // Detail View State
   const [selectedTrainer, setSelectedTrainer] = useState<Trainer | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+
+  // Fullsize Photo Lightbox State
+  const [fullPhotoPreview, setFullPhotoPreview] = useState<{
+    open: boolean;
+    photoUrl: string | null;
+    title?: string;
+    subtitle?: string;
+  }>({ open: false, photoUrl: null });
+
+  const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
+    if (!photoUrl) return;
+    setFullPhotoPreview({
+      open: true,
+      photoUrl,
+      title: title || 'Photo View',
+      subtitle,
+    });
+  };
 
   // Fetch Trainers
   const { data: trainers = [], isLoading: loadingTrainers } = useQuery({
@@ -383,11 +403,24 @@ export default function TrainersPage() {
                         <td className="p-4">
                           <div className="flex items-center gap-3">
                             {t.photo_url ? (
-                              <img
-                                src={t.photo_url}
-                                alt={t.name}
-                                className="h-10 w-10 rounded-full object-cover border border-border shrink-0"
-                              />
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openFullPhoto(t.photo_url, t.name, t.specialization || 'Trainer');
+                                }}
+                                className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                title="Click to view full size photo"
+                              >
+                                <img
+                                  src={t.photo_url}
+                                  alt={t.name}
+                                  className="h-10 w-10 rounded-full object-cover border border-border shrink-0 group-hover:scale-110 transition-transform"
+                                />
+                                <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                  <ZoomIn className="h-3.5 w-3.5 text-white" />
+                                </div>
+                              </button>
                             ) : (
                               <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
                                 {t.name.slice(0, 1).toUpperCase()}
@@ -473,7 +506,16 @@ export default function TrainersPage() {
               {isCameraActive ? (
                 <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
               ) : form.photo_url ? (
-                <img src={form.photo_url} alt="Trainer Preview" className="w-full h-full object-cover" />
+                <div
+                  className="relative w-full h-full group cursor-pointer"
+                  onClick={() => openFullPhoto(form.photo_url, form.name || 'Trainer Preview', 'Photo Preview')}
+                  title="Click to view full size photo"
+                >
+                  <img src={form.photo_url} alt="Trainer Preview" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                  <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                    <ZoomIn className="h-5 w-5 text-white" />
+                  </div>
+                </div>
               ) : (
                 <div className="text-center p-4">
                   <User className="h-12 w-12 mx-auto text-muted-foreground opacity-40 mb-1" />
@@ -626,11 +668,27 @@ export default function TrainersPage() {
               <DialogHeader>
                 <div className="flex items-start gap-4">
                   {selectedTrainer.photo_url ? (
-                    <img
-                      src={selectedTrainer.photo_url}
-                      alt={selectedTrainer.name}
-                      className="h-16 w-16 rounded-full object-cover border-2 border-primary/30 shrink-0"
-                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openFullPhoto(
+                          selectedTrainer.photo_url,
+                          selectedTrainer.name,
+                          selectedTrainer.specialization || 'Trainer'
+                        )
+                      }
+                      className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                      title="Click to view full size photo"
+                    >
+                      <img
+                        src={selectedTrainer.photo_url}
+                        alt={selectedTrainer.name}
+                        className="h-16 w-16 rounded-full object-cover border-2 border-primary/30 shrink-0 group-hover:scale-110 transition-transform"
+                      />
+                      <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                        <ZoomIn className="h-4 w-4 text-white" />
+                      </div>
+                    </button>
                   ) : (
                     <div className="h-16 w-16 rounded-full bg-primary/20 grid place-items-center text-xl font-bold text-primary shrink-0">
                       {selectedTrainer.name.slice(0, 1).toUpperCase()}
@@ -723,11 +781,23 @@ export default function TrainersPage() {
                             <td className="p-3">
                               <div className="flex items-center gap-2">
                                 {m.photo_url ? (
-                                  <img
-                                    src={m.photo_url}
-                                    alt={m.full_name}
-                                    className="h-7 w-7 rounded-full object-cover border border-border shrink-0"
-                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      openFullPhoto(m.photo_url, m.full_name, `Member #${m.member_number || 'N/A'}`)
+                                    }
+                                    className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                    title="Click to view full size photo"
+                                  >
+                                    <img
+                                      src={m.photo_url}
+                                      alt={m.full_name}
+                                      className="h-7 w-7 rounded-full object-cover border border-border shrink-0 group-hover:scale-110 transition-transform"
+                                    />
+                                    <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                      <ZoomIn className="h-2 w-2 text-white" />
+                                    </div>
+                                  </button>
                                 ) : (
                                   <div className="h-7 w-7 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
                                     {m.full_name.slice(0, 1).toUpperCase()}
@@ -755,6 +825,15 @@ export default function TrainersPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Full-size Trainer & Member Photo Lightbox */}
+      <PhotoPreviewDialog
+        open={fullPhotoPreview.open}
+        onOpenChange={(open) => setFullPhotoPreview((prev) => ({ ...prev, open }))}
+        photoUrl={fullPhotoPreview.photoUrl}
+        title={fullPhotoPreview.title}
+        subtitle={fullPhotoPreview.subtitle}
+      />
     </div>
   );
 }

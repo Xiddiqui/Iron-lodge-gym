@@ -13,7 +13,8 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Settings, Save, Upload, Loader2, Users, Shield, Plus, Search, UserCheck, CheckSquare, Square, Pencil, Trash2, Camera, User, X, Globe, Sparkles } from 'lucide-react';
+import { Settings, Save, Upload, Loader2, Users, Shield, Plus, Search, UserCheck, CheckSquare, Square, Pencil, Trash2, Camera, User, X, Globe, Sparkles, ZoomIn } from 'lucide-react';
+import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { toast } from 'sonner';
 import OnePagerCustomizer from '@/components/settings/one-pager-customizer';
 
@@ -41,6 +42,24 @@ export default function SettingsPage() {
   const [autoAssignFemale, setAutoAssignFemale] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const [deleteConfirmStaff, setDeleteConfirmStaff] = useState<{ id: string; full_name: string } | null>(null);
+
+  // Fullsize Photo Lightbox State
+  const [fullPhotoPreview, setFullPhotoPreview] = useState<{
+    open: boolean;
+    photoUrl: string | null;
+    title?: string;
+    subtitle?: string;
+  }>({ open: false, photoUrl: null });
+
+  const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
+    if (!photoUrl) return;
+    setFullPhotoPreview({
+      open: true,
+      photoUrl,
+      title: title || 'Staff Photo',
+      subtitle,
+    });
+  };
 
   // Staff photo camera & device upload state
   const [isStaffCameraActive, setIsStaffCameraActive] = useState(false);
@@ -543,9 +562,19 @@ export default function SettingsPage() {
                         <td className="p-4">
                           <div className="flex items-center gap-3">
                             {p.photo_url ? (
-                              <img src={p.photo_url} alt={p.full_name} className="h-8 w-8 rounded-full object-cover border border-border" />
+                              <button
+                                type="button"
+                                onClick={() => openFullPhoto(p.photo_url, p.full_name, `${p.role.toUpperCase()} • ${p.email || ''}`)}
+                                className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                title="Click to view full size photo"
+                              >
+                                <img src={p.photo_url} alt={p.full_name} className="h-8 w-8 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                                <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                  <ZoomIn className="h-2.5 w-2.5 text-white" />
+                                </div>
+                              </button>
                             ) : (
-                              <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary">
+                              <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
                                 {(p.full_name || '?').slice(0, 1).toUpperCase()}
                               </div>
                             )}
@@ -649,7 +678,16 @@ export default function SettingsPage() {
                     {isStaffCameraActive ? (
                       <video ref={staffVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
                     ) : newStaff.photo_url ? (
-                      <img src={newStaff.photo_url} alt="Staff Preview" className="w-full h-full object-cover" />
+                      <div
+                        className="relative w-full h-full group cursor-pointer"
+                        onClick={() => openFullPhoto(newStaff.photo_url, newStaff.full_name || 'Staff Preview', 'Photo Preview')}
+                        title="Click to view full size photo"
+                      >
+                        <img src={newStaff.photo_url} alt="Staff Preview" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                        <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                          <ZoomIn className="h-4 w-4 text-white" />
+                        </div>
+                      </div>
                     ) : (
                       <div className="text-center p-2">
                         <User className="h-10 w-10 mx-auto text-muted-foreground opacity-40 mb-1" />
@@ -951,6 +989,15 @@ export default function SettingsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Full-size Staff Photo Lightbox */}
+      <PhotoPreviewDialog
+        open={fullPhotoPreview.open}
+        onOpenChange={(open) => setFullPhotoPreview((prev) => ({ ...prev, open }))}
+        photoUrl={fullPhotoPreview.photoUrl}
+        title={fullPhotoPreview.title}
+        subtitle={fullPhotoPreview.subtitle}
+      />
     </div>
   );
 }

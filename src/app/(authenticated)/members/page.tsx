@@ -14,7 +14,8 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload } from 'lucide-react';
+import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn } from 'lucide-react';
+import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { toast } from 'sonner';
 import { isMemberAssignedToStaff, embedStaffIdsInNotes } from '@/lib/staff-assignments';
 import { PAYMENT_METHODS } from '@/lib/constants';
@@ -60,6 +61,7 @@ interface Member {
   cnic: string | null;
   age: number | null;
   join_date: string;
+  tenure_months?: number | null;
   monthly_fee: number;
   training_fees: number;
   trainer_id: string | null;
@@ -120,6 +122,36 @@ function formatPeriodMonth(periodMonth: string): string {
     return dateObj.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
   }
   return periodMonth;
+}
+
+// Helper: compute the next fee due date based on join_date and paid fee records
+function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
+  if (!m.join_date) return '—';
+  const joinDate = new Date(m.join_date);
+  const joinDay = joinDate.getDate() || 1;
+
+  const records = (feeRecords || []).filter(fr => fr.member_id === m.id);
+  const paidRecords = records.filter(fr => fr.paid || (Number(fr.amount_paid) >= Number(fr.amount) && Number(fr.amount) > 0));
+
+  if (paidRecords.length === 0) {
+    return formatDate(m.join_date);
+  }
+
+  // Sort paid records by period_month ascending to find the latest
+  const sorted = [...paidRecords].sort((a, b) => (a.period_month || '').localeCompare(b.period_month || ''));
+  const latestPaid = sorted[sorted.length - 1];
+  if (!latestPaid?.period_month) return formatDate(m.join_date);
+
+  const [lYear, lMonth] = latestPaid.period_month.split('-').map(Number);
+  // Month following latest paid period
+  const nextMonthDate = new Date(lYear, lMonth, 1); // lMonth is 1-indexed, so Date(lYear, lMonth, 1) is month + 1
+  const nextYear = nextMonthDate.getFullYear();
+  const nextMonth = nextMonthDate.getMonth() + 1;
+  const daysInNextMonth = new Date(nextYear, nextMonth, 0).getDate();
+  const billingDay = Math.min(joinDay, daysInNextMonth);
+  const nextDueDateStr = `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(billingDay).padStart(2, '0')}`;
+
+  return formatDate(nextDueDateStr);
 }
 
 export default function MembersPage() {
@@ -211,6 +243,7 @@ export default function MembersPage() {
     cnic: '',
     age: '',
     join_date: new Date().toISOString().slice(0, 10),
+    tenure_months: 1,
     monthly_fee: '',
     training_fees: '0',
     trainer_id: null as string | null,
@@ -256,6 +289,24 @@ export default function MembersPage() {
   const [sentMemberIds, setSentMemberIds] = useState<string[]>([]);
   const [sendingBulk, setSendingBulk] = useState(false);
 
+
+  // Fullsize Photo Lightbox State
+  const [fullPhotoPreview, setFullPhotoPreview] = useState<{
+    open: boolean;
+    photoUrl: string | null;
+    title?: string;
+    subtitle?: string;
+  }>({ open: false, photoUrl: null });
+
+  const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
+    if (!photoUrl) return;
+    setFullPhotoPreview({
+      open: true,
+      photoUrl,
+      title: title || 'Member Photo',
+      subtitle,
+    });
+  };
 
   // Load persistent sender phone & templates on client mount
   useEffect(() => {
@@ -473,7 +524,9 @@ export default function MembersPage() {
   // Calculations for form summary
   const currentMonthlyFee = Number(form.monthly_fee) || 0;
   const currentTrainingFee = Number(form.training_fees) || 0;
-  const totalPayable = currentMonthlyFee + currentTrainingFee;
+  const currentTenureMonths = Number(form.tenure_months) || 1;
+  const totalTenureMonthlyFee = currentMonthlyFee * currentTenureMonths;
+  const totalPayable = totalTenureMonthlyFee + currentTrainingFee;
   const currentAmountPaid = form.amount_paid === '' ? totalPayable : (isNaN(Number(form.amount_paid)) ? 0 : Number(form.amount_paid));
   const remainingFees = Math.max(0, totalPayable - currentAmountPaid);
 
@@ -542,11 +595,12 @@ export default function MembersPage() {
         }
       }
 
+      const tenureMonths = Number(data.tenure_months) || 1;
       const calcMonthly = Number(data.monthly_fee) || 0;
       const calcTraining = Number(data.training_fees) || 0;
-      const totalFee = calcMonthly + calcTraining;
-      const rawPaid = data.amount_paid === '' ? totalFee : Number(data.amount_paid);
-      const paidAmount = isNaN(rawPaid) ? totalFee : rawPaid;
+      const totalPayableForTenure = (calcMonthly * tenureMonths) + calcTraining;
+      const rawPaid = data.amount_paid === '' ? totalPayableForTenure : Number(data.amount_paid);
+      const paidAmount = isNaN(rawPaid) ? totalPayableForTenure : rawPaid;
 
       const payload: Record<string, any> = {
         member_number: data.member_number,
@@ -556,6 +610,7 @@ export default function MembersPage() {
         cnic: data.cnic || null,
         age: data.age ? Number(data.age) : null,
         join_date: data.join_date,
+        tenure_months: tenureMonths,
         monthly_fee: calcMonthly,
         training_fees: calcTraining,
         trainer_id: data.trainer_id || null,
@@ -630,7 +685,7 @@ export default function MembersPage() {
             continue;
           }
           let removed = false;
-          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'created_by']) {
+          for (const col of ['tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'created_by']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
               delete currentPayload[col];
               removed = true;
@@ -654,7 +709,7 @@ export default function MembersPage() {
             continue;
           }
           let removed = false;
-          for (const col of ['member_number', 'amount_paid', 'training_fees', 'trainer_id', 'created_by']) {
+          for (const col of ['tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'created_by']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
               delete currentPayload[col];
               removed = true;
@@ -665,26 +720,51 @@ export default function MembersPage() {
         }
       }
 
-      // Create initial fee record for new member with partial payment support
+      // Create initial fee records for new member across the tenure periods
       if (!editing && newMember) {
-        const isPaid = paidAmount >= totalFee && totalFee > 0;
         const joinDateStr = payload.join_date || new Date().toISOString().slice(0, 10);
-        const [jYear, jMonth] = joinDateStr.split('-').map(Number);
-        const periodMonth = `${jYear}-${String(jMonth).padStart(2, '0')}-01`;
-        const lastDay = new Date(jYear, jMonth, 0).getDate();
-        const periodEnd = `${jYear}-${String(jMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+        const [jYear, jMonth, jDay] = joinDateStr.split('-').map(Number);
+        const joinDay = jDay || 1;
 
-        await supabase.from('fee_records').insert({
-          member_id: newMember.id,
-          amount: totalFee,
-          amount_paid: paidAmount,
-          discount: 0,
-          period_month: periodMonth,
-          period_end: periodEnd,
-          paid: isPaid,
-          paid_at: paidAmount > 0 ? new Date().toISOString() : null,
-          payment_method: 'cash',
-        });
+        const recordsToInsert = [];
+        let remainingPaid = paidAmount;
+
+        for (let i = 0; i < tenureMonths; i++) {
+          const targetMonthDate = new Date(jYear, jMonth - 1 + i, 1);
+          const pYear = targetMonthDate.getFullYear();
+          const pMonth = targetMonthDate.getMonth() + 1;
+          const periodMonth = `${pYear}-${String(pMonth).padStart(2, '0')}-01`;
+          const lastDay = new Date(pYear, pMonth, 0).getDate();
+          const periodEnd = `${pYear}-${String(pMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+          const recordAmount = (i === tenureMonths - 1)
+            ? (totalPayableForTenure - (Math.floor(totalPayableForTenure / tenureMonths) * (tenureMonths - 1)))
+            : Math.floor(totalPayableForTenure / tenureMonths);
+
+          const recordPaid = Math.min(remainingPaid, recordAmount);
+          remainingPaid = Math.max(0, remainingPaid - recordPaid);
+          const isRecordPaid = recordPaid >= recordAmount && recordAmount > 0;
+
+          const billingDay = Math.min(joinDay, lastDay);
+          const paidAtDate = new Date(pYear, pMonth - 1, billingDay, 12, 0, 0);
+          const paidAtIso = i === 0 ? new Date().toISOString() : paidAtDate.toISOString();
+
+          recordsToInsert.push({
+            member_id: newMember.id,
+            amount: recordAmount,
+            amount_paid: recordPaid,
+            discount: 0,
+            period_month: periodMonth,
+            period_end: periodEnd,
+            paid: isRecordPaid,
+            paid_at: recordPaid > 0 ? paidAtIso : null,
+            payment_method: 'cash',
+          });
+        }
+
+        if (recordsToInsert.length > 0) {
+          await supabase.from('fee_records').insert(recordsToInsert);
+        }
       }
 
       return { isPendingEdit: false };
@@ -1077,6 +1157,7 @@ export default function MembersPage() {
       cnic: '',
       age: '',
       join_date: new Date().toISOString().slice(0, 10),
+      tenure_months: 1,
       monthly_fee: '',
       training_fees: '',
       trainer_id: null,
@@ -1099,6 +1180,7 @@ export default function MembersPage() {
       cnic: m.cnic || '',
       age: m.age != null ? String(m.age) : '',
       join_date: m.join_date,
+      tenure_months: m.tenure_months || 1,
       monthly_fee: String(m.monthly_fee),
       training_fees: String(m.training_fees || 0),
       trainer_id: m.trainer_id || null,
@@ -1219,11 +1301,11 @@ export default function MembersPage() {
     const effectiveDue = Math.max(0, feeAmount - discount);
     const percentage = effectiveDue > 0 ? Math.min(100, Math.round((amountPaid / effectiveDue) * 100)) : (feeAmount === 0 ? 100 : 0);
 
-    if (currentFee.paid) {
+    if (currentFee.paid || (amountPaid >= effectiveDue && effectiveDue > 0)) {
       return {
         status: 'paid' as const,
         percentage: 100,
-        label: feeNotDueYet ? 'Not Due Yet' : '100% Paid',
+        label: feeNotDueYet && !memberCurrentFee[m.id]?.paid ? 'Not Due Yet' : '100% Paid',
         unpaidMonths: Math.max(0, unpaidMonths),
         totalDue: 0,
       };
@@ -1427,6 +1509,9 @@ export default function MembersPage() {
                   if (changes.join_date !== undefined && changes.join_date !== targetMember.join_date) {
                     diffs.push({ field: 'Join Date', oldVal: formatDate(targetMember.join_date), newVal: formatDate(changes.join_date) });
                   }
+                  if (changes.tenure_months !== undefined && Number(changes.tenure_months) !== Number(targetMember.tenure_months || 1)) {
+                    diffs.push({ field: 'Tenure', oldVal: `${targetMember.tenure_months || 1} Mo`, newVal: `${changes.tenure_months} Mo` });
+                  }
                   if (changes.monthly_fee !== undefined && Number(changes.monthly_fee) !== Number(targetMember.monthly_fee)) {
                     diffs.push({ field: 'Monthly Fee', oldVal: formatCurrency(targetMember.monthly_fee), newVal: formatCurrency(Number(changes.monthly_fee)) });
                   }
@@ -1459,9 +1544,26 @@ export default function MembersPage() {
                       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-border/60">
                         <div className="flex items-center gap-3">
                           {targetMember?.photo_url ? (
-                            <img src={targetMember.photo_url} alt={targetMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border" />
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openFullPhoto(
+                                  targetMember.photo_url,
+                                  targetMember.full_name || changes.full_name || 'Member',
+                                  `Member #${targetMember.member_number || changes.member_number || 'N/A'}`
+                                );
+                              }}
+                              className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                              title="Click to view full size photo"
+                            >
+                              <img src={targetMember.photo_url} alt={targetMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                              <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                <ZoomIn className="h-3.5 w-3.5 text-white" />
+                              </div>
+                            </button>
                           ) : (
-                            <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary">
+                            <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
                               {(targetMember?.full_name || changes.full_name || 'M').slice(0, 1).toUpperCase()}
                             </div>
                           )}
@@ -1613,9 +1715,26 @@ export default function MembersPage() {
                         <td className="p-4">
                           <div className="flex items-center gap-3">
                             {m.photo_url ? (
-                              <img src={m.photo_url} alt={m.full_name} className="h-9 w-9 rounded-full object-cover border border-border" />
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openFullPhoto(
+                                    m.photo_url,
+                                    m.full_name,
+                                    `Member #${m.member_number || 'N/A'} • ${m.active ? 'Active' : 'Inactive'}`
+                                  );
+                                }}
+                                className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                title="Click to view full size photo"
+                              >
+                                <img src={m.photo_url} alt={m.full_name} className="h-9 w-9 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                                <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                  <ZoomIn className="h-3 w-3 text-white" />
+                                </div>
+                              </button>
                             ) : (
-                              <div className="h-9 w-9 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary">
+                              <div className="h-9 w-9 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
                                 {m.full_name.slice(0, 1).toUpperCase()}
                               </div>
                             )}
@@ -1656,7 +1775,16 @@ export default function MembersPage() {
                             })()}
                           </td>
                         )}
-                        <td className="p-4 font-medium">{formatCurrency(totalFee)}</td>
+                        <td className="p-4 font-medium">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span>{formatCurrency(totalFee)}</span>
+                            {m.tenure_months && m.tenure_months > 1 && (
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-semibold bg-primary/5 border-primary/30 text-primary">
+                                {m.tenure_months} Mo
+                              </Badge>
+                            )}
+                          </div>
+                        </td>
                         <td className="p-4" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center gap-2">
                             {payStatus.status === 'paid' ? (
@@ -1723,7 +1851,16 @@ export default function MembersPage() {
               {isCameraActive ? (
                 <video ref={videoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
               ) : form.photo_url ? (
-                <img src={form.photo_url} alt="Client Photo" className="h-full w-full object-cover" />
+                <div
+                  className="relative h-full w-full group cursor-pointer"
+                  onClick={() => openFullPhoto(form.photo_url, form.full_name || 'Member Photo', 'Photo Preview')}
+                  title="Click to view full size photo"
+                >
+                  <img src={form.photo_url} alt="Client Photo" className="h-full w-full object-cover group-hover:scale-105 transition-transform" />
+                  <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                    <ZoomIn className="h-5 w-5 text-white" />
+                  </div>
+                </div>
               ) : (
                 <User className="h-16 w-16 text-muted-foreground/50" />
               )}
@@ -1826,8 +1963,32 @@ export default function MembersPage() {
 
               {/* Join Date */}
               <div className="space-y-2">
-                <Label>Join Date</Label>
+                <Label>Join Date *</Label>
                 <Input type="date" value={form.join_date} onChange={(e) => setForm({ ...form, join_date: e.target.value })} />
+              </div>
+
+              {/* Tenure Selection */}
+              <div className="space-y-2">
+                <Label>Tenure *</Label>
+                <Select 
+                  value={String(form.tenure_months || 1)} 
+                  onValueChange={(val) => {
+                    const tenure = Number(val) || 1;
+                    const mFee = Number(form.monthly_fee) || 0;
+                    const tFee = Number(form.training_fees) || 0;
+                    const newTotal = (mFee * tenure) + tFee;
+                    setForm({ ...form, tenure_months: tenure, amount_paid: String(newTotal) });
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select Tenure" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1 Month</SelectItem>
+                    <SelectItem value="3">3 Months</SelectItem>
+                    <SelectItem value="6">6 Months</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               {/* Monthly Fee */}
@@ -1837,7 +1998,13 @@ export default function MembersPage() {
                   type="number" 
                   required 
                   value={form.monthly_fee} 
-                  onChange={(e) => setForm({ ...form, monthly_fee: e.target.value })} 
+                  onChange={(e) => {
+                    const mFee = Number(e.target.value) || 0;
+                    const tenure = Number(form.tenure_months) || 1;
+                    const tFee = Number(form.training_fees) || 0;
+                    const newTotal = (mFee * tenure) + tFee;
+                    setForm({ ...form, monthly_fee: e.target.value, amount_paid: String(newTotal) });
+                  }} 
                   placeholder="e.g. 4000" 
                 />
               </div>
@@ -1848,7 +2015,13 @@ export default function MembersPage() {
                 <Input 
                   type="number" 
                   value={form.training_fees} 
-                  onChange={(e) => setForm({ ...form, training_fees: e.target.value })} 
+                  onChange={(e) => {
+                    const tFee = Number(e.target.value) || 0;
+                    const mFee = Number(form.monthly_fee) || 0;
+                    const tenure = Number(form.tenure_months) || 1;
+                    const newTotal = (mFee * tenure) + tFee;
+                    setForm({ ...form, training_fees: e.target.value, amount_paid: String(newTotal) });
+                  }} 
                   placeholder="e.g. 10000" 
                 />
               </div>
@@ -1883,16 +2056,23 @@ export default function MembersPage() {
 
             {/* Payment & Fee Summary Section */}
             <div className="bg-muted/40 p-4 rounded-lg border border-border space-y-3">
-              <h4 className="font-semibold text-sm text-foreground flex items-center justify-between">
-                <span>Fee Summary & Payment Received</span>
-              </h4>
+              <div className="flex items-center justify-between">
+                <h4 className="font-semibold text-sm text-foreground">Fee Summary & Payment Received</h4>
+                <Badge variant="outline" className="text-xs font-semibold text-primary border-primary/40 bg-primary/10">
+                  {currentTenureMonths} {currentTenureMonths === 1 ? 'Month' : 'Months'} Tenure
+                </Badge>
+              </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
                 <div className="bg-background p-3 rounded border border-border">
                   <div className="text-xs text-muted-foreground">Total Payable</div>
                   <div className="text-base font-bold text-primary">{formatCurrency(totalPayable)}</div>
                   <div className="text-[11px] text-muted-foreground">
-                    Monthly ({formatCurrency(currentMonthlyFee)}) + Training ({formatCurrency(currentTrainingFee)})
+                    {currentTenureMonths > 1 ? (
+                      <>{formatCurrency(currentMonthlyFee)}/mo × {currentTenureMonths} mos{currentTrainingFee > 0 ? ` + ${formatCurrency(currentTrainingFee)} training` : ''}</>
+                    ) : (
+                      <>Monthly ({formatCurrency(currentMonthlyFee)}){currentTrainingFee > 0 ? ` + Training (${formatCurrency(currentTrainingFee)})` : ''}</>
+                    )}
                   </div>
                 </div>
 
@@ -1938,9 +2118,25 @@ export default function MembersPage() {
           <DialogHeader>
             <DialogTitle className="text-xl flex items-center gap-3">
               {selectedMember?.photo_url ? (
-                <img src={selectedMember.photo_url} alt={selectedMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border" />
+                <button
+                  type="button"
+                  onClick={() =>
+                    openFullPhoto(
+                      selectedMember.photo_url,
+                      selectedMember.full_name,
+                      `Member #${selectedMember.member_number || 'N/A'} • ${selectedMember.active ? 'Active' : 'Inactive'}`
+                    )
+                  }
+                  className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                  title="Click to view full size photo"
+                >
+                  <img src={selectedMember.photo_url} alt={selectedMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                  <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                    <ZoomIn className="h-3.5 w-3.5 text-white" />
+                  </div>
+                </button>
               ) : (
-                <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary">
+                <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
                   {selectedMember?.full_name?.slice(0, 1).toUpperCase()}
                 </div>
               )}
@@ -1988,6 +2184,20 @@ export default function MembersPage() {
                   <div className="text-muted-foreground mb-1">Assigned Trainer</div>
                   <div className="font-medium">
                     {trainers.find(t => t.id === selectedMember?.trainer_id)?.name || 'None'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground mb-1">Tenure</div>
+                  <div className="font-medium">
+                    <Badge variant="outline" className="font-semibold text-primary border-primary/40 bg-primary/5">
+                      {selectedMember?.tenure_months ? `${selectedMember.tenure_months} Month${selectedMember.tenure_months > 1 ? 's' : ''}` : '1 Month'}
+                    </Badge>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-muted-foreground mb-1">Next Fee Due Date</div>
+                  <div className="font-semibold text-foreground">
+                    {selectedMember ? getMemberNextDueDate(selectedMember, memberFees) : '—'}
                   </div>
                 </div>
                 <div>
@@ -2128,9 +2338,25 @@ export default function MembersPage() {
               {/* Member Info */}
               <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/40 border border-border">
                 {payModalMember.photo_url ? (
-                  <img src={payModalMember.photo_url} alt={payModalMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border" />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openFullPhoto(
+                        payModalMember.photo_url,
+                        payModalMember.full_name,
+                        `Member #${payModalMember.member_number || 'N/A'}`
+                      )
+                    }
+                    className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                    title="Click to view full size photo"
+                  >
+                    <img src={payModalMember.photo_url} alt={payModalMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                    <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                      <ZoomIn className="h-3.5 w-3.5 text-white" />
+                    </div>
+                  </button>
                 ) : (
-                  <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary">
+                  <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
                     {payModalMember.full_name.slice(0, 1).toUpperCase()}
                   </div>
                 )}
@@ -2428,13 +2654,29 @@ export default function MembersPage() {
                   <div className="flex items-center justify-between p-3 bg-background border border-border rounded-md shadow-sm">
                     <div className="flex items-center gap-3">
                       {validSelectedMembers[bulkCurrentIndex].photo_url ? (
-                        <img
-                          src={validSelectedMembers[bulkCurrentIndex].photo_url!}
-                          alt={validSelectedMembers[bulkCurrentIndex].full_name}
-                          className="h-10 w-10 rounded-full object-cover border border-border"
-                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openFullPhoto(
+                              validSelectedMembers[bulkCurrentIndex].photo_url,
+                              validSelectedMembers[bulkCurrentIndex].full_name,
+                              `Member #${validSelectedMembers[bulkCurrentIndex].member_number || 'N/A'}`
+                            )
+                          }
+                          className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                          title="Click to view full size photo"
+                        >
+                          <img
+                            src={validSelectedMembers[bulkCurrentIndex].photo_url!}
+                            alt={validSelectedMembers[bulkCurrentIndex].full_name}
+                            className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform"
+                          />
+                          <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                            <ZoomIn className="h-3.5 w-3.5 text-white" />
+                          </div>
+                        </button>
                       ) : (
-                        <div className="h-10 w-10 rounded-full bg-green-600/20 grid place-items-center font-bold text-green-700 dark:text-green-400">
+                        <div className="h-10 w-10 rounded-full bg-green-600/20 grid place-items-center font-bold text-green-700 dark:text-green-400 shrink-0">
                           {validSelectedMembers[bulkCurrentIndex].full_name.slice(0, 1).toUpperCase()}
                         </div>
                       )}
@@ -2616,9 +2858,22 @@ export default function MembersPage() {
                             className="h-4 w-4 rounded border-border text-primary focus:ring-primary accent-green-600"
                           />
                           {m.photo_url ? (
-                            <img src={m.photo_url} alt={m.full_name} className="h-8 w-8 rounded-full object-cover border border-border" />
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openFullPhoto(m.photo_url, m.full_name, `Member #${m.member_number || 'N/A'}`);
+                              }}
+                              className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                              title="Click to view full size photo"
+                            >
+                              <img src={m.photo_url} alt={m.full_name} className="h-8 w-8 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                              <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                <ZoomIn className="h-2.5 w-2.5 text-white" />
+                              </div>
+                            </button>
                           ) : (
-                            <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary">
+                            <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
                               {m.full_name.slice(0, 1).toUpperCase()}
                             </div>
                           )}
@@ -2773,6 +3028,15 @@ export default function MembersPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Full-size Member Photo Lightbox */}
+      <PhotoPreviewDialog
+        open={fullPhotoPreview.open}
+        onOpenChange={(open) => setFullPhotoPreview((prev) => ({ ...prev, open }))}
+        photoUrl={fullPhotoPreview.photoUrl}
+        title={fullPhotoPreview.title}
+        subtitle={fullPhotoPreview.subtitle}
+      />
     </div>
   );
 }

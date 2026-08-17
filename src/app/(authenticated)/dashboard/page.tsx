@@ -275,7 +275,7 @@ export default function DashboardPage() {
         const actualCollected = (!isNaN(amtPaid) && amtPaid > 0) ? amtPaid : (r.paid ? Number(r.amount) || 0 : 0);
         if (actualCollected <= 0) return;
 
-        const key = r.paid_at ? r.paid_at.slice(0, 7) : r.period_month ? r.period_month.slice(0, 7) : null;
+        const key = r.period_month ? r.period_month.slice(0, 7) : (r.paid_at ? r.paid_at.slice(0, 7) : null);
         if (!key) return;
         const entry = map.get(key);
         if (entry) entry.revenue += actualCollected;
