@@ -3,7 +3,7 @@ import { cn } from '@/lib/utils';
 import { Calendar } from 'lucide-react';
 
 const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
-  ({ className, type, onClick, onWheel, ...props }, ref) => {
+  ({ className, type, onClick, ...props }, ref) => {
     const innerRef = React.useRef<HTMLInputElement>(null);
     React.useImperativeHandle(ref, () => innerRef.current as HTMLInputElement);
 
@@ -43,7 +43,7 @@ const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLI
           if (type === 'number' || (e.target as HTMLInputElement).type === 'number') {
             (e.target as HTMLElement)?.blur();
           }
-          onWheel?.(e);
+          props.onWheel?.(e);
         }}
         {...props}
       />
