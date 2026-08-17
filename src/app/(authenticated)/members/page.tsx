@@ -685,7 +685,7 @@ export default function MembersPage() {
             continue;
           }
           let removed = false;
-          for (const col of ['tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'created_by']) {
+          for (const col of ['tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'age', 'created_by']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
               delete currentPayload[col];
               removed = true;
@@ -709,7 +709,7 @@ export default function MembersPage() {
             continue;
           }
           let removed = false;
-          for (const col of ['tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'created_by']) {
+          for (const col of ['tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'age', 'created_by']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
               delete currentPayload[col];
               removed = true;

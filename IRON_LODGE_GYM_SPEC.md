@@ -315,6 +315,7 @@ CREATE TABLE public.members (
   full_name TEXT NOT NULL,
   phone TEXT,
   cnic TEXT,
+  age INTEGER,
   email TEXT,
   address TEXT,
   join_date DATE NOT NULL DEFAULT CURRENT_DATE,
