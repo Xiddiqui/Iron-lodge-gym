@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
-import { formatCurrency, formatDate } from '@/lib/format';
+import { formatCurrency, formatDate, formatDateTime } from '@/lib/format';
 import { useRole } from '@/hooks/use-role';
 import { useCurrentUser } from '@/hooks/use-session';
 import { Card, CardContent } from '@/components/ui/card';
@@ -1589,7 +1589,7 @@ export default function MembersPage() {
                             <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
                               <span>Requested by: <strong className="text-foreground">{staffProfile?.full_name || 'Staff Member'}</strong></span>
                               <span>•</span>
-                              <span>{new Date(pe.created_at).toLocaleString()}</span>
+                              <span>{formatDateTime(pe.created_at)}</span>
                             </div>
                           </div>
                         </div>

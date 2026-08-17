@@ -3,7 +3,7 @@ import { cn } from '@/lib/utils';
 import { Calendar } from 'lucide-react';
 
 const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
-  ({ className, type, onClick, ...props }, ref) => {
+  ({ className, type, onClick, onWheel, ...props }, ref) => {
     const innerRef = React.useRef<HTMLInputElement>(null);
     React.useImperativeHandle(ref, () => innerRef.current as HTMLInputElement);
 

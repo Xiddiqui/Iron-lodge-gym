@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { useRole } from '@/hooks/use-role';
-import { formatCurrency, formatDate, formatMonthYear } from '@/lib/format';
+import { formatCurrency, formatDate, formatDateTime, formatMonthYear } from '@/lib/format';
 import { useGymSettings } from '@/hooks/use-gym-settings';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -48,16 +48,8 @@ const isPastNDays = (dateStr: string | null, days: number) => {
 
 function formatPaymentDateTime(dateStr: string | null) {
   if (!dateStr) return 'N/A';
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return 'N/A';
-  return d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
+  const val = formatDateTime(dateStr);
+  return val === '—' ? 'N/A' : val;
 }
 
 function formatPaymentTime(dateStr: string | null) {
