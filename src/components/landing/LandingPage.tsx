@@ -295,7 +295,7 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
           </div> */}
 
           {/* Mobile Menu Button */}
-          <div className="lg:hidden flex items-center gap-3">
+          {/* <div className="lg:hidden flex items-center gap-3">
             <button
               onClick={handleDashboardClick}
               className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white flex items-center gap-1.5"
@@ -311,7 +311,7 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
             >
               {mobileMenuOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
             </button>
-          </div>
+          </div> */}
         </div>
 
         {/* Mobile Dropdown Menu */}
