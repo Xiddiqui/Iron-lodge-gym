@@ -6,10 +6,10 @@ Connects to the ZKTeco K50 device over LAN (Port 4370)
 and forwards real-time fingerprint punches to your live Vercel web app.
 
 Usage:
-    python3 zkteco_bridge.py --ip <K50_DEVICE_IP> --server <VERCEL_URL>
+    python3 zkteco_bridge.py --ip <K50_DEVICE_IP> --server <DOMAIN_URL>
 
 Example:
-    python3 zkteco_bridge.py --ip 192.168.18.215 --server https://iron-lodge-gym.vercel.app
+    python3 zkteco_bridge.py --ip 192.168.18.215 --server https://ironlodgegym.com
 """
 
 import sys
@@ -30,8 +30,16 @@ except ImportError:
 
 import requests
 
+def normalize_url(url: str) -> str:
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return "https://ironlodgegym.com"
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = f"https://{url}"
+    return url
+
 def send_punch_to_webapp(server_url, user_id, timestamp_str):
-    cdata_endpoint = f"{server_url.rstrip('/')}/api/iclock/cdata?table=ATTLOG&SN=K50_LOCAL_BRIDGE"
+    cdata_endpoint = f"{server_url}/api/iclock/cdata?table=ATTLOG&SN=K50_LOCAL_BRIDGE"
     body = f"{user_id}\t{timestamp_str}\t0\t1\t0\t0\t0"
 
     print(f"\n[Fingerprint Punch] User ID: {user_id} | Time: {timestamp_str}")
@@ -43,7 +51,7 @@ def send_punch_to_webapp(server_url, user_id, timestamp_str):
             timeout=10,
         )
         if res.status_code == 200:
-            print(f"[Web Sync] ✅ Sent punch for User #{user_id} to web app -> Success!")
+            print(f"[Web Sync] ✅ Sent punch for User #{user_id} to web app -> Success! ({res.text.strip()})")
         else:
             print(f"[Web Sync] ⚠️ Web app returned status {res.status_code}: {res.text}")
     except Exception as req_err:
@@ -53,12 +61,12 @@ def main():
     parser = argparse.ArgumentParser(description="ZKTeco K50 Bridge to Iron Lodge Gym Web App")
     parser.add_argument("--ip", required=True, help="IP address of the K50 device (e.g. 192.168.18.215)")
     parser.add_argument("--port", type=int, default=4370, help="Port of K50 device (default: 4370)")
-    parser.add_argument("--server", default="https://iron-lodge-gym.vercel.app", help="Live web app URL")
+    parser.add_argument("--server", default="https://ironlodgegym.com", help="Live web app URL")
     args = parser.parse_args()
 
     device_ip = args.ip
     device_port = args.port
-    server_url = args.server.rstrip("/")
+    server_url = normalize_url(args.server)
 
     print("=" * 60)
     print("  IRON LODGE GYM — ZKTeco K50 Live Biometric Bridge")
@@ -66,6 +74,17 @@ def main():
     print(f"  Target Device IP : {device_ip}:{device_port}")
     print(f"  Target Web App   : {server_url}")
     print("=" * 60)
+
+    # Perform quick handshake check with web server
+    try:
+        test_url = f"{server_url}/api/iclock/cdata?SN=K50_LOCAL_BRIDGE"
+        res = requests.get(test_url, timeout=8)
+        if res.status_code == 200:
+            print(f"[Web Sync] ✅ Successfully verified connection to web app: {server_url}")
+        else:
+            print(f"[Web Sync] ⚠️ Web server replied with status {res.status_code} at {test_url}")
+    except Exception as e:
+        print(f"[Web Sync] ⚠️ Warning: Could not reach web app ({e}). Bridge will still run and retry punches.")
 
     # Try TCP mode first, then UDP fallback
     force_udp_modes = [False, True]

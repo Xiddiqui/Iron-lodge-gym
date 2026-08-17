@@ -7,7 +7,7 @@
 
 DEVICE_IP="192.168.18.215"
 DEVICE_PORT="4370"
-SERVER_URL="https://iron-lodge-gym.vercel.app"
+SERVER_URL="https://ironlodgegym.com"
 BRIDGE_DIR="$HOME/ironlodge-bridge"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:$PATH"
