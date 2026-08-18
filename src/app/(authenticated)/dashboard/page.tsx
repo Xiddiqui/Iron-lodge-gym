@@ -1,7 +1,7 @@
 'use client';
 export const dynamic = 'force-dynamic';
 import { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { useRole } from '@/hooks/use-role';
 import { formatCurrency, formatDate, formatDateTime, formatMonthYear } from '@/lib/format';
@@ -13,7 +13,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Button } from '@/components/ui/button';
 import { motion, useMotionValue, useTransform, animate } from 'framer-motion';
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
-import { Wallet, Receipt, Zap, UserCheck, ArrowUpRight, ArrowDownRight, TrendingUp, Target, History, Landmark } from 'lucide-react';
+import { Wallet, Receipt, Zap, UserCheck, ArrowUpRight, ArrowDownRight, TrendingUp, Target, History, Landmark, Trash2, Calendar, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 
 function AnimatedNumber({ value, format }: { value: number; format: (n: number) => string }) {
@@ -36,6 +37,29 @@ const isToday = (dateStr: string | null) => {
     d.getDate() === today.getDate()
   );
 };
+
+function formatWalkinRelativeDate(dateStr: string | null) {
+  if (!dateStr) return 'N/A';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return 'N/A';
+  
+  const timeStr = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  if (isToday(dateStr)) {
+    return `Today at ${timeStr}`;
+  }
+  
+  const y = new Date();
+  y.setDate(y.getDate() - 1);
+  if (
+    d.getFullYear() === y.getFullYear() &&
+    d.getMonth() === y.getMonth() &&
+    d.getDate() === y.getDate()
+  ) {
+    return `Yesterday at ${timeStr}`;
+  }
+  
+  return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at ${timeStr}`;
+}
 
 const isPastNDays = (dateStr: string | null, days: number) => {
   if (!dateStr) return false;
@@ -67,18 +91,25 @@ const CHART_COLORS = { revenue: '#a3e635', expenses: '#ef4444', profit: '#22c55e
 const PIE_COLORS = ['#a3e635', '#f97316', '#ef4444'];
 
 export default function DashboardPage() {
+  const queryClient = useQueryClient();
   const { data: role } = useRole();
   const { data: settings } = useGymSettings();
   const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [trendMonths, setTrendMonths] = useState(6);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalFilter, setModalFilter] = useState<'today' | '7days' | '30days'>('today');
+  const [isWalkinModalOpen, setIsWalkinModalOpen] = useState(false);
+  const [deletingWalkinId, setDeletingWalkinId] = useState<string | null>(null);
 
   const [year, month] = selectedMonth.split('-').map(Number);
   const monthStart = `${selectedMonth}-01`;
   const nextYear = month === 12 ? year + 1 : year;
   const nextMonth = month === 12 ? 1 : month + 1;
   const monthEnd = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
+
+  // Local calendar boundaries for selected month
+  const startOfMonth = new Date(year, month - 1, 1, 0, 0, 0, 0);
+  const startOfNextMonth = new Date(year, month, 1, 0, 0, 0, 0);
 
   // Query for recent payment records (Today's payments & modal history)
   const { data: allPaymentRecords = [] } = useQuery({
@@ -118,14 +149,14 @@ export default function DashboardPage() {
       // If the column doesn't exist yet (migration not run), return empty
       if (error?.code === '42703') return [];
       if (error) throw error;
-      return data ?? [];
+      return (data ?? []).filter((w: any) => w.guest_name && w.guest_name.trim() !== '');
     },
   });
 
   // ── Walk-in stats for selected month
   const walkinThisMonth = walkinRecords.filter((w: any) => {
     const d = new Date(w.check_in);
-    return d >= new Date(monthStart) && d < new Date(monthEnd);
+    return d >= startOfMonth && d < startOfNextMonth;
   });
   const walkinMonthRevenue = walkinThisMonth.reduce((s: number, w: any) => s + parseWalkinAmount(w.notes), 0);
   const walkinAvgPerHead = walkinThisMonth.length > 0 ? Math.round(walkinMonthRevenue / walkinThisMonth.length) : 0;
@@ -133,6 +164,30 @@ export default function DashboardPage() {
   // ── Walk-ins today
   const walkinToday = walkinRecords.filter((w: any) => isToday(w.check_in));
   const walkinTodayRevenue = walkinToday.reduce((s: number, w: any) => s + parseWalkinAmount(w.notes), 0);
+
+  // Delete walk-in attendance record
+  const deleteWalkin = async (id: string) => {
+    if (!confirm('Are you sure you want to remove this walk-in visitor record?')) return;
+    setDeletingWalkinId(id);
+    try {
+      const res = await fetch(`/api/attendance?id=${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        // Fallback to client SDK delete
+        const { error } = await supabase.from('attendance').delete().eq('id', id);
+        if (error) throw new Error(data.error || error.message);
+      }
+      toast.success('Walk-in record removed');
+      queryClient.invalidateQueries({ queryKey: ['dash-walkin-records'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-recent-payment-records'] });
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to remove walk-in');
+    } finally {
+      setDeletingWalkinId(null);
+    }
+  };
 
 
   // Fee records for the month with auto-sync for missing member records
@@ -589,15 +644,27 @@ export default function DashboardPage() {
                 <UserCheck className="h-5 w-5 text-amber-400" />
               </div>
               <div>
-                <p className="text-sm font-semibold text-foreground">Walk-in / 1-Day Customers</p>
-                <p className="text-xs text-muted-foreground mt-0.5">Daily pass visitors for {new Date(monthStart).toLocaleString('en-US', { month: 'long', year: 'numeric' })}</p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold text-foreground">Walk-in / 1-Day Customers</p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setIsWalkinModalOpen(true)}
+                    className="h-6 px-2 text-xs text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 font-medium"
+                  >
+                    View All ({walkinThisMonth.length}) <ArrowUpRight className="h-3 w-3 ml-0.5" />
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Daily pass visitors for {new Date(year, month - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' })}
+                </p>
               </div>
             </div>
             {/* Right: stats */}
             <div className="flex flex-wrap items-center gap-4 sm:gap-6">
-              <div className="text-center">
+              <div className="text-center cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setIsWalkinModalOpen(true)} title="Click to view all walk-in visitors">
                 <p className="text-2xl font-display font-bold text-amber-400">{walkinThisMonth.length}</p>
-                <p className="text-[11px] text-muted-foreground mt-0.5">Total Visitors</p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">Total (This Month)</p>
               </div>
               <div className="w-px h-10 bg-border/50 hidden sm:block" />
               <div className="text-center">
@@ -619,7 +686,17 @@ export default function DashboardPage() {
           {/* Today's walk-in list */}
           {walkinToday.length > 0 && (
             <div className="mt-4 pt-3 border-t border-amber-500/15">
-              <p className="text-xs font-semibold text-amber-400 mb-2 uppercase tracking-wider">Today's Walk-in Visitors</p>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-semibold text-amber-400 uppercase tracking-wider">Today's Walk-in Visitors</p>
+                {walkinThisMonth.length > walkinToday.length && (
+                  <button
+                    onClick={() => setIsWalkinModalOpen(true)}
+                    className="text-xs text-muted-foreground hover:text-amber-400 transition-colors"
+                  >
+                    + {walkinThisMonth.length - walkinToday.length} more recorded this month →
+                  </button>
+                )}
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                 {walkinToday.map((w: any) => {
                   const amt = parseWalkinAmount(w.notes);
@@ -631,7 +708,19 @@ export default function DashboardPage() {
                         </div>
                         <span className="font-medium">{w.guest_name}</span>
                       </div>
-                      <span className="font-bold text-primary">{amt > 0 ? formatCurrency(amt) : 'Free'}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-primary">{amt > 0 ? formatCurrency(amt) : 'Free'}</span>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-5 w-5 text-muted-foreground hover:text-red-400 p-0"
+                          title="Delete record"
+                          disabled={deletingWalkinId === w.id}
+                          onClick={() => deleteWalkin(w.id)}
+                        >
+                          <Trash2 className="h-3 w-3 text-red-400/70 hover:text-red-400" />
+                        </Button>
+                      </div>
                     </div>
                   );
                 })}
@@ -922,7 +1011,117 @@ export default function DashboardPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ── Walk-in Visitors History Modal ── */}
+      <Dialog open={isWalkinModalOpen} onOpenChange={setIsWalkinModalOpen}>
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="h-8 w-8 rounded-lg bg-amber-500/20 grid place-items-center">
+                  <UserCheck className="h-4 w-4 text-amber-400" />
+                </div>
+                <div>
+                  <DialogTitle className="text-lg">
+                    Walk-in Visitors — {new Date(year, month - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' })}
+                  </DialogTitle>
+                  <DialogDescription className="text-xs">
+                    All 1-day pass entries for this month ({walkinThisMonth.length} total)
+                  </DialogDescription>
+                </div>
+              </div>
+            </div>
+          </DialogHeader>
+
+          {/* Quick stats banner */}
+          <div className="grid grid-cols-3 gap-2 my-2">
+            <div className="bg-card border border-border/60 rounded-lg p-3 text-center">
+              <p className="text-[11px] text-muted-foreground uppercase font-medium">Month Total</p>
+              <p className="text-lg font-bold text-amber-400 mt-0.5">{walkinThisMonth.length}</p>
+            </div>
+            <div className="bg-card border border-border/60 rounded-lg p-3 text-center">
+              <p className="text-[11px] text-muted-foreground uppercase font-medium">Today</p>
+              <p className="text-lg font-bold text-violet-400 mt-0.5">{walkinToday.length}</p>
+            </div>
+            <div className="bg-card border border-border/60 rounded-lg p-3 text-center">
+              <p className="text-[11px] text-muted-foreground uppercase font-medium">Total Revenue</p>
+              <p className="text-lg font-bold text-primary mt-0.5">{formatCurrency(walkinMonthRevenue)}</p>
+            </div>
+          </div>
+
+          {/* Records List */}
+          <div className="flex-1 overflow-y-auto pr-1 space-y-2 max-h-[380px] min-h-[160px]">
+            {walkinThisMonth.length === 0 ? (
+              <div className="text-center py-12 text-muted-foreground">
+                <UserCheck className="h-10 w-10 mx-auto mb-2 opacity-30 text-amber-400" />
+                <p className="text-sm font-medium">No walk-in visitors for this month</p>
+              </div>
+            ) : (
+              walkinThisMonth.map((w: any) => {
+                const amt = parseWalkinAmount(w.notes);
+                const isItemToday = isToday(w.check_in);
+                return (
+                  <div
+                    key={w.id}
+                    className="flex items-center justify-between p-3 rounded-lg border border-border/50 bg-amber-500/5 hover:bg-amber-500/10 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="h-9 w-9 rounded-full bg-amber-500/20 grid place-items-center text-xs font-bold text-amber-400 shrink-0">
+                        {(w.guest_name || 'G').slice(0, 1).toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-semibold text-foreground">{w.guest_name}</p>
+                          <span className="text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/20 rounded px-1.5 py-0.5 font-medium">
+                            1-Day Pass
+                          </span>
+                          {isItemToday && (
+                            <Badge variant="outline" className="text-[10px] border-emerald-500/30 text-emerald-400 bg-emerald-500/10 py-0">
+                              Today
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1">
+                          <Calendar className="h-3 w-3 inline opacity-70" />
+                          {formatWalkinRelativeDate(w.check_in)}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm font-bold text-primary">
+                        {amt > 0 ? formatCurrency(amt) : 'Free'}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-red-400 hover:bg-red-500/10"
+                        title="Delete this record"
+                        disabled={deletingWalkinId === w.id}
+                        onClick={() => deleteWalkin(w.id)}
+                      >
+                        {deletingWalkinId === w.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-red-400" />
+                        ) : (
+                          <Trash2 className="h-4 w-4 text-red-400/80 hover:text-red-400" />
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <DialogFooter className="mt-4 pt-3 border-t border-border">
+            <Button variant="outline" size="sm" onClick={() => setIsWalkinModalOpen(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
+
 

@@ -14,7 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn } from 'lucide-react';
+import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { toast } from 'sonner';
 import { isMemberAssignedToStaff, embedStaffIdsInNotes, stripStaffIdsFromNotes, getAssignedStaffIds } from '@/lib/staff-assignments';
@@ -90,6 +90,118 @@ interface FeeRecord {
   period_year?: number;
 }
 
+// Helper: compare member numbers in natural ascending numerical order (1, 2, 3, ... 10, ...)
+function compareMemberNumbers(a: Member, b: Member): number {
+  const numA = parseInt((a.member_number || '').trim(), 10);
+  const numB = parseInt((b.member_number || '').trim(), 10);
+
+  const hasNumA = !isNaN(numA) && numA > 0;
+  const hasNumB = !isNaN(numB) && numB > 0;
+
+  if (hasNumA && hasNumB) {
+    if (numA !== numB) return numA - numB;
+    return (a.member_number || '').localeCompare(b.member_number || '');
+  }
+
+  // Numbered members appear before unnumbered ones
+  if (hasNumA && !hasNumB) return -1;
+  if (!hasNumA && hasNumB) return 1;
+
+  // Fallback natural string comparison
+  const strA = (a.member_number || '').trim();
+  const strB = (b.member_number || '').trim();
+  if (strA && strB) return strA.localeCompare(strB, undefined, { numeric: true, sensitivity: 'base' });
+  if (strA && !strB) return -1;
+  if (!strA && strB) return 1;
+
+  return new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime();
+}
+
+// Helper: generate pagination page numbers with ellipses
+function getPageNumbers(currentPage: number, totalPages: number): (number | string)[] {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }
+
+  const pages: (number | string)[] = [1];
+
+  if (currentPage > 3) {
+    pages.push('...');
+  }
+
+  const start = Math.max(2, currentPage - 1);
+  const end = Math.min(totalPages - 1, currentPage + 1);
+
+  for (let i = start; i <= end; i++) {
+    pages.push(i);
+  }
+
+  if (currentPage < totalPages - 2) {
+    pages.push('...');
+  }
+
+  pages.push(totalPages);
+  return pages;
+}
+
+// Helper: synchronize fee records for a member across their tenure periods
+async function syncMemberFeeRecords(
+  memberId: string,
+  joinDateStr: string,
+  tenureMonths: number,
+  totalPayableForTenure: number,
+  paidAmount: number
+) {
+  const safeJoinDate = joinDateStr || new Date().toISOString().slice(0, 10);
+  const [jYear, jMonth, jDay] = safeJoinDate.split('-').map(Number);
+  const joinDay = jDay || 1;
+
+  const recordsToUpsert = [];
+  let remainingPaid = Math.max(0, paidAmount);
+
+  for (let i = 0; i < tenureMonths; i++) {
+    const targetMonthDate = new Date(jYear, jMonth - 1 + i, 1);
+    const pYear = targetMonthDate.getFullYear();
+    const pMonth = targetMonthDate.getMonth() + 1;
+    const periodMonth = `${pYear}-${String(pMonth).padStart(2, '0')}-01`;
+    const lastDay = new Date(pYear, pMonth, 0).getDate();
+    const periodEnd = `${pYear}-${String(pMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+    const recordAmount = (i === tenureMonths - 1)
+      ? (totalPayableForTenure - (Math.floor(totalPayableForTenure / tenureMonths) * (tenureMonths - 1)))
+      : Math.floor(totalPayableForTenure / tenureMonths);
+
+    const recordPaid = Math.min(remainingPaid, recordAmount);
+    remainingPaid = Math.max(0, remainingPaid - recordPaid);
+    const isRecordPaid = recordPaid >= recordAmount && recordAmount > 0;
+
+    const billingDay = Math.min(joinDay, lastDay);
+    const paidAtDate = new Date(pYear, pMonth - 1, billingDay, 12, 0, 0);
+    const paidAtIso = i === 0 ? new Date().toISOString() : paidAtDate.toISOString();
+
+    recordsToUpsert.push({
+      member_id: memberId,
+      amount: recordAmount,
+      amount_paid: recordPaid,
+      discount: 0,
+      period_month: periodMonth,
+      period_end: periodEnd,
+      paid: isRecordPaid,
+      paid_at: recordPaid > 0 ? paidAtIso : null,
+      payment_method: 'cash',
+    });
+  }
+
+  if (recordsToUpsert.length > 0) {
+    const { error: upsertErr } = await supabase
+      .from('fee_records')
+      .upsert(recordsToUpsert, { onConflict: 'member_id,period_month' });
+    if (upsertErr) {
+      console.error('Failed to sync fee records:', upsertErr);
+    }
+  }
+}
+
 // Helper: get current month as YYYY-MM-01
 function getCurrentMonthKey(): string {
   const now = new Date();
@@ -162,6 +274,8 @@ export default function MembersPage() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive' | 'pending'>('all');
   const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const PAGE_SIZE = 20;
 
   // Fetch Profiles (for Added By staff names & Pending Approvals)
   const { data: profiles = [] } = useQuery({
@@ -334,6 +448,11 @@ export default function MembersPage() {
       }
     }
   }, []);
+
+  // Reset to page 1 whenever search or filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, filter, genderFilter]);
 
   // Delete Member State
   const [memberToDelete, setMemberToDelete] = useState<Member | null>(null);
@@ -728,51 +847,26 @@ export default function MembersPage() {
         }
       }
 
+      // For editing: sync fee records so changes to amount_paid (e.g. 4000→0) are reflected
+      if (editing && newMember) {
+        await syncMemberFeeRecords(
+          newMember.id,
+          payload.join_date || editing.join_date,
+          tenureMonths,
+          totalPayableForTenure,
+          paidAmount
+        );
+      }
+
       // Create initial fee records for new member across the tenure periods
       if (!editing && newMember) {
-        const joinDateStr = payload.join_date || new Date().toISOString().slice(0, 10);
-        const [jYear, jMonth, jDay] = joinDateStr.split('-').map(Number);
-        const joinDay = jDay || 1;
-
-        const recordsToInsert = [];
-        let remainingPaid = paidAmount;
-
-        for (let i = 0; i < tenureMonths; i++) {
-          const targetMonthDate = new Date(jYear, jMonth - 1 + i, 1);
-          const pYear = targetMonthDate.getFullYear();
-          const pMonth = targetMonthDate.getMonth() + 1;
-          const periodMonth = `${pYear}-${String(pMonth).padStart(2, '0')}-01`;
-          const lastDay = new Date(pYear, pMonth, 0).getDate();
-          const periodEnd = `${pYear}-${String(pMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-
-          const recordAmount = (i === tenureMonths - 1)
-            ? (totalPayableForTenure - (Math.floor(totalPayableForTenure / tenureMonths) * (tenureMonths - 1)))
-            : Math.floor(totalPayableForTenure / tenureMonths);
-
-          const recordPaid = Math.min(remainingPaid, recordAmount);
-          remainingPaid = Math.max(0, remainingPaid - recordPaid);
-          const isRecordPaid = recordPaid >= recordAmount && recordAmount > 0;
-
-          const billingDay = Math.min(joinDay, lastDay);
-          const paidAtDate = new Date(pYear, pMonth - 1, billingDay, 12, 0, 0);
-          const paidAtIso = i === 0 ? new Date().toISOString() : paidAtDate.toISOString();
-
-          recordsToInsert.push({
-            member_id: newMember.id,
-            amount: recordAmount,
-            amount_paid: recordPaid,
-            discount: 0,
-            period_month: periodMonth,
-            period_end: periodEnd,
-            paid: isRecordPaid,
-            paid_at: recordPaid > 0 ? paidAtIso : null,
-            payment_method: 'cash',
-          });
-        }
-
-        if (recordsToInsert.length > 0) {
-          await supabase.from('fee_records').insert(recordsToInsert);
-        }
+        await syncMemberFeeRecords(
+          newMember.id,
+          payload.join_date || new Date().toISOString().slice(0, 10),
+          tenureMonths,
+          totalPayableForTenure,
+          paidAmount
+        );
       }
 
       return { isPendingEdit: false };
@@ -1241,19 +1335,27 @@ export default function MembersPage() {
     return members.filter((m) => isMemberAssignedToStaff(m, currentUser.id));
   }, [members, isAdmin, currentUser?.id]);
 
-  const filtered = staffFilteredMembers.filter((m) => {
-    const cleanSearch = search.trim().toLowerCase();
-    const matchSearch =
-      !cleanSearch ||
-      m.full_name.toLowerCase().includes(cleanSearch) ||
-      (m.phone || '').toLowerCase().includes(cleanSearch) ||
-      (m.member_number || '').toLowerCase().includes(cleanSearch) ||
-      (m.cnic || '').toLowerCase().includes(cleanSearch);
-    const matchFilter = filter === 'all' ? true : filter === 'active' ? m.active : !m.active;
-    const mGender = (m.gender || 'male').toLowerCase();
-    const matchGender = genderFilter === 'all' ? true : mGender === genderFilter;
-    return matchSearch && matchFilter && matchGender;
-  });
+  const filtered = useMemo(() => {
+    return staffFilteredMembers
+      .filter((m) => {
+        const cleanSearch = search.trim().toLowerCase();
+        const matchSearch =
+          !cleanSearch ||
+          m.full_name.toLowerCase().includes(cleanSearch) ||
+          (m.phone || '').toLowerCase().includes(cleanSearch) ||
+          (m.member_number || '').toLowerCase().includes(cleanSearch) ||
+          (m.cnic || '').toLowerCase().includes(cleanSearch);
+        const matchFilter = filter === 'all' ? true : filter === 'active' ? m.active : !m.active;
+        const mGender = (m.gender || 'male').toLowerCase();
+        const matchGender = genderFilter === 'all' ? true : mGender === genderFilter;
+        return matchSearch && matchFilter && matchGender;
+      })
+      .sort(compareMemberNumbers);
+  }, [staffFilteredMembers, search, filter, genderFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedMembers = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   // Helper to get payment status info for a member
   // Uses the member's join_date to determine their billing day (e.g. joined Aug 10 → due on 10th each month)
@@ -1707,11 +1809,11 @@ export default function MembersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {isLoading ? (
+                   {isLoading ? (
                     <tr><td colSpan={isAdmin ? 10 : 9} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
                   ) : filtered.length === 0 ? (
                     <tr><td colSpan={isAdmin ? 10 : 9} className="text-center py-8 text-muted-foreground">No members found</td></tr>
-                  ) : filtered.map((m) => {
+                  ) : paginatedMembers.map((m) => {
                     const assignedTrainer = trainers.find((t) => t.id === m.trainer_id);
                     const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
                     const payStatus = getMemberPaymentStatus(m);
@@ -1843,9 +1945,91 @@ export default function MembersPage() {
                       </tr>
                     );
                   })}
-                </tbody>
+                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {!isLoading && filtered.length > 0 && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 py-3 border-t border-border">
+                {/* Record count info */}
+                <p className="text-xs text-muted-foreground order-2 sm:order-1">
+                  Showing <span className="font-semibold text-foreground">{(safePage - 1) * PAGE_SIZE + 1}</span>–
+                  <span className="font-semibold text-foreground">{Math.min(safePage * PAGE_SIZE, filtered.length)}</span> of{' '}
+                  <span className="font-semibold text-foreground">{filtered.length}</span> members
+                </p>
+
+                {/* Page navigation */}
+                {totalPages > 1 && (
+                  <div className="flex items-center gap-1 order-1 sm:order-2">
+                    {/* First page */}
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setCurrentPage(1)}
+                      disabled={safePage === 1}
+                      title="First page"
+                    >
+                      <ChevronsLeft className="h-4 w-4" />
+                    </Button>
+
+                    {/* Previous page */}
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                      disabled={safePage === 1}
+                      title="Previous page"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </Button>
+
+                    {/* Page number buttons */}
+                    {getPageNumbers(safePage, totalPages).map((pg, idx) =>
+                      pg === '...' ? (
+                        <span key={`ellipsis-${idx}`} className="px-1 text-muted-foreground text-sm select-none">…</span>
+                      ) : (
+                        <Button
+                          key={pg}
+                          variant={pg === safePage ? 'default' : 'outline'}
+                          size="icon"
+                          className="h-8 w-8 text-xs font-semibold"
+                          onClick={() => setCurrentPage(pg as number)}
+                        >
+                          {pg}
+                        </Button>
+                      )
+                    )}
+
+                    {/* Next page */}
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                      disabled={safePage === totalPages}
+                      title="Next page"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+
+                    {/* Last page */}
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setCurrentPage(totalPages)}
+                      disabled={safePage === totalPages}
+                      title="Last page"
+                    >
+                      <ChevronsRight className="h-4 w-4" />
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

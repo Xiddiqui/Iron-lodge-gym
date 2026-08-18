@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import {
   CalendarCheck, Plus, Search, Loader2, Clock, LogOut,
-  UserCheck, Shield, Coffee, ChevronDown, ChevronUp, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle, Banknote, X
+  UserCheck, Shield, Coffee, ChevronDown, ChevronUp, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle, Banknote, X, Trash2
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -61,6 +61,7 @@ export default function AttendancePage() {
   // --- Member attendance search & fee status filtering ---
   const [feeFilter, setFeeFilter] = useState<'all' | 'unpaid' | 'paid' | 'overdue' | 'due' | 'partial'>('all');
   const [attSearch, setAttSearch] = useState('');
+  const [deletingAttId, setDeletingAttId] = useState<string | null>(null);
 
   const isAdmin = userRole === 'admin';
 
@@ -319,6 +320,27 @@ export default function AttendancePage() {
       toast.error(e.message || 'Failed to mark attendance');
     } finally {
       setOneDaySubmitting(false);
+    }
+  };
+
+  const handleDeleteAttendance = async (id: string, name: string) => {
+    if (!confirm(`Are you sure you want to remove attendance for ${name}?`)) return;
+    setDeletingAttId(id);
+    try {
+      const res = await fetch(`/api/attendance?id=${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+      const result = await res.json();
+      if (!res.ok || result.error) {
+        const { error } = await supabase.from('attendance').delete().eq('id', id);
+        if (error) throw new Error(result.error || error.message);
+      }
+      toast.success(`Attendance removed for ${name}`);
+      loadMemberAttendance(date);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to remove attendance');
+    } finally {
+      setDeletingAttId(null);
     }
   };
 
@@ -621,24 +643,25 @@ export default function AttendancePage() {
                       <th className="text-left p-4 font-medium text-muted-foreground">Fee Status</th>
                       <th className="text-left p-4 font-medium text-muted-foreground hidden md:table-cell">Source</th>
                       <th className="text-left p-4 font-medium text-muted-foreground hidden sm:table-cell">Marked By</th>
+                      {isAdmin && <th className="text-right p-4 font-medium text-muted-foreground">Action</th>}
                     </tr>
                   </thead>
                   <tbody>
                     {isLoadingMemberAtt ? (
                       <tr>
-                        <td colSpan={5} className="text-center py-12">
+                        <td colSpan={isAdmin ? 6 : 5} className="text-center py-12">
                           <Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" />
                         </td>
                       </tr>
                     ) : attendance.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="text-center py-12 text-muted-foreground">
+                        <td colSpan={isAdmin ? 6 : 5} className="text-center py-12 text-muted-foreground">
                           No member attendance records for this date
                         </td>
                       </tr>
                     ) : filteredAttendance.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="text-center py-12 text-muted-foreground">
+                        <td colSpan={isAdmin ? 6 : 5} className="text-center py-12 text-muted-foreground">
                           {feeFilter === 'unpaid' ? (
                             <div className="flex flex-col items-center gap-2">
                               <CheckCircle className="h-8 w-8 text-emerald-500/60" />
@@ -706,6 +729,24 @@ export default function AttendancePage() {
                                 a.profiles?.full_name || '—'
                               )}
                             </td>
+                            {isAdmin && (
+                              <td className="p-4 text-right">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8 text-muted-foreground hover:text-red-400 hover:bg-red-500/10"
+                                  title={`Remove attendance for ${displayName}`}
+                                  disabled={deletingAttId === a.id}
+                                  onClick={() => handleDeleteAttendance(a.id, displayName)}
+                                >
+                                  {deletingAttId === a.id ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin text-red-400" />
+                                  ) : (
+                                    <Trash2 className="h-3.5 w-3.5 text-red-400/70 hover:text-red-400" />
+                                  )}
+                                </Button>
+                              </td>
+                            )}
                           </tr>
                         );
                       })
