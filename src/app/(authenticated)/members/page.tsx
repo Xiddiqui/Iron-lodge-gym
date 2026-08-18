@@ -200,6 +200,22 @@ async function syncMemberFeeRecords(
       console.error('Failed to sync fee records:', upsertErr);
     }
   }
+
+  // Delete unpaid fee records that fall outside the new tenure window.
+  // This handles tenure reductions (e.g., 3→1 month) so stale months are cleaned up.
+  // Paid records are preserved to maintain payment history.
+  const validPeriodMonths = recordsToUpsert.map((r) => r.period_month);
+  if (validPeriodMonths.length > 0) {
+    const { error: deleteErr } = await supabase
+      .from('fee_records')
+      .delete()
+      .eq('member_id', memberId)
+      .not('period_month', 'in', `(${validPeriodMonths.join(',')})`)
+      .eq('paid', false);
+    if (deleteErr) {
+      console.error('Failed to delete stale fee records:', deleteErr);
+    }
+  }
 }
 
 // Helper: get current month as YYYY-MM-01
@@ -795,25 +811,32 @@ export default function MembersPage() {
       let currentPayload: Record<string, any> = { ...payload };
       let newMember: any = null;
 
+      console.log('[saveMember] Starting save. editing:', editing?.id, 'payload:', currentPayload);
+
       for (let attempt = 0; attempt < 5; attempt++) {
         if (editing) {
+          console.log(`[saveMember] Attempt ${attempt + 1} — update payload:`, JSON.stringify(currentPayload));
           const { data, error } = await supabase.from('members').update(currentPayload).eq('id', editing.id).select().single();
           if (!error) {
+            console.log('[saveMember] Update success. Returned data:', data);
             newMember = data;
             break;
           }
+          console.error('[saveMember] Update error:', error.message, error.details, error.hint);
           const missingCol = (
             error.message?.match(/Could not find the '([^']+)' column/i)?.[1] ||
             error.message?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1] ||
             error.details?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1]
           );
           if (missingCol && missingCol in currentPayload) {
+            console.warn(`[saveMember] Stripping missing column: ${missingCol}`);
             delete currentPayload[missingCol];
             continue;
           }
           let removed = false;
           for (const col of ['tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'age', 'created_by']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
+              console.warn(`[saveMember] Fallback stripping column: ${col}`);
               delete currentPayload[col];
               removed = true;
             }
@@ -944,6 +967,31 @@ export default function MembersPage() {
         }
         if (updateError) throw updateError;
 
+        // Sync fee records so tenure/fee changes take effect (e.g. 1 month → 3 months)
+        const changes = pendingEdit.changes || {};
+        if (changes.join_date || changes.tenure_months || changes.amount_paid || changes.monthly_fee || changes.training_fees) {
+          // Fetch the latest member data after the update so we have accurate values
+          const { data: updatedMember } = await supabase
+            .from('members')
+            .select('join_date, tenure_months, monthly_fee, training_fees, amount_paid')
+            .eq('id', pendingEdit.member_id)
+            .single();
+          if (updatedMember) {
+            const syncTenure = Number(updatedMember.tenure_months) || 1;
+            const syncMonthly = Number(updatedMember.monthly_fee) || 0;
+            const syncTraining = Number(updatedMember.training_fees) || 0;
+            const syncTotal = syncMonthly * syncTenure + syncTraining;
+            const syncPaid = Number(updatedMember.amount_paid) || syncTotal;
+            await syncMemberFeeRecords(
+              pendingEdit.member_id,
+              updatedMember.join_date,
+              syncTenure,
+              syncTotal,
+              syncPaid
+            );
+          }
+        }
+
         const { error: editError } = await supabase
           .from('member_pending_edits')
           .update({
@@ -959,6 +1007,10 @@ export default function MembersPage() {
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['members'] });
       queryClient.invalidateQueries({ queryKey: ['member_pending_edits'] });
+      queryClient.invalidateQueries({ queryKey: ['all_fee_records'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-fees'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-trend'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-active'] });
       if (result?.isDelete) {
         toast.success('Member deleted successfully upon approval!');
       } else {
@@ -1815,7 +1867,8 @@ export default function MembersPage() {
                     <tr><td colSpan={isAdmin ? 10 : 9} className="text-center py-8 text-muted-foreground">No members found</td></tr>
                   ) : paginatedMembers.map((m) => {
                     const assignedTrainer = trainers.find((t) => t.id === m.trainer_id);
-                    const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
+                    const tenure = m.tenure_months || 1;
+                    const totalFee = (m.monthly_fee || 0) * tenure + (m.training_fees || 0);
                     const payStatus = getMemberPaymentStatus(m);
                     const pendingEditReq = pendingEditsByMemberId[m.id];
 
@@ -2428,8 +2481,15 @@ export default function MembersPage() {
                   </div>
                 </div>
                 <div>
-                  <div className="text-muted-foreground mb-1">Monthly Fee</div>
-                  <div className="font-medium">{selectedMember ? formatCurrency(selectedMember.monthly_fee) : '—'}</div>
+                  <div className="text-muted-foreground mb-1">Total Fee</div>
+                  <div className="font-medium">
+                    {selectedMember ? formatCurrency((selectedMember.monthly_fee || 0) * (selectedMember.tenure_months || 1)) : '—'}
+                    {selectedMember && (selectedMember.tenure_months || 1) > 1 && (
+                      <span className="text-xs text-muted-foreground ml-1.5">
+                        ({formatCurrency(selectedMember.monthly_fee)}/mo × {selectedMember.tenure_months} mo)
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <div className="text-muted-foreground mb-1">Training Fees</div>

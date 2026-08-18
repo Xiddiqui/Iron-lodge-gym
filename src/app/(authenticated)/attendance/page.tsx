@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import {
   CalendarCheck, Plus, Search, Loader2, Clock, LogOut,
   UserCheck, Shield, Coffee, ChevronDown, ChevronUp, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle, Banknote, X, Trash2
@@ -42,6 +43,24 @@ export default function AttendancePage() {
   const [memberSearch, setMemberSearch] = useState('');
   const [expandedStaffId, setExpandedStaffId] = useState<string | null>(null);
 
+  // Photo preview modal state
+  const [photoPreview, setPhotoPreview] = useState<{
+    open: boolean;
+    photoUrl: string | null;
+    title?: string;
+    subtitle?: string;
+  }>({ open: false, photoUrl: null });
+
+  const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
+    if (!photoUrl) return;
+    setPhotoPreview({
+      open: true,
+      photoUrl,
+      title: title || 'Member Photo',
+      subtitle,
+    });
+  };
+
   // 1-Day walk-in dialog state
   const [oneDayDialogOpen, setOneDayDialogOpen] = useState(false);
   const [oneDayName, setOneDayName] = useState('');
@@ -66,38 +85,90 @@ export default function AttendancePage() {
   const isAdmin = userRole === 'admin';
 
   // ─────────────────────────────────────────────────────────────────
-  // Compute fee status from a fee record
+  // Compute fee status from member fee records & member profile
   // ─────────────────────────────────────────────────────────────────
-  const computeFeeStatus = (fr: any): MemberFeeInfo => {
-    const feeAmount   = Number(fr.amount)      || 0;
-    const discount    = Number(fr.discount)    || 0;
-    const amountPaid  = Number(fr.amount_paid) || 0;
-    const isPaid      = fr.paid === true || fr.status === 'paid';
-    const netDue      = Math.max(0, feeAmount - discount - amountPaid);
-    const today       = new Date();
+  const computeMemberFeeStatus = (memberId: string, memberFees: any[], memberObj?: any): MemberFeeInfo => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-    let status: FeeStatus;
-
-    if (isPaid || netDue === 0) {
-      status = 'paid';
-    } else if (amountPaid > 0 && netDue > 0) {
-      // Partial payment made
-      status = 'partial';
-    } else if (fr.period_end && new Date(fr.period_end) < today) {
-      status = 'overdue';
-    } else {
-      status = 'due';
+    if (!memberFees || memberFees.length === 0) {
+      const totalFee = ((memberObj?.monthly_fee || 0) + (memberObj?.training_fees || 0));
+      if (totalFee > 0) {
+        return {
+          status: 'due',
+          amountDue: totalFee,
+          totalAmount: totalFee,
+        };
+      }
+      return {
+        status: 'paid',
+      };
     }
 
-    const totalForPercent = Math.max(feeAmount - discount, 1);
-    const paidPercent = Math.round((amountPaid / totalForPercent) * 100);
+    // Filter unpaid records
+    const unpaidRecords = memberFees.filter((fr) => {
+      const feeAmount = Number(fr.amount) || 0;
+      const discount = Number(fr.discount) || 0;
+      const amountPaid = Number(fr.amount_paid) || 0;
+      const netDue = Math.max(0, feeAmount - discount - amountPaid);
+      return !fr.paid && netDue > 0;
+    });
+
+    if (unpaidRecords.length === 0) {
+      return {
+        status: 'paid',
+      };
+    }
+
+    // Check if any unpaid record is overdue
+    const overdueRecord = unpaidRecords.find((fr) => {
+      if (!fr.period_end) return false;
+      const end = new Date(fr.period_end);
+      end.setHours(23, 59, 59, 999);
+      return end < today;
+    });
+
+    // Total net due across all unpaid records
+    const totalNetDue = unpaidRecords.reduce((sum, fr) => {
+      const feeAmount = Number(fr.amount) || 0;
+      const discount = Number(fr.discount) || 0;
+      const amountPaid = Number(fr.amount_paid) || 0;
+      return sum + Math.max(0, feeAmount - discount - amountPaid);
+    }, 0);
+
+    // Latest fee record (first since sorted by period_month desc)
+    const latestRecord = memberFees[0];
+    const latestFeeAmount = Number(latestRecord.amount) || 0;
+    const latestDiscount = Number(latestRecord.discount) || 0;
+    const latestPaid = Number(latestRecord.amount_paid) || 0;
+    const latestNetDue = Math.max(0, latestFeeAmount - latestDiscount - latestPaid);
+
+    if (overdueRecord) {
+      return {
+        status: 'overdue',
+        amountDue: totalNetDue,
+        amountPaid: latestPaid > 0 ? latestPaid : undefined,
+        totalAmount: latestFeeAmount - latestDiscount,
+      };
+    }
+
+    if (latestPaid > 0 && latestNetDue > 0) {
+      const totalForPercent = Math.max(latestFeeAmount - latestDiscount, 1);
+      const paidPercent = Math.round((latestPaid / totalForPercent) * 100);
+      return {
+        status: 'partial',
+        amountDue: totalNetDue,
+        amountPaid: latestPaid,
+        totalAmount: latestFeeAmount - latestDiscount,
+        paidPercent,
+      };
+    }
 
     return {
-      status,
-      amountDue: netDue > 0 ? netDue : undefined,
-      amountPaid: amountPaid > 0 ? amountPaid : undefined,
-      totalAmount: feeAmount - discount,
-      paidPercent: status === 'partial' ? paidPercent : undefined,
+      status: 'due',
+      amountDue: totalNetDue,
+      amountPaid: latestPaid > 0 ? latestPaid : undefined,
+      totalAmount: latestFeeAmount - latestDiscount,
     };
   };
 
@@ -110,7 +181,7 @@ export default function AttendancePage() {
     nextDay.setDate(nextDay.getDate() + 1);
     const { data, error } = await supabase
       .from('attendance')
-      .select('*, members(full_name, phone, member_number), profiles(full_name)')
+      .select('*, members(id, full_name, phone, member_number, photo_url, monthly_fee, training_fees, join_date), profiles(full_name)')
       .gte('check_in', `${forDate}T00:00:00`)
       .lt('check_in', nextDay.toISOString().slice(0, 10) + 'T00:00:00')
       .order('check_in', { ascending: false });
@@ -126,24 +197,37 @@ export default function AttendancePage() {
       // Fetch latest fee status for each member present
       const memberIds = Array.from(new Set(data.map((a: any) => a.member_id).filter(Boolean)));
       if (memberIds.length > 0) {
-        const { data: feeData } = await supabase
+        const { data: feeData, error: feeErr } = await supabase
           .from('fee_records')
-          .select('member_id, paid, amount, discount, amount_paid, period_month, period_end, status')
+          .select('id, member_id, paid, amount, discount, amount_paid, period_month, period_end')
           .in('member_id', memberIds)
           .order('period_month', { ascending: false });
 
-        if (feeData) {
-          const feeMap: Record<string, MemberFeeInfo> = {};
-
-          // Group by member_id, take the most recent record per member
-          feeData.forEach((fr: any) => {
-            if (!feeMap[fr.member_id]) {
-              feeMap[fr.member_id] = computeFeeStatus(fr);
-            }
-          });
-
-          setMemberFeeStatuses(feeMap);
+        if (feeErr) {
+          console.error('Error loading fee records for attendance:', feeErr);
         }
+
+        const feeRecordsByMember: Record<string, any[]> = {};
+        (feeData || []).forEach((fr: any) => {
+          if (!feeRecordsByMember[fr.member_id]) {
+            feeRecordsByMember[fr.member_id] = [];
+          }
+          feeRecordsByMember[fr.member_id].push(fr);
+        });
+
+        const memberMap: Record<string, any> = {};
+        data.forEach((a: any) => {
+          if (a.member_id && a.members) {
+            memberMap[a.member_id] = a.members;
+          }
+        });
+
+        const feeMap: Record<string, MemberFeeInfo> = {};
+        memberIds.forEach((mId: string) => {
+          feeMap[mId] = computeMemberFeeStatus(mId, feeRecordsByMember[mId] || [], memberMap[mId]);
+        });
+
+        setMemberFeeStatuses(feeMap);
       } else {
         setMemberFeeStatuses({});
       }
@@ -157,7 +241,7 @@ export default function AttendancePage() {
   const loadMembers = useCallback(async () => {
     const { data } = await supabase
       .from('members')
-      .select('id, full_name, phone, member_number')
+      .select('id, full_name, phone, member_number, photo_url')
       .eq('active', true)
       .order('full_name');
     setMembers(data ?? []);
@@ -198,7 +282,7 @@ export default function AttendancePage() {
   }, [staffDate, isAdmin, loadStaffAttendance]);
 
   // ─────────────────────────────────────────────────────────────────
-  // REALTIME: Member attendance socket
+  // REALTIME: Member attendance socket & fee records socket
   // ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     const channel = supabase
@@ -214,7 +298,21 @@ export default function AttendancePage() {
         setRealtimeConnected(status === 'SUBSCRIBED');
       });
 
-    return () => { supabase.removeChannel(channel); };
+    const feeChannel = supabase
+      .channel('rt-member-fee-records-attendance')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'fee_records' },
+        () => {
+          loadMemberAttendance(date);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+      supabase.removeChannel(feeChannel);
+    };
   }, [date, loadMemberAttendance]);
 
   // ─────────────────────────────────────────────────────────────────
@@ -677,19 +775,40 @@ export default function AttendancePage() {
                       filteredAttendance.map((a: any) => {
                         const displayName = a.members?.full_name || a.guest_name || a.notes?.replace(/^1-Day Walk-in: /, '').split(' | ')[0] || 'Walk-in Guest';
                         const displayPhone = a.members?.phone || (a.guest_name ? '1-Day Visit' : null);
+                        const photoUrl = a.members?.photo_url;
 
                         return (
                           <tr key={a.id} className="border-b border-border/50 hover:bg-accent/30 transition-colors">
                             <td className="p-4">
                               <div className="flex items-center gap-3">
-                                <div className={`h-9 w-9 rounded-full grid place-items-center text-xs font-semibold ${
-                                  a.member_id ? 'bg-primary/20 text-primary' : 'bg-amber-500/20 text-amber-400'
-                                }`}>
-                                  {displayName.slice(0, 1).toUpperCase()}
-                                </div>
-                                <div>
-                                  <p className="font-medium">{displayName}</p>
-                                  {displayPhone && <p className="text-xs text-muted-foreground">{displayPhone}</p>}
+                                {photoUrl ? (
+                                  <div
+                                    className="relative group/avatar cursor-pointer shrink-0"
+                                    onClick={() =>
+                                      openFullPhoto(
+                                        photoUrl,
+                                        displayName,
+                                        `Member #${a.members?.member_number || 'N/A'}`
+                                      )
+                                    }
+                                    title="Click to view full size photo"
+                                  >
+                                    <img
+                                      src={photoUrl}
+                                      alt={displayName}
+                                      className="h-10 w-10 rounded-full object-cover border border-border/80 group-hover/avatar:scale-105 group-hover/avatar:ring-2 group-hover/avatar:ring-primary/50 transition-all"
+                                    />
+                                  </div>
+                                ) : (
+                                  <div className={`h-10 w-10 rounded-full grid place-items-center text-xs font-semibold shrink-0 ${
+                                    a.member_id ? 'bg-primary/20 text-primary' : 'bg-amber-500/20 text-amber-400'
+                                  }`}>
+                                    {displayName.slice(0, 1).toUpperCase()}
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <p className="font-medium truncate">{displayName}</p>
+                                  {displayPhone && <p className="text-xs text-muted-foreground truncate">{displayPhone}</p>}
                                   {a.members?.member_number && (
                                     <p className="text-xs font-mono text-muted-foreground/70"># {a.members.member_number}</p>
                                   )}
@@ -1047,9 +1166,17 @@ export default function AttendancePage() {
               return (
                 <div key={m.id} className="flex items-center justify-between p-3 rounded-lg hover:bg-accent transition-colors">
                   <div className="flex items-center gap-3">
-                    <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary">
-                      {m.full_name.slice(0, 1).toUpperCase()}
-                    </div>
+                    {m.photo_url ? (
+                      <img
+                        src={m.photo_url}
+                        alt={m.full_name}
+                        className="h-8 w-8 rounded-full object-cover border border-border shrink-0"
+                      />
+                    ) : (
+                      <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
+                        {m.full_name.slice(0, 1).toUpperCase()}
+                      </div>
+                    )}
                     <div>
                       <p className="text-sm font-medium">{m.full_name}</p>
                       <p className="text-xs text-muted-foreground">{m.phone}</p>
@@ -1134,14 +1261,7 @@ export default function AttendancePage() {
                   onKeyDown={(e) => e.key === 'Enter' && handleOneDaySubmit()}
                 />
               </div>
-              {/* <p className="text-xs text-muted-foreground">Leave blank if no fee charged</p> */}
             </div>
-
-            {/* Info box */}
-            {/* <div className="flex items-start gap-2.5 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-400">
-              <CheckCircle className="h-4 w-4 shrink-0 mt-0.5" />
-              <span>Attendance will be marked as <strong>Fee Paid</strong> automatically.</span>
-            </div> */}
           </div>
 
           <div className="flex gap-3 pt-2">
@@ -1167,6 +1287,15 @@ export default function AttendancePage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* ═══ Full Photo Preview Dialog ═══ */}
+      <PhotoPreviewDialog
+        open={photoPreview.open}
+        onOpenChange={(open) => setPhotoPreview((prev) => ({ ...prev, open }))}
+        photoUrl={photoPreview.photoUrl}
+        title={photoPreview.title}
+        subtitle={photoPreview.subtitle}
+      />
     </div>
   );
 }
