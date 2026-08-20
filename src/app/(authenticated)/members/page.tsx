@@ -86,6 +86,7 @@ interface FeeRecord {
   paid: boolean;
   paid_at: string | null;
   payment_method: string | null;
+  collected_by?: string | null;
   status?: string;
   period_year?: number;
 }
@@ -155,11 +156,12 @@ async function syncMemberFeeRecords(
   const safeJoinDate = joinDateStr || new Date().toISOString().slice(0, 10);
   const [jYear, jMonth, jDay] = safeJoinDate.split('-').map(Number);
   const joinDay = jDay || 1;
+  const tenure = Math.max(1, tenureMonths || 1);
 
-  const recordsToUpsert = [];
+  const tenureRecords = [];
   let remainingPaid = Math.max(0, paidAmount);
 
-  for (let i = 0; i < tenureMonths; i++) {
+  for (let i = 0; i < tenure; i++) {
     const targetMonthDate = new Date(jYear, jMonth - 1 + i, 1);
     const pYear = targetMonthDate.getFullYear();
     const pMonth = targetMonthDate.getMonth() + 1;
@@ -167,9 +169,9 @@ async function syncMemberFeeRecords(
     const lastDay = new Date(pYear, pMonth, 0).getDate();
     const periodEnd = `${pYear}-${String(pMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
-    const recordAmount = (i === tenureMonths - 1)
-      ? (totalPayableForTenure - (Math.floor(totalPayableForTenure / tenureMonths) * (tenureMonths - 1)))
-      : Math.floor(totalPayableForTenure / tenureMonths);
+    const recordAmount = (i === tenure - 1)
+      ? (totalPayableForTenure - (Math.floor(totalPayableForTenure / tenure) * (tenure - 1)))
+      : Math.floor(totalPayableForTenure / tenure);
 
     const recordPaid = Math.min(remainingPaid, recordAmount);
     remainingPaid = Math.max(0, remainingPaid - recordPaid);
@@ -177,9 +179,9 @@ async function syncMemberFeeRecords(
 
     const billingDay = Math.min(joinDay, lastDay);
     const paidAtDate = new Date(pYear, pMonth - 1, billingDay, 12, 0, 0);
-    const paidAtIso = i === 0 ? new Date().toISOString() : paidAtDate.toISOString();
+    const paidAtIso = paidAtDate.toISOString();
 
-    recordsToUpsert.push({
+    tenureRecords.push({
       member_id: memberId,
       amount: recordAmount,
       amount_paid: recordPaid,
@@ -192,29 +194,94 @@ async function syncMemberFeeRecords(
     });
   }
 
-  if (recordsToUpsert.length > 0) {
+  // Upsert the tenure records
+  if (tenureRecords.length > 0) {
     const { error: upsertErr } = await supabase
       .from('fee_records')
-      .upsert(recordsToUpsert, { onConflict: 'member_id,period_month' });
+      .upsert(tenureRecords, { onConflict: 'member_id,period_month' });
     if (upsertErr) {
-      console.error('Failed to sync fee records:', upsertErr);
+      console.error('Failed to sync tenure fee records:', upsertErr);
     }
   }
 
-  // Delete unpaid fee records that fall outside the new tenure window.
-  // This handles tenure reductions (e.g., 3→1 month) so stale months are cleaned up.
-  // Paid records are preserved to maintain payment history.
-  const validPeriodMonths = recordsToUpsert.map((r) => r.period_month);
-  if (validPeriodMonths.length > 0) {
-    const { error: deleteErr } = await supabase
+  // Also ensure fee records exist up to the current month for any months AFTER the tenure
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;
+  const lastTenureDate = new Date(jYear, jMonth - 1 + tenure - 1, 1);
+  let extraCursor = new Date(lastTenureDate.getFullYear(), lastTenureDate.getMonth() + 1, 1);
+  const currentMonthDate = new Date(currentYear, currentMonth - 1, 1);
+
+  const monthlyFeeRate = tenure > 0 ? Math.round(totalPayableForTenure / tenure) : totalPayableForTenure;
+  const extraRecords = [];
+
+  while (extraCursor <= currentMonthDate) {
+    const eYear = extraCursor.getFullYear();
+    const eMonth = extraCursor.getMonth() + 1;
+    const ePeriodMonth = `${eYear}-${String(eMonth).padStart(2, '0')}-01`;
+    const eLastDay = new Date(eYear, eMonth, 0).getDate();
+    const ePeriodEnd = `${eYear}-${String(eMonth).padStart(2, '0')}-${String(eLastDay).padStart(2, '0')}`;
+
+    extraRecords.push({
+      member_id: memberId,
+      amount: monthlyFeeRate,
+      amount_paid: 0,
+      discount: 0,
+      period_month: ePeriodMonth,
+      period_end: ePeriodEnd,
+      paid: false,
+      paid_at: null,
+      payment_method: 'cash',
+    });
+
+    extraCursor.setMonth(extraCursor.getMonth() + 1);
+  }
+
+  if (extraRecords.length > 0) {
+    const extraPeriodMonths = extraRecords.map((r) => r.period_month);
+    const { data: existingExtra } = await supabase
+      .from('fee_records')
+      .select('id, period_month, collected_by')
+      .eq('member_id', memberId)
+      .in('period_month', extraPeriodMonths);
+
+    const collectedMonths = new Set(
+      (existingExtra || []).filter((r: any) => r.collected_by != null).map((r: any) => r.period_month)
+    );
+
+    const recordsToReset = extraRecords.filter((r) => !collectedMonths.has(r.period_month));
+    if (recordsToReset.length > 0) {
+      const { error: extraErr } = await supabase
+        .from('fee_records')
+        .upsert(recordsToReset, { onConflict: 'member_id,period_month' });
+      if (extraErr) {
+        console.error('Failed to sync extra fee records:', extraErr);
+      }
+    }
+  }
+
+  // Delete records strictly before the member's join date month
+  if (tenureRecords.length > 0) {
+    const firstPeriodMonth = tenureRecords[0].period_month;
+    await supabase
       .from('fee_records')
       .delete()
       .eq('member_id', memberId)
-      .not('period_month', 'in', `(${validPeriodMonths.join(',')})`)
+      .lt('period_month', firstPeriodMonth);
+  }
+
+  // Delete any future unpaid records beyond both the tenure window and current month
+  const allValidMonths = [
+    ...tenureRecords.map((r) => r.period_month),
+    ...extraRecords.map((r) => r.period_month),
+  ];
+  if (allValidMonths.length > 0) {
+    await supabase
+      .from('fee_records')
+      .delete()
+      .eq('member_id', memberId)
+      .not('period_month', 'in', `(${allValidMonths.join(',')})`)
       .eq('paid', false);
-    if (deleteErr) {
-      console.error('Failed to delete stale fee records:', deleteErr);
-    }
   }
 }
 
@@ -497,11 +564,61 @@ export default function MembersPage() {
   const { data: allFeeRecords = [] } = useQuery({
     queryKey: ['all_fee_records'],
     queryFn: async () => {
-      const { data, error } = await supabase.from('fee_records')
+      const { data: feeData, error: feeErr } = await supabase.from('fee_records')
         .select('*')
         .order('period_month', { ascending: false });
-      if (error) throw error;
-      return data as FeeRecord[];
+      if (feeErr) throw feeErr;
+
+      const { data: memberData } = await supabase.from('members')
+        .select('id, join_date, tenure_months, monthly_fee, training_fees, amount_paid, active');
+
+      if (!memberData || memberData.length === 0) return (feeData || []) as FeeRecord[];
+
+      const memberMap = new Map(memberData.map((m: any) => [m.id, m]));
+      const staleRecordIds: string[] = [];
+      const priorRecordIds: string[] = [];
+
+      const reconciledFees = (feeData || []).filter((fr: any) => {
+        const m = memberMap.get(fr.member_id);
+        if (!m || !m.join_date) return true;
+
+        const [jY, jM] = m.join_date.split('-').map(Number);
+        if (!jY || !jM) return true;
+        const joinPeriodMonth = `${jY}-${String(jM).padStart(2, '0')}-01`;
+
+        // Record strictly before join date is invalid
+        if (fr.period_month < joinPeriodMonth) {
+          priorRecordIds.push(fr.id);
+          return false;
+        }
+
+        // Check if record is after the member's registration tenure
+        const tenure = Math.max(1, Number(m.tenure_months) || 1);
+        const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
+        const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+
+        if (fr.period_month > lastTenurePeriod) {
+          // If after tenure and not collected manually via collect modal, it must be unpaid
+          if (fr.collected_by == null && (fr.paid || Number(fr.amount_paid) > 0)) {
+            staleRecordIds.push(fr.id);
+            fr.paid = false;
+            fr.amount_paid = 0;
+            fr.paid_at = null;
+          }
+        }
+
+        return true;
+      });
+
+      // Background cleanup of stale records in database
+      if (staleRecordIds.length > 0) {
+        supabase.from('fee_records').update({ paid: false, amount_paid: 0, paid_at: null }).in('id', staleRecordIds).then();
+      }
+      if (priorRecordIds.length > 0) {
+        supabase.from('fee_records').delete().in('id', priorRecordIds).then();
+      }
+
+      return reconciledFees as FeeRecord[];
     },
   });
 
@@ -901,6 +1018,7 @@ export default function MembersPage() {
       queryClient.invalidateQueries({ queryKey: ['dash-fees'] });
       queryClient.invalidateQueries({ queryKey: ['dash-trend'] });
       queryClient.invalidateQueries({ queryKey: ['dash-active'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-recent-payment-records'] });
       if (result?.isPendingEdit) {
         toast.success('Member edit request submitted! Waiting for admin approval.');
       } else {
@@ -981,7 +1099,7 @@ export default function MembersPage() {
             const syncMonthly = Number(updatedMember.monthly_fee) || 0;
             const syncTraining = Number(updatedMember.training_fees) || 0;
             const syncTotal = syncMonthly * syncTenure + syncTraining;
-            const syncPaid = Number(updatedMember.amount_paid) || syncTotal;
+            const syncPaid = updatedMember.amount_paid !== undefined && updatedMember.amount_paid !== null ? Number(updatedMember.amount_paid) : syncTotal;
             await syncMemberFeeRecords(
               pendingEdit.member_id,
               updatedMember.join_date,
@@ -1011,6 +1129,7 @@ export default function MembersPage() {
       queryClient.invalidateQueries({ queryKey: ['dash-fees'] });
       queryClient.invalidateQueries({ queryKey: ['dash-trend'] });
       queryClient.invalidateQueries({ queryKey: ['dash-active'] });
+      queryClient.invalidateQueries({ queryKey: ['dash-recent-payment-records'] });
       if (result?.isDelete) {
         toast.success('Member deleted successfully upon approval!');
       } else {
@@ -1415,8 +1534,9 @@ export default function MembersPage() {
     const now = new Date();
     const today = now.getDate();
 
-    // Determine the member's billing day from their join_date
-    const joinDay = m.join_date ? new Date(m.join_date).getDate() : 1;
+    // Determine the member's billing day and join year/month safely from join_date
+    const [jYear, jMonth, jDay] = (m.join_date || '').split('-').map(Number);
+    const joinDay = jDay || 1;
 
     // Check if this month's fee is actually due yet based on the member's billing day
     // e.g. if member joined on Aug 10 and today is Sep 1, fee isn't due until Sep 10
@@ -1434,6 +1554,24 @@ export default function MembersPage() {
       // Exclude current month's fee record from unpaid list since it's not due yet
       unpaidFees = unpaidFees.filter(fr => fr.period_month !== currentMonthKey);
     }
+
+    // Check if member's initial registration tenure has already expired
+    // E.g. joined July 10 (1 month tenure), today is August 20 (> 30 days) -> tenure expired.
+    const tenureMonths = Math.max(1, Number(m.tenure_months) || 1);
+    const targetPeriodMonth = feeNotDueYet
+      ? (() => {
+          const pm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+          return `${pm.getFullYear()}-${String(pm.getMonth() + 1).padStart(2, '0')}-01`;
+        })()
+      : currentMonthKey;
+
+    const lastTenureDate = new Date(jYear || now.getFullYear(), (jMonth || (now.getMonth() + 1)) - 1 + tenureMonths - 1, 1);
+    const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+    const isPastTenure = targetPeriodMonth > lastTenurePeriod;
+
+    // If target period is past tenure and has no separate manual fee collection, it is unpaid
+    const isSeparatelyCollected = currentFee && (currentFee.collected_by != null || currentFee.payment_method === 'manual');
+    const isCurrentPaid = currentFee && (isPastTenure ? (isSeparatelyCollected && currentFee.paid) : currentFee.paid);
 
     const unpaidMonths = unpaidFees.length;
     const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
@@ -1459,13 +1597,13 @@ export default function MembersPage() {
       };
     }
 
-    const amountPaid = Number(currentFee.amount_paid) || 0;
+    const amountPaid = isPastTenure && !isSeparatelyCollected ? 0 : (Number(currentFee.amount_paid) || 0);
     const feeAmount = Number(currentFee.amount) || 0;
     const discount = Number(currentFee.discount) || 0;
     const effectiveDue = Math.max(0, feeAmount - discount);
     const percentage = effectiveDue > 0 ? Math.min(100, Math.round((amountPaid / effectiveDue) * 100)) : (feeAmount === 0 ? 100 : 0);
 
-    if (currentFee.paid || (amountPaid >= effectiveDue && effectiveDue > 0)) {
+    if (isCurrentPaid || (amountPaid >= effectiveDue && effectiveDue > 0)) {
       return {
         status: 'paid' as const,
         percentage: 100,
@@ -1489,8 +1627,10 @@ export default function MembersPage() {
       status: 'unpaid' as const,
       percentage: 0,
       label: 'Unpaid',
-      unpaidMonths,
-      totalDue: unpaidFees.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0),
+      unpaidMonths: Math.max(1, unpaidMonths),
+      totalDue: unpaidFees.length > 0
+        ? unpaidFees.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0)
+        : totalFee,
     };
   }
 

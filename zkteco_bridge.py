@@ -115,26 +115,40 @@ def main():
             continue
 
         try:
-            # Try real-time event streaming first
+            # 1. Sync recent offline punches (e.g. punches made before PC was turned on this morning)
+            seen_records = set()
+            try:
+                print("[Bridge] 🔄 Checking for punches made while PC was off...")
+                all_logs = conn.get_attendance() or []
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                recent_logs = [r for r in all_logs if r.timestamp.strftime("%Y-%m-%d") >= today_str]
+                
+                print(f"[Bridge] Found {len(recent_logs)} punch records for today. Syncing to web app...")
+                for rec in recent_logs:
+                    key = (str(rec.user_id), rec.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+                    seen_records.add(key)
+                    send_punch_to_webapp(server_url, rec.user_id, rec.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+                
+                # Also index all other historic logs into seen_records
+                for rec in all_logs:
+                    seen_records.add((str(rec.user_id), rec.timestamp.strftime("%Y-%m-%d %H:%M:%S")))
+                print(f"[Bridge] ✅ Sync complete. Listening for new punches...")
+            except Exception as sync_err:
+                print(f"[Bridge] ⚠️ Note: Initial offline sync skipped ({sync_err})")
+
+            # 2. Try real-time live event streaming
             try:
                 for attendance in conn.live_capture():
                     if attendance is None:
                         continue
                     user_id = str(attendance.user_id)
                     timestamp_str = attendance.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-                    send_punch_to_webapp(server_url, user_id, timestamp_str)
+                    key = (user_id, timestamp_str)
+                    if key not in seen_records:
+                        seen_records.add(key)
+                        send_punch_to_webapp(server_url, user_id, timestamp_str)
             except Exception as live_err:
-                print(f"[Bridge] Live capture ended/fallback to polling mode ({live_err})...")
-
-                # Polling fallback: check logs every 2 seconds for new scans
-                seen_records = set()
-                try:
-                    logs = conn.get_attendance() or []
-                    for rec in logs:
-                        seen_records.add((str(rec.user_id), rec.timestamp.strftime("%Y-%m-%d %H:%M:%S")))
-                except Exception:
-                    pass
-
+                print(f"[Bridge] Live stream fallback to polling mode ({live_err})...")
                 print("[Bridge] 🔄 Polling mode active — place your finger on the K50 device...")
                 while True:
                     time.sleep(2)

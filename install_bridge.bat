@@ -55,11 +55,39 @@ if not defined PYTHON_EXE (
 if not defined PYTHON_EXE (
     echo.
     echo ============================================================================
-    echo [ERROR] Python 3 was not detected on this system!
+    echo [*] Python was not found. Downloading Python 3.8.10 (Compatible with Windows 7)...
     echo ============================================================================
-    echo Please install Python 3.8+ from: https://www.python.org/downloads/
-    echo IMPORTANT: During Python installation, check the box:
-    echo   [X] "Add Python to PATH"
+    
+    set "PY_URL=https://www.python.org/ftp/python/3.8.10/python-3.8.10.exe"
+    if "%PROCESSOR_ARCHITECTURE%"=="AMD64" set "PY_URL=https://www.python.org/ftp/python/3.8.10/python-3.8.10-amd64.exe"
+    if defined PROCESSOR_ARCHITEW6432 set "PY_URL=https://www.python.org/ftp/python/3.8.10/python-3.8.10-amd64.exe"
+    
+    echo [*] Downloading from: !PY_URL!
+    powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls; (New-Object System.Net.WebClient).DownloadFile('!PY_URL!', \"$env:TEMP\python_installer.exe\")" >nul 2>&1
+    
+    if exist "%TEMP%\python_installer.exe" (
+        echo [*] Installing Python 3.8.10 silently (this takes ~1 minute)...
+        "%TEMP%\python_installer.exe" /passive InstallAllUsers=1 PrependPath=1 Include_test=0 Include_doc=0 Include_tcltk=0
+        timeout /t 5 /nobreak >nul
+        
+        for /d %%D in ("%ProgramFiles%\Python38*" "%ProgramFiles(x86)%\Python38*" "%LOCALAPPDATA%\Programs\Python\Python38*" "C:\Python38*") do (
+            if exist "%%D\python.exe" set "PYTHON_EXE=%%D\python.exe"
+        )
+        if exist "%TEMP%\python_installer.exe" del /f /q "%TEMP%\python_installer.exe" >nul 2>&1
+    )
+)
+
+if not defined PYTHON_EXE (
+    echo.
+    echo ============================================================================
+    echo [NOTE FOR WINDOWS 7]
+    echo Windows 7 does not support modern Python 3.9+. It requires Python 3.8.10!
+    echo ============================================================================
+    echo Please download and install Python 3.8.10 using this direct link:
+    echo   https://www.python.org/ftp/python/3.8.10/python-3.8.10-amd64.exe (64-bit)
+    echo   OR: https://www.python.org/ftp/python/3.8.10/python-3.8.10.exe (32-bit)
+    echo.
+    echo IMPORTANT: In the installer window, CHECK: [X] "Add Python 3.8 to PATH"
     echo ============================================================================
     echo.
     pause
@@ -78,12 +106,171 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process -ErrorAction Silen
 set "INSTALL_DIR=C:\IronLodgeBridge"
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
-echo [*] Copying bridge scripts to %INSTALL_DIR%...
-if exist "%~dp0zkteco_bridge.py" (
-    copy /Y "%~dp0zkteco_bridge.py" "%INSTALL_DIR%\" >nul
-) else (
-    echo [!] Warning: zkteco_bridge.py not found in current folder.
-)
+:: 5. Ensure zkteco_bridge.py is always generated / embedded
+echo [*] Setting up bridge script in %INSTALL_DIR%...
+(
+echo #!/usr/bin/env python3
+echo import sys
+echo import time
+echo import argparse
+echo from datetime import datetime
+echo.
+echo try:
+echo     from zk import ZK
+echo except ImportError:
+echo     import subprocess
+echo     try:
+echo         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyzk", "requests"]^)
+echo     except Exception:
+echo         subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "pyzk", "requests"]^)
+echo     from zk import ZK
+echo.
+echo import requests
+echo.
+echo def normalize_url(url: str^) -^> str:
+echo     url = (url or ""^).strip(^).rstrip("/"^)
+echo     if not url:
+echo         return "https://ironlodgegym.com"
+echo     if not url.startswith("http://"^) and not url.startswith("https://"^):
+echo         url = f"https://{url}"
+echo     return url
+echo.
+echo def send_punch_to_webapp(server_url, user_id, timestamp_str^):
+echo     cdata_endpoint = f"{server_url}/api/iclock/cdata?table=ATTLOG^&SN=K50_LOCAL_BRIDGE"
+echo     body = f"{user_id}\t{timestamp_str}\t0\t1\t0\t0\t0"
+echo     print(f"\n[Fingerprint Punch] User ID: {user_id} ^| Time: {timestamp_str}"^)
+echo     try:
+echo         res = requests.post(
+echo             cdata_endpoint,
+echo             data=body,
+echo             headers={"Content-Type": "text/plain; charset=utf-8"},
+echo             timeout=10,
+echo         ^)
+echo         if res.status_code == 200:
+echo             print(f"[Web Sync] [OK] Sent punch for User #{user_id} to web app -> Success! ({res.text.strip()})"^)
+echo         else:
+echo             print(f"[Web Sync] [WARN] Web app returned status {res.status_code}: {res.text}"^)
+echo     except Exception as req_err:
+echo         print(f"[Web Sync] [ERROR] Failed to reach web app: {req_err}"^)
+echo.
+echo def main(^):
+echo     parser = argparse.ArgumentParser(description="ZKTeco K50 Bridge to Iron Lodge Gym Web App"^)
+echo     parser.add_argument("--ip", required=True, help="IP address of the K50 device"^)
+echo     parser.add_argument("--port", type=int, default=4370, help="Port of K50 device"^)
+echo     parser.add_argument("--server", default="https://ironlodgegym.com", help="Live web app URL"^)
+echo     args = parser.parse_args(^)
+echo.
+echo     device_ip = args.ip
+echo     device_port = args.port
+echo     server_url = normalize_url(args.server^)
+echo.
+echo     print("=" * 60^)
+echo     print("  IRON LODGE GYM -- ZKTeco K50 Live Biometric Bridge"^)
+echo     print("=" * 60^)
+echo     print(f"  Target Device IP : {device_ip}:{device_port}"^)
+echo     print(f"  Target Web App   : {server_url}"^)
+echo     print("=" * 60^)
+echo.
+echo     try:
+echo         test_url = f"{server_url}/api/iclock/cdata?SN=K50_LOCAL_BRIDGE"
+echo         res = requests.get(test_url, timeout=8^)
+echo         if res.status_code == 200:
+echo             print(f"[Web Sync] [OK] Successfully verified connection to web app: {server_url}"^)
+echo         else:
+echo             print(f"[Web Sync] [WARN] Web server replied with status {res.status_code}"^)
+echo     except Exception as e:
+echo         print(f"[Web Sync] [WARN] Could not reach web app ({e}). Bridge will retry punches automatically."^)
+echo.
+echo     force_udp_modes = [False, True]
+echo     while True:
+echo         conn = None
+echo         connected = False
+echo         for udp in force_udp_modes:
+echo             mode_name = "UDP" if udp else "TCP"
+echo             try:
+echo                 print(f"\n[Bridge] Trying {mode_name} connection to ZKTeco K50 at {device_ip}:{device_port}..."^)
+echo                 zk = ZK(device_ip, port=device_port, timeout=8, password=0, force_udp=udp^)
+echo                 zk.omits_ping = True
+echo                 conn = zk.connect(^)
+echo                 print(f"[Bridge] [OK] Connected successfully via {mode_name}! Listening for punches..."^)
+echo                 connected = True
+echo                 break
+echo             except Exception as conn_err:
+echo                 print(f"[Bridge] {mode_name} connection attempt failed ({conn_err})"^)
+echo         if not connected:
+echo             print(f"\n[Bridge] [WARN] Could not connect to K50 at {device_ip}:{device_port}."^)
+echo             print(f"  Check: Is {device_ip} the active IP on K50 screen? Is Comm Key set to 0?"^)
+echo             print("[Bridge] Retrying in 5 seconds..."^)
+echo             time.sleep(5^)
+echo             continue
+echo         try:
+echo             seen_records = set(^)
+echo             try:
+echo                 print("[Bridge] Checking for punches made while PC was off..."^)
+echo                 all_logs = conn.get_attendance(^) or []
+echo                 today_str = datetime.now(^).strftime("%%Y-%%m-%%d"^)
+echo                 recent_logs = [r for r in all_logs if r.timestamp.strftime("%%Y-%%m-%%d"^) >= today_str]
+echo                 print(f"[Bridge] Found {len(recent_logs)} punch records for today. Syncing to web app..."^)
+echo                 for rec in recent_logs:
+echo                     key = (str(rec.user_id^), rec.timestamp.strftime("%%Y-%%m-%%d %%H:%%M:%%S"^)^)
+echo                     seen_records.add(key^)
+echo                     send_punch_to_webapp(server_url, rec.user_id, rec.timestamp.strftime("%%Y-%%m-%%d %%H:%%M:%%S"^)^)
+echo                 for rec in all_logs:
+echo                     seen_records.add((str(rec.user_id^), rec.timestamp.strftime("%%Y-%%m-%%d %%H:%%M:%%S"^)^)^)
+echo                 print("[Bridge] Sync complete. Listening for new punches..."^)
+echo             except Exception as sync_err:
+echo                 print(f"[Bridge] Initial offline sync notice: {sync_err}"^)
+echo.
+echo             try:
+echo                 for attendance in conn.live_capture(^):
+echo                     if attendance is None:
+echo                         continue
+echo                     user_id = str(attendance.user_id^)
+echo                     timestamp_str = attendance.timestamp.strftime('%%Y-%%m-%%d %%H:%%M:%%S'^)
+echo                     key = (user_id, timestamp_str^)
+echo                     if key not in seen_records:
+echo                         seen_records.add(key^)
+echo                         send_punch_to_webapp(server_url, user_id, timestamp_str^)
+echo             except Exception as live_err:
+echo                 print(f"[Bridge] Live capture ended ({live_err}). Falling back to polling mode..."^)
+echo                 print("[Bridge] Polling mode active -- place your finger on the K50 device..."^)
+echo                 while True:
+echo                     time.sleep(2^)
+echo                     try:
+echo                         logs = conn.get_attendance(^) or []
+echo                         for rec in logs:
+echo                             key = (str(rec.user_id^), rec.timestamp.strftime('%%Y-%%m-%%d %%H:%%M:%%S'^)^)
+echo                             if key not in seen_records:
+echo                                 seen_records.add(key^)
+echo                                 send_punch_to_webapp(server_url, rec.user_id, rec.timestamp.strftime('%%Y-%%m-%%d %%H:%%M:%%S'^)^)
+echo                     except Exception as poll_err:
+echo                         print(f"[Bridge] Polling read error: {poll_err}"^)
+echo                         break
+echo         except KeyboardInterrupt:
+echo             if conn:
+echo                 conn.disconnect(^)
+echo             sys.exit(0^)
+echo         except Exception as e:
+echo             print(f"[Bridge] [ERROR] {e}"^)
+echo             time.sleep(3^)
+echo         finally:
+echo             if conn:
+echo                 try:
+echo                     conn.disconnect(^)
+echo                 except Exception:
+echo                     pass
+echo.
+echo if __name__ == '__main__':
+echo     main(^)
+) > "%INSTALL_DIR%\zkteco_bridge.py"
+
+:: 6. Windows Defender Firewall Rule for Port 4370
+echo [*] Adding Windows Firewall rules for Port 4370 (ZKTeco Biometric)...
+netsh advfirewall firewall delete rule name="IronLodge_ZKTeco_4370" >nul 2>&1
+netsh advfirewall firewall add rule name="IronLodge_ZKTeco_4370" dir=in action=allow protocol=TCP localport=4370 >nul 2>&1
+netsh advfirewall firewall add rule name="IronLodge_ZKTeco_4370" dir=in action=allow protocol=UDP localport=4370 >nul 2>&1
+netsh advfirewall firewall add rule name="IronLodge_ZKTeco_4370" dir=out action=allow protocol=TCP localport=4370 >nul 2>&1
+netsh advfirewall firewall add rule name="IronLodge_ZKTeco_4370" dir=out action=allow protocol=UDP localport=4370 >nul 2>&1
 
 :: 5. Prompt for Configuration
 echo.

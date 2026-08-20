@@ -198,21 +198,37 @@ export default function DashboardPage() {
       // 1. Get existing fee records for selected month
       const { data: existingFees, error } = await supabase
         .from('fee_records')
-        .select('id, amount, amount_paid, paid, paid_at, member_id, period_month, period_end, members(full_name, phone)')
+        .select('id, amount, amount_paid, paid, paid_at, member_id, period_month, period_end, collected_by, members(full_name, phone, join_date, tenure_months, amount_paid, monthly_fee, training_fees)')
         .gte('period_month', monthStart)
         .lt('period_month', monthEnd)
         .order('paid', { ascending: false });
 
       if (error) throw error;
-      let feeList = existingFees ?? [];
+      let feeList = (existingFees ?? []).map((f: any) => {
+        const m = f.members;
+        if (m && m.join_date) {
+          const [jY, jM] = m.join_date.split('-').map(Number);
+          if (jY && jM) {
+            const tenure = Math.max(1, Number(m.tenure_months) || 1);
+            const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
+            const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+
+            // If this month is after the registration tenure and not collected manually, it is unpaid
+            if (f.period_month > lastTenurePeriod && f.collected_by == null && (f.paid || Number(f.amount_paid) > 0)) {
+              return { ...f, paid: false, amount_paid: 0, paid_at: null };
+            }
+          }
+        }
+        return f;
+      });
 
       // Auto-heal missing paid_at for records with amount_paid > 0
       const missingPaidAt = feeList.filter((f: any) => (Number(f.amount_paid) || 0) > 0 && !f.paid_at);
       if (missingPaidAt.length > 0) {
         const idsToUpdate = missingPaidAt.map((f: any) => f.id);
-        const nowIso = new Date().toISOString();
-        await supabase.from('fee_records').update({ paid_at: nowIso }).in('id', idsToUpdate);
-        feeList = feeList.map((f: any) => (idsToUpdate.includes(f.id) ? { ...f, paid_at: nowIso } : f));
+        const fallbackIso = `${monthStart}T12:00:00.000Z`;
+        await supabase.from('fee_records').update({ paid_at: fallbackIso }).in('id', idsToUpdate);
+        feeList = feeList.map((f: any) => (idsToUpdate.includes(f.id) ? { ...f, paid_at: fallbackIso } : f));
       }
 
       // 2. Fetch members joined on or before monthEnd to check if any active member lacks a fee_record for this month
@@ -243,7 +259,7 @@ export default function DashboardPage() {
               period_month: monthStart,
               period_end: periodEndStr,
               paid: isPaid,
-              paid_at: actualPaid > 0 ? (m.created_at || new Date().toISOString()) : null,
+              paid_at: actualPaid > 0 ? (m.join_date ? `${m.join_date}T12:00:00.000Z` : `${monthStart}T12:00:00.000Z`) : null,
               payment_method: 'cash',
             };
           });
