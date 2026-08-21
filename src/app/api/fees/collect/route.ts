@@ -10,7 +10,12 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { feeIds, amountPaid, discount, paymentMethod } = body;
+  const { feeIds, amountPaid, discount, paymentMethod, paidAt, paid_at } = body;
+
+  const rawPaidAt = paidAt || paid_at;
+  const paymentTimestamp = rawPaidAt
+    ? (typeof rawPaidAt === 'string' && rawPaidAt.length === 10 ? `${rawPaidAt}T12:00:00.000Z` : new Date(rawPaidAt).toISOString())
+    : new Date().toISOString();
 
   // Support legacy single feeId for backward compatibility
   const legacyFeeId = body.feeId;
@@ -44,7 +49,7 @@ export async function POST(request: Request) {
         paid: true,
         amount_paid: feeRecord.amount,
         discount: 0,
-        paid_at: new Date().toISOString(),
+        paid_at: paymentTimestamp,
         payment_method: method,
         collected_by: user.id,
       })
@@ -116,7 +121,7 @@ export async function POST(request: Request) {
       amount_paid: newAmountPaid,
       discount: (Number(record.discount) || 0) + recordDiscount,
       paid: isFullyPaid,
-      paid_at: newAmountPaid > 0 ? (record.paid_at || new Date().toISOString()) : null,
+      paid_at: newAmountPaid > 0 ? paymentTimestamp : null,
       payment_method: method,
       collected_by: user.id,
     });

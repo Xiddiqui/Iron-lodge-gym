@@ -345,8 +345,15 @@ function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
   const daysInNextMonth = new Date(nextYear, nextMonth, 0).getDate();
   const billingDay = Math.min(joinDay, daysInNextMonth);
   const nextDueDateStr = `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(billingDay).padStart(2, '0')}`;
-
   return formatDate(nextDueDateStr);
+}
+
+function getTodayLocalDateString(): string {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 export default function MembersPage() {
@@ -464,6 +471,7 @@ export default function MembersPage() {
   const [payDiscount, setPayDiscount] = useState('0');
   const [payAmountReceived, setPayAmountReceived] = useState('');
   const [payMethod, setPayMethod] = useState('cash');
+  const [payDate, setPayDate] = useState(() => getTodayLocalDateString());
 
   // Announcements State
   const [announcementOpen, setAnnouncementOpen] = useState(false);
@@ -1223,11 +1231,23 @@ export default function MembersPage() {
 
   // Bulk payment mutation
   const bulkPayMutation = useMutation({
-    mutationFn: async ({ feeIds, amountPaid, discount, paymentMethod }: { feeIds: string[]; amountPaid: number; discount: number; paymentMethod: string }) => {
+    mutationFn: async ({
+      feeIds,
+      amountPaid,
+      discount,
+      paymentMethod,
+      paidAt,
+    }: {
+      feeIds: string[];
+      amountPaid: number;
+      discount: number;
+      paymentMethod: string;
+      paidAt?: string;
+    }) => {
       const res = await fetch('/api/fees/collect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ feeIds, amountPaid, discount, paymentMethod }),
+        body: JSON.stringify({ feeIds, amountPaid, discount, paymentMethod, paidAt }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -1473,6 +1493,7 @@ export default function MembersPage() {
     setPayDiscount('0');
     setPayAmountReceived('');
     setPayMethod('cash');
+    setPayDate(getTodayLocalDateString());
     setPayModalOpen(true);
   }
 
@@ -1497,6 +1518,7 @@ export default function MembersPage() {
       amountPaid: payModalReceivedNum,
       discount: payModalDiscountNum,
       paymentMethod: payMethod,
+      paidAt: payDate || getTodayLocalDateString(),
     });
   }
 
@@ -2840,6 +2862,27 @@ export default function MembersPage() {
                   {payModalUnpaidFees.length} unpaid month{payModalUnpaidFees.length !== 1 ? 's' : ''}
                   {payModalUnpaidFees.length > 0 && ` × ${formatCurrency((payModalMember.monthly_fee || 0) + (payModalMember.training_fees || 0))}/mo`}
                 </div>
+              </div>
+
+              {/* Payment Received On Date */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm font-medium flex items-center gap-1.5">
+                    <CalendarDays className="h-4 w-4 text-primary" />
+                    Payment Received On
+                  </Label>
+                  <span className="text-[11px] text-muted-foreground">
+                    Joined: {formatDate(payModalMember.join_date)}
+                  </span>
+                </div>
+                <Input 
+                  type="date" 
+                  value={payDate} 
+                  onChange={(e) => setPayDate(e.target.value)} 
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  ℹ️ Next 30 days of membership is counted from joining date. This payment date is for collection reference.
+                </p>
               </div>
 
               {/* Discount Field */}
