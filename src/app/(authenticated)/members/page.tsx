@@ -16,7 +16,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
-import { CameraPermissionDialog } from '@/components/ui/camera-permission-dialog';
 import { toast } from 'sonner';
 import { isMemberAssignedToStaff, embedStaffIdsInNotes, stripStaffIdsFromNotes, getAssignedStaffIds } from '@/lib/staff-assignments';
 import { PAYMENT_METHODS } from '@/lib/constants';
@@ -460,8 +459,6 @@ export default function MembersPage() {
 
   // Webcam states & refs
   const [isCameraActive, setIsCameraActive] = useState(false);
-  const [cameraPermissionOpen, setCameraPermissionOpen] = useState(false);
-  const [cameraInsecureContext, setCameraInsecureContext] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -722,12 +719,6 @@ export default function MembersPage() {
   };
 
   const startCamera = async () => {
-    // Check if running in a secure context (HTTPS or localhost)
-    if (typeof window !== 'undefined' && !window.isSecureContext) {
-      setCameraInsecureContext(true);
-      setCameraPermissionOpen(true);
-      return;
-    }
     try {
       stopCamera();
       const mediaStream = await navigator.mediaDevices.getUserMedia({ video: { width: 400, height: 400, facingMode: 'user' } });
@@ -736,17 +727,8 @@ export default function MembersPage() {
         videoRef.current.srcObject = mediaStream;
       }
       setIsCameraActive(true);
-    } catch (err: any) {
-      // NotAllowedError  – user denied permission OR browser blocked it
-      // NotFoundError    – no camera device found
-      if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
-        setCameraInsecureContext(false);
-        setCameraPermissionOpen(true);
-      } else if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
-        toast.error('No camera found. Please connect a webcam and try again.');
-      } else {
-        toast.error('Unable to access camera. Please check your camera and try again.');
-      }
+    } catch (err) {
+      toast.error('Unable to access camera. Please check permissions.');
     }
   };
 
@@ -3524,13 +3506,6 @@ export default function MembersPage() {
         photoUrl={fullPhotoPreview.photoUrl}
         title={fullPhotoPreview.title}
         subtitle={fullPhotoPreview.subtitle}
-      />
-
-      {/* Camera Permission Guide Dialog */}
-      <CameraPermissionDialog
-        open={cameraPermissionOpen}
-        onClose={() => setCameraPermissionOpen(false)}
-        isInsecureContext={cameraInsecureContext}
       />
     </div>
   );

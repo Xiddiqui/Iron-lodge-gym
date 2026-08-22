@@ -446,11 +446,6 @@ export function BiometricAlertsProvider({
     if (seenIdsRef.current.has(notification.id)) return;
     seenIdsRef.current.add(notification.id);
 
-    // Notify any active page/component immediately to refresh tables
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('biometric-punch', { detail: notification }));
-    }
-
     setAlerts((prev) => {
       const updated = [...prev, notification];
       return updated.slice(-5);

@@ -33,7 +33,6 @@ import {
   ZoomIn,
 } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
-import { CameraPermissionDialog } from '@/components/ui/camera-permission-dialog';
 import { toast } from 'sonner';
 
 interface Trainer {
@@ -84,8 +83,6 @@ export default function TrainersPage() {
 
   // Webcam state & refs
   const [isCameraActive, setIsCameraActive] = useState(false);
-  const [cameraPermissionOpen, setCameraPermissionOpen] = useState(false);
-  const [cameraInsecureContext, setCameraInsecureContext] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -164,12 +161,6 @@ export default function TrainersPage() {
   };
 
   const startCamera = async () => {
-    // Check if running in a secure context (HTTPS or localhost)
-    if (typeof window !== 'undefined' && !window.isSecureContext) {
-      setCameraInsecureContext(true);
-      setCameraPermissionOpen(true);
-      return;
-    }
     try {
       stopCamera();
       const mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -180,15 +171,8 @@ export default function TrainersPage() {
         videoRef.current.srcObject = mediaStream;
       }
       setIsCameraActive(true);
-    } catch (err: any) {
-      if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
-        setCameraInsecureContext(false);
-        setCameraPermissionOpen(true);
-      } else if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
-        toast.error('No camera found. Please connect a webcam and try again.');
-      } else {
-        toast.error('Unable to access camera. Please check your camera and try again.');
-      }
+    } catch (err) {
+      toast.error('Unable to access camera. Please check camera permissions.');
     }
   };
 
@@ -849,13 +833,6 @@ export default function TrainersPage() {
         photoUrl={fullPhotoPreview.photoUrl}
         title={fullPhotoPreview.title}
         subtitle={fullPhotoPreview.subtitle}
-      />
-
-      {/* Camera Permission Guide Dialog */}
-      <CameraPermissionDialog
-        open={cameraPermissionOpen}
-        onClose={() => setCameraPermissionOpen(false)}
-        isInsecureContext={cameraInsecureContext}
       />
     </div>
   );
