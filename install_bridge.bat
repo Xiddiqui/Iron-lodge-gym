@@ -114,6 +114,7 @@ echo import sys
 echo import time
 echo import argparse
 echo from datetime import datetime
+echo import socket
 echo.
 echo try:
 echo     from zk import ZK
@@ -127,6 +128,8 @@ echo     from zk import ZK
 echo.
 echo import requests
 echo.
+echo session = requests.Session(^)
+echo.
 echo def normalize_url(url: str^) -^> str:
 echo     url = (url or ""^).strip(^).rstrip("/"^)
 echo     if not url:
@@ -138,23 +141,38 @@ echo.
 echo def send_punch_to_webapp(server_url, user_id, timestamp_str^):
 echo     cdata_endpoint = f"{server_url}/api/iclock/cdata?table=ATTLOG^&SN=K50_LOCAL_BRIDGE"
 echo     body = f"{user_id}\t{timestamp_str}\t0\t1\t0\t0\t0"
-echo     print(f"\n[Fingerprint Punch] User ID: {user_id} ^| Time: {timestamp_str}"^)
+echo     print(f"\n[⚡ Real-Time Punch] User ID: {user_id} ^| Time: {timestamp_str}"^)
 echo     try:
-echo         res = requests.post(
+echo         res = session.post(
 echo             cdata_endpoint,
 echo             data=body,
 echo             headers={"Content-Type": "text/plain; charset=utf-8"},
-echo             timeout=10,
+echo             timeout=5,
 echo         ^)
 echo         if res.status_code == 200:
-echo             print(f"[Web Sync] [OK] Sent punch for User #{user_id} to web app -> Success! ({res.text.strip()})"^)
+echo             print(f"[Web Sync] [OK] Instant sync User #{user_id} -> Success! ({res.text.strip()})"^)
+echo             return True
 echo         else:
 echo             print(f"[Web Sync] [WARN] Web app returned status {res.status_code}: {res.text}"^)
+echo             return False
 echo     except Exception as req_err:
 echo         print(f"[Web Sync] [ERROR] Failed to reach web app: {req_err}"^)
+echo         return False
+echo.
+echo def get_device_attendance_count(conn^):
+echo     try:
+echo         if hasattr(conn, 'get_attendance_count'^):
+echo             return conn.get_attendance_count(^)
+echo         if hasattr(conn, 'read_sizes'^):
+echo             sizes = conn.read_sizes(^)
+echo             if isinstance(sizes, dict^) and 'attendance' in sizes:
+echo                 return sizes['attendance']
+echo     except Exception:
+echo         pass
+echo     return None
 echo.
 echo def main(^):
-echo     parser = argparse.ArgumentParser(description="ZKTeco K50 Bridge to Iron Lodge Gym Web App"^)
+echo     parser = argparse.ArgumentParser(description="ZKTeco K50 High-Speed Bridge"^)
 echo     parser.add_argument("--ip", required=True, help="IP address of the K50 device"^)
 echo     parser.add_argument("--port", type=int, default=4370, help="Port of K50 device"^)
 echo     parser.add_argument("--server", default="https://ironlodgegym.com", help="Live web app URL"^)
@@ -164,80 +182,102 @@ echo     device_ip = args.ip
 echo     device_port = args.port
 echo     server_url = normalize_url(args.server^)
 echo.
-echo     print("=" * 60^)
-echo     print("  IRON LODGE GYM -- ZKTeco K50 Live Biometric Bridge"^)
-echo     print("=" * 60^)
+echo     print("=" * 65^)
+echo     print("  IRON LODGE GYM -- ZKTeco K50 Instant Biometric Bridge"^)
+echo     print("=" * 65^)
 echo     print(f"  Target Device IP : {device_ip}:{device_port}"^)
 echo     print(f"  Target Web App   : {server_url}"^)
-echo     print("=" * 60^)
+echo     print("=" * 65^)
 echo.
 echo     try:
 echo         test_url = f"{server_url}/api/iclock/cdata?SN=K50_LOCAL_BRIDGE"
-echo         res = requests.get(test_url, timeout=8^)
+echo         res = session.get(test_url, timeout=6^)
 echo         if res.status_code == 200:
-echo             print(f"[Web Sync] [OK] Successfully verified connection to web app: {server_url}"^)
+echo             print(f"[Web Sync] [OK] Successfully verified connection: {server_url}"^)
 echo         else:
 echo             print(f"[Web Sync] [WARN] Web server replied with status {res.status_code}"^)
 echo     except Exception as e:
-echo         print(f"[Web Sync] [WARN] Could not reach web app ({e}). Bridge will retry punches automatically."^)
+echo         print(f"[Web Sync] [WARN] Could not reach web app ({e}). Bridge will retry on punches."^)
 echo.
 echo     force_udp_modes = [False, True]
+echo     seen_records = set(^)
+echo.
 echo     while True:
 echo         conn = None
 echo         connected = False
 echo         for udp in force_udp_modes:
 echo             mode_name = "UDP" if udp else "TCP"
 echo             try:
-echo                 print(f"\n[Bridge] Trying {mode_name} connection to ZKTeco K50 at {device_ip}:{device_port}..."^)
-echo                 zk = ZK(device_ip, port=device_port, timeout=8, password=0, force_udp=udp^)
+echo                 print(f"\n[Bridge] Connecting to K50 via {mode_name} ({device_ip}:{device_port})..."^)
+echo                 zk = ZK(device_ip, port=device_port, timeout=5, password=0, force_udp=udp^)
 echo                 zk.omits_ping = True
 echo                 conn = zk.connect(^)
-echo                 print(f"[Bridge] [OK] Connected successfully via {mode_name}! Listening for punches..."^)
+echo                 print(f"[Bridge] [OK] Connected via {mode_name}! Real-time listener active..."^)
 echo                 connected = True
 echo                 break
 echo             except Exception as conn_err:
 echo                 print(f"[Bridge] {mode_name} connection attempt failed ({conn_err})"^)
+echo.
 echo         if not connected:
 echo             print(f"\n[Bridge] [WARN] Could not connect to K50 at {device_ip}:{device_port}."^)
-echo             print(f"  Check: Is {device_ip} the active IP on K50 screen? Is Comm Key set to 0?"^)
-echo             print("[Bridge] Retrying in 5 seconds..."^)
-echo             time.sleep(5^)
+echo             print("[Bridge] Retrying in 4 seconds..."^)
+echo             time.sleep(4^)
 echo             continue
+echo.
 echo         try:
-echo             seen_records = set(^)
 echo             try:
-echo                 print("[Bridge] Checking for punches made while PC was off..."^)
+echo                 print("[Bridge] Syncing today's offline punches..."^)
 echo                 all_logs = conn.get_attendance(^) or []
 echo                 today_str = datetime.now(^).strftime("%%Y-%%m-%%d"^)
 echo                 recent_logs = [r for r in all_logs if r.timestamp.strftime("%%Y-%%m-%%d"^) >= today_str]
-echo                 print(f"[Bridge] Found {len(recent_logs)} punch records for today. Syncing to web app..."^)
+echo                 print(f"[Bridge] Loaded {len(all_logs)} total logs ({len(recent_logs)} today)."^)
 echo                 for rec in recent_logs:
 echo                     key = (str(rec.user_id^), rec.timestamp.strftime("%%Y-%%m-%%d %%H:%%M:%%S"^)^)
-echo                     seen_records.add(key^)
-echo                     send_punch_to_webapp(server_url, rec.user_id, rec.timestamp.strftime("%%Y-%%m-%%d %%H:%%M:%%S"^)^)
-echo                 for rec in all_logs:
-echo                     seen_records.add((str(rec.user_id^), rec.timestamp.strftime("%%Y-%%m-%%d %%H:%%M:%%S"^)^)^)
-echo                 print("[Bridge] Sync complete. Listening for new punches..."^)
-echo             except Exception as sync_err:
-echo                 print(f"[Bridge] Initial offline sync notice: {sync_err}"^)
-echo.
-echo             try:
-echo                 for attendance in conn.live_capture(^):
-echo                     if attendance is None:
-echo                         continue
-echo                     user_id = str(attendance.user_id^)
-echo                     timestamp_str = attendance.timestamp.strftime('%%Y-%%m-%%d %%H:%%M:%%S'^)
-echo                     key = (user_id, timestamp_str^)
 echo                     if key not in seen_records:
 echo                         seen_records.add(key^)
-echo                         send_punch_to_webapp(server_url, user_id, timestamp_str^)
-echo             except Exception as live_err:
-echo                 print(f"[Bridge] Live capture ended ({live_err}). Falling back to polling mode..."^)
-echo                 print("[Bridge] Polling mode active -- place your finger on the K50 device..."^)
-echo                 while True:
-echo                     time.sleep(2^)
+echo                         send_punch_to_webapp(server_url, rec.user_id, rec.timestamp.strftime("%%Y-%%m-%%d %%H:%%M:%%S"^)^)
+echo                 for rec in all_logs:
+echo                     seen_records.add((str(rec.user_id^), rec.timestamp.strftime("%%Y-%%m-%%d %%H:%%M:%%S"^)^)^)
+echo                 last_att_count = len(all_logs^)
+echo             except Exception as sync_err:
+echo                 print(f"[Bridge] Initial offline sync notice: {sync_err}"^)
+echo                 last_att_count = 0
+echo.
+echo             print("\n[Bridge] LIVE MONITOR ACTIVE -- Fingerprint punches will show IMMEDIATELY on portal."^)
+echo             live_supported = True
+echo.
+echo             while True:
+echo                 if live_supported:
 echo                     try:
+echo                         for attendance in conn.live_capture(^):
+echo                             if attendance is None:
+echo                                 continue
+echo                             user_id = str(attendance.user_id^)
+echo                             timestamp_str = attendance.timestamp.strftime('%%Y-%%m-%%d %%H:%%M:%%S'^)
+echo                             key = (user_id, timestamp_str^)
+echo                             if key not in seen_records:
+echo                                 seen_records.add(key^)
+echo                                 send_punch_to_webapp(server_url, user_id, timestamp_str^)
+echo                     except (socket.timeout, TimeoutError^):
+echo                         continue
+echo                     except Exception as live_err:
+echo                         err_msg = str(live_err^).lower(^)
+echo                         if "timed out" in err_msg or "timeout" in err_msg:
+echo                             continue
+echo                         print(f"[Bridge] Live capture switching to smart poll ({live_err})..."^)
+echo                         live_supported = False
+echo.
+echo                 if not live_supported:
+echo                     time.sleep(0.3^)
+echo                     try:
+echo                         current_count = get_device_attendance_count(conn^)
+echo                         if current_count is not None and current_count == last_att_count:
+echo                             continue
 echo                         logs = conn.get_attendance(^) or []
+echo                         if current_count is not None:
+echo                             last_att_count = current_count
+echo                         else:
+echo                             last_att_count = len(logs^)
 echo                         for rec in logs:
 echo                             key = (str(rec.user_id^), rec.timestamp.strftime('%%Y-%%m-%%d %%H:%%M:%%S'^)^)
 echo                             if key not in seen_records:
@@ -246,13 +286,14 @@ echo                                 send_punch_to_webapp(server_url, rec.user_i
 echo                     except Exception as poll_err:
 echo                         print(f"[Bridge] Polling read error: {poll_err}"^)
 echo                         break
+echo.
 echo         except KeyboardInterrupt:
 echo             if conn:
 echo                 conn.disconnect(^)
 echo             sys.exit(0^)
 echo         except Exception as e:
 echo             print(f"[Bridge] [ERROR] {e}"^)
-echo             time.sleep(3^)
+echo             time.sleep(2^)
 echo         finally:
 echo             if conn:
 echo                 try:

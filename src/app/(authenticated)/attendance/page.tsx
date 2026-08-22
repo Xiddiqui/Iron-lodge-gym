@@ -179,11 +179,13 @@ export default function AttendancePage() {
     setIsLoadingMemberAtt(true);
     const nextDay = new Date(forDate);
     nextDay.setDate(nextDay.getDate() + 1);
+    const nextDayStr = nextDay.toISOString().slice(0, 10);
+
     const { data, error } = await supabase
       .from('attendance')
       .select('*, members(id, full_name, phone, member_number, photo_url, monthly_fee, training_fees, join_date), profiles(full_name)')
-      .gte('check_in', `${forDate}T00:00:00`)
-      .lt('check_in', nextDay.toISOString().slice(0, 10) + 'T00:00:00')
+      .gte('check_in', `${forDate}T00:00:00+05:00`)
+      .lt('check_in', `${nextDayStr}T00:00:00+05:00`)
       .order('check_in', { ascending: false });
     // Note: guest_name and notes columns added in migration 019
 
@@ -282,7 +284,7 @@ export default function AttendancePage() {
   }, [staffDate, isAdmin, loadStaffAttendance]);
 
   // ─────────────────────────────────────────────────────────────────
-  // REALTIME: Member attendance socket & fee records socket
+  // REALTIME: Member attendance socket, fee records socket & instant event listeners
   // ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     const channel = supabase
@@ -309,9 +311,22 @@ export default function AttendancePage() {
       )
       .subscribe();
 
+    // Instant sync whenever a biometric punch notification arrives
+    const handleBiometricPunch = () => {
+      loadMemberAttendance(date);
+    };
+    window.addEventListener('biometric-punch', handleBiometricPunch);
+
+    // Fast polling fallback (every 3 seconds) for live attendance
+    const pollInterval = setInterval(() => {
+      loadMemberAttendance(date);
+    }, 3000);
+
     return () => {
       supabase.removeChannel(channel);
       supabase.removeChannel(feeChannel);
+      window.removeEventListener('biometric-punch', handleBiometricPunch);
+      clearInterval(pollInterval);
     };
   }, [date, loadMemberAttendance]);
 

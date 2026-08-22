@@ -42,17 +42,21 @@ export async function GET(request: Request) {
   // iClock option response — device settings
   // TimeZone=5 = UTC+5 (Pakistan Standard Time)
   // Realtime=1 = push punches immediately, don't batch
+  // Delay=1 = 1 second poll/heartbeat delay
+  // ErrorDelay=3 = quick retry on network hiccup
   const optionResponse = [
     `GET OPTION FROM: ${sn}`,
     'Stamp=9999',
     'OpStamp=0',
-    'ErrorDelay=30',
-    'Delay=10',
+    'ErrorDelay=3',
+    'Delay=1',
     'TransTimes=00:00;14:05',
     'TransInterval=1',
     'TransFlag=1111000000',
     'TimeZone=5',
     'Realtime=1',
+    'PushProtVer=2.4.1',
+    'PushOptionsFlag=1',
     'Encrypt=None',
   ].join('\n');
 
