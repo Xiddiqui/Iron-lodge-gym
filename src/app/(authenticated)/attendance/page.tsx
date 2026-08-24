@@ -105,13 +105,23 @@ export default function AttendancePage() {
       };
     }
 
-    // Filter unpaid records
+    // Filter unpaid records — exclude future fee records (period_end not yet reached)
+    // A fee whose period_end is still in the future is not yet due; don't flag it.
     const unpaidRecords = memberFees.filter((fr) => {
       const feeAmount = Number(fr.amount) || 0;
       const discount = Number(fr.discount) || 0;
       const amountPaid = Number(fr.amount_paid) || 0;
       const netDue = Math.max(0, feeAmount - discount - amountPaid);
-      return !fr.paid && netDue > 0;
+      if (!fr.paid && netDue > 0) {
+        // If there's a period_end and it's in the future, this fee isn't due yet
+        if (fr.period_end) {
+          const periodEnd = new Date(fr.period_end);
+          periodEnd.setHours(23, 59, 59, 999);
+          if (periodEnd > today) return false; // not yet due — skip
+        }
+        return true;
+      }
+      return false;
     });
 
     if (unpaidRecords.length === 0) {

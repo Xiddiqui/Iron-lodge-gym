@@ -97,7 +97,7 @@ export default function DashboardPage() {
   const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [trendMonths, setTrendMonths] = useState(6);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalFilter, setModalFilter] = useState<'today' | '7days' | '30days'>('today');
+  const [modalDate, setModalDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [isWalkinModalOpen, setIsWalkinModalOpen] = useState(false);
   const [deletingWalkinId, setDeletingWalkinId] = useState<string | null>(null);
 
@@ -412,10 +412,14 @@ export default function DashboardPage() {
   }, 0);
 
   const filteredModalPayments = combinedPaymentRecords.filter((f: any) => {
-    if (modalFilter === 'today') return isToday(f.paid_at);
-    if (modalFilter === '7days') return isPastNDays(f.paid_at, 7);
-    if (modalFilter === '30days') return isPastNDays(f.paid_at, 30);
-    return true;
+    if (!f.paid_at) return false;
+    const d = new Date(f.paid_at);
+    const [y, mo, day] = modalDate.split('-').map(Number);
+    return (
+      d.getFullYear() === y &&
+      d.getMonth() + 1 === mo &&
+      d.getDate() === day
+    );
   });
 
   const modalTotalCollected = filteredModalPayments.reduce((sum: number, f: any) => {
@@ -504,7 +508,7 @@ export default function DashboardPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => { setModalFilter('today'); setIsModalOpen(true); }}
+            onClick={() => { setModalDate(new Date().toISOString().slice(0, 10)); setIsModalOpen(true); }}
             className="ml-2 border-primary/30 text-primary hover:bg-primary/10 text-xs"
           >
             View Details <ArrowUpRight className="h-3 w-3 ml-1" />
@@ -767,7 +771,7 @@ export default function DashboardPage() {
               variant="ghost"
               size="sm"
               onClick={() => {
-                setModalFilter('today');
+                setModalDate(new Date().toISOString().slice(0, 10));
                 setIsModalOpen(true);
               }}
               className="text-xs text-primary hover:text-primary hover:bg-primary/10 h-7 px-2 font-medium"
@@ -885,43 +889,25 @@ export default function DashboardPage() {
             </DialogDescription>
           </DialogHeader>
 
-          {/* Filter Buttons */}
-          <div className="flex items-center gap-2 my-3 p-1 bg-muted/50 rounded-lg border border-border/50">
+          {/* Date Picker */}
+          <div className="flex items-center gap-2 my-3">
+            <label className="flex items-center gap-2 text-xs text-muted-foreground font-medium shrink-0">
+              <Calendar className="h-4 w-4" />
+              Select Date
+            </label>
+            <input
+              type="date"
+              value={modalDate}
+              max={new Date().toISOString().slice(0, 10)}
+              onChange={(e) => setModalDate(e.target.value)}
+              className="flex-1 h-9 rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer"
+            />
             <button
               type="button"
-              onClick={() => setModalFilter('today')}
-              className={cn(
-                'flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer',
-                modalFilter === 'today'
-                  ? 'bg-background text-foreground shadow-sm font-semibold'
-                  : 'text-muted-foreground hover:text-foreground'
-              )}
+              onClick={() => setModalDate(new Date().toISOString().slice(0, 10))}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0 underline underline-offset-2"
             >
-              Today ({combinedPaymentRecords.filter((f: any) => isToday(f.paid_at)).length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setModalFilter('7days')}
-              className={cn(
-                'flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer',
-                modalFilter === '7days'
-                  ? 'bg-background text-foreground shadow-sm font-semibold'
-                  : 'text-muted-foreground hover:text-foreground'
-              )}
-            >
-              Past 7 Days ({combinedPaymentRecords.filter((f: any) => isPastNDays(f.paid_at, 7)).length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setModalFilter('30days')}
-              className={cn(
-                'flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer',
-                modalFilter === '30days'
-                  ? 'bg-background text-foreground shadow-sm font-semibold'
-                  : 'text-muted-foreground hover:text-foreground'
-              )}
-            >
-              Past 30 Days ({combinedPaymentRecords.filter((f: any) => isPastNDays(f.paid_at, 30)).length})
+              Today
             </button>
           </div>
 
