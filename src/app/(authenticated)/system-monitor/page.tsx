@@ -4,13 +4,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import {
   Activity, Wifi, WifiOff, Server, Cpu, Clock, RefreshCw,
-  CheckCircle, XCircle, Monitor, Database,
+  CheckCircle, XCircle, Monitor, Database, AlertTriangle, Laptop,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts';
-import { format, formatDistanceToNow } from 'date-fns';
+import { format, formatDistanceToNow, differenceInMinutes } from 'date-fns';
 import { supabase } from '@/lib/supabase/client';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,9 +65,105 @@ function fmtMem(mb: number | null) {
   return `${mb.toFixed(1)} MB`;
 }
 
+/** Returns a human-friendly label for a bridge SN */
+function deviceLabel(sn: string) {
+  if (sn === 'K50_LOCAL_BRIDGE') return 'Windows 7 Bridge PC';
+  if (sn.startsWith('K50')) return `ZKTeco K50 (${sn})`;
+  return sn;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Big top-of-page banner — the first thing you see */
+function BridgeStatusBanner({ devices }: { devices: BridgeDevice[] }) {
+  const bridge = devices.find((d) => d.sn === 'K50_LOCAL_BRIDGE') ?? devices[0];
+  if (!bridge) {
+    return (
+      <div className="rounded-2xl border border-dashed border-yellow-500/40 bg-yellow-500/5 p-6 flex items-center gap-4">
+        <AlertTriangle className="h-8 w-8 text-yellow-400 shrink-0" />
+        <div>
+          <p className="font-bold text-yellow-300 text-lg">Bridge never connected</p>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            The Windows 7 bridge script has not contacted this server yet.
+            Start the script on the Windows PC and check again.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const minutesAgo = differenceInMinutes(new Date(), new Date(bridge.last_seen));
+  const connected = bridge.is_connected;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -6 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={`rounded-2xl border p-6 flex flex-col sm:flex-row items-start sm:items-center gap-5 ${
+        connected
+          ? 'border-emerald-500/30 bg-emerald-500/8'
+          : 'border-red-500/40 bg-red-500/8'
+      }`}
+    >
+      {/* Icon */}
+      <div
+        className={`rounded-xl p-4 shrink-0 ${
+          connected ? 'bg-emerald-500/15' : 'bg-red-500/15'
+        }`}
+      >
+        {connected ? (
+          <Wifi className="h-8 w-8 text-emerald-400" />
+        ) : (
+          <WifiOff className="h-8 w-8 text-red-400" />
+        )}
+      </div>
+
+      {/* Main info */}
+      <div className="flex-1 min-w-0">
+        <div className="flex flex-wrap items-center gap-3 mb-1">
+          <h2 className={`text-xl font-bold ${connected ? 'text-emerald-300' : 'text-red-300'}`}>
+            <Laptop className="inline h-5 w-5 mr-1.5 -mt-0.5" />
+            Windows 7 Bridge PC — {connected ? '🟢 ONLINE' : '🔴 OFFLINE'}
+          </h2>
+        </div>
+
+        {connected ? (
+          <p className="text-sm text-muted-foreground">
+            Bridge is running and connected.&nbsp;
+            Last heartbeat <strong className="text-emerald-400">{minutesAgo === 0 ? 'just now' : `${minutesAgo} min ago`}</strong>
+            &nbsp;at {format(new Date(bridge.last_seen), 'HH:mm:ss')}.
+            {bridge.ip_address && <span> &nbsp;IP: <code className="text-xs bg-muted px-1 rounded">{bridge.ip_address}</code></span>}
+          </p>
+        ) : (
+          <p className="text-sm text-red-300/80">
+            ⚠️ No heartbeat for <strong className="text-red-300">{minutesAgo} minutes</strong>.
+            Last seen at {format(new Date(bridge.last_seen), 'HH:mm:ss dd MMM')}.
+            <br />
+            <span className="text-muted-foreground">
+              Check the Windows 7 PC — the bridge script may have crashed, the PC may be off,
+              or the internet connection may be down.
+            </span>
+          </p>
+        )}
+      </div>
+
+      {/* Status badge */}
+      <span
+        className={`shrink-0 inline-flex items-center gap-2 rounded-xl px-4 py-2 text-base font-bold ${
+          connected
+            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+            : 'bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse'
+        }`}
+      >
+        {connected ? <CheckCircle className="h-5 w-5" /> : <XCircle className="h-5 w-5" />}
+        {connected ? 'Connected' : 'Disconnected'}
+      </span>
+    </motion.div>
+  );
+}
+
 function StatusBadge({ connected }: { connected: boolean }) {
   return (
     <span
@@ -86,6 +182,7 @@ function StatusBadge({ connected }: { connected: boolean }) {
     </span>
   );
 }
+
 
 function StatCard({
   icon: Icon,
@@ -131,6 +228,7 @@ export default function SystemMonitorPage() {
   const [snapshots, setSnapshots] = useState<SystemSnapshot[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [snapshotting, setSnapshotting] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   // ── Fetch live status ────────────────────────────────────────────────────
@@ -169,6 +267,20 @@ export default function SystemMonitorPage() {
     }, 60_000);
     return () => clearInterval(interval);
   }, [fetchStatus, fetchSnapshots]);
+
+  // ── Manual snapshot trigger ──────────────────────────────────────────────
+  const takeSnapshot = useCallback(async () => {
+    setSnapshotting(true);
+    try {
+      const res = await fetch('/api/system/snapshot', { method: 'POST' });
+      if (res.ok) {
+        await fetchSnapshots();
+        await fetchStatus(true);
+      }
+    } finally {
+      setSnapshotting(false);
+    }
+  }, [fetchSnapshots, fetchStatus]);
 
   // ── Chart data (chronological) ───────────────────────────────────────────
   const chartData = [...snapshots]
@@ -211,6 +323,16 @@ export default function SystemMonitorPage() {
           <Button
             size="sm"
             variant="outline"
+            onClick={takeSnapshot}
+            disabled={snapshotting}
+            className="gap-2"
+          >
+            <Database className={`h-3.5 w-3.5 ${snapshotting ? 'animate-pulse' : ''}`} />
+            {snapshotting ? 'Saving…' : 'Take Snapshot'}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
             onClick={() => { fetchStatus(false); fetchSnapshots(); }}
             disabled={refreshing}
             className="gap-2"
@@ -227,23 +349,19 @@ export default function SystemMonitorPage() {
         </div>
       ) : (
         <>
-          {/* ── Bridge Status Card ────────────────────────────────────────── */}
-          <motion.section
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.05 }}
-          >
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3 flex items-center gap-2">
-              <Wifi className="h-4 w-4" /> Bridge &amp; Device Status
-            </h2>
-            {bridge?.devices.length === 0 ? (
-              <div className="rounded-xl border border-dashed p-6 text-center text-muted-foreground text-sm">
-                <WifiOff className="h-8 w-8 mx-auto mb-2 opacity-40" />
-                No devices have contacted the server yet.
-                <br />
-                Start the bridge script or power on the K50 device to see status here.
-              </div>
-            ) : (
+          {/* ── Big Bridge Status Banner (most important — top of page) ────── */}
+          <BridgeStatusBanner devices={bridge?.devices ?? []} />
+
+          {/* ── Per-device cards (only shown if >1 device) ────────────────── */}
+          {(bridge?.devices.length ?? 0) > 1 && (
+            <motion.section
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.05 }}
+            >
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3 flex items-center gap-2">
+                <Wifi className="h-4 w-4" /> All Connected Devices
+              </h2>
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {bridge?.devices.map((device) => (
                   <motion.div
@@ -263,7 +381,7 @@ export default function SystemMonitorPage() {
                         ) : (
                           <WifiOff className="h-4 w-4 text-red-400" />
                         )}
-                        <span className="font-semibold text-sm font-mono">{device.sn}</span>
+                        <span className="font-semibold text-sm">{deviceLabel(device.sn)}</span>
                       </div>
                       <StatusBadge connected={device.is_connected} />
                     </div>
@@ -286,8 +404,8 @@ export default function SystemMonitorPage() {
                   </motion.div>
                 ))}
               </div>
-            )}
-          </motion.section>
+            </motion.section>
+          )}
 
           {/* ── Latest Server Snapshot ─────────────────────────────────────── */}
           <motion.section

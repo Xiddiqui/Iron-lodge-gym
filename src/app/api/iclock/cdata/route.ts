@@ -49,6 +49,56 @@ async function recordBridgeHeartbeat(sn: string, ipAddress?: string) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// maybeCreateSnapshot — fires a system snapshot in the background if 15+ min
+// have elapsed since the last one. Piggybacks on the bridge GET handshake so
+// snapshots are recorded every ~15 min without needing a paid Vercel cron plan.
+// ─────────────────────────────────────────────────────────────────────────────
+const SNAPSHOT_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+
+async function maybeCreateSnapshot(bridgeSn: string) {
+  try {
+    const adminClient = getAdminClient();
+
+    // Check when the last snapshot was saved
+    const { data: lastSnap } = await adminClient
+      .from('system_snapshots')
+      .select('created_at')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const lastAt = lastSnap?.created_at ? new Date(lastSnap.created_at).getTime() : 0;
+    if (Date.now() - lastAt < SNAPSHOT_INTERVAL_MS) return; // too soon
+
+    // Collect metrics
+    const mem = process.memoryUsage();
+    const memUsedMb = parseFloat((mem.heapUsed / 1024 / 1024).toFixed(2));
+    const memTotalMb = parseFloat((mem.heapTotal / 1024 / 1024).toFixed(2));
+    const uptimeSeconds = parseFloat(process.uptime().toFixed(2));
+
+    // Bridge is connected — we're inside the GET handler so it's definitely alive
+    await adminClient.from('system_snapshots').insert({
+      node_version: process.version,
+      next_version: null, // not available at runtime without import
+      vercel_region: process.env.VERCEL_REGION ?? null,
+      vercel_env: process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? null,
+      memory_used_mb: memUsedMb,
+      memory_total_mb: memTotalMb,
+      process_uptime_s: uptimeSeconds,
+      bridge_connected: true,
+      bridge_sn: bridgeSn,
+      bridge_last_seen: new Date().toISOString(),
+      server_ping_ms: null,
+    });
+
+    console.log(`[SystemMonitor] Snapshot saved via bridge heartbeat — mem: ${memUsedMb} MB`);
+  } catch (err) {
+    // Non-critical — never let snapshot errors affect the device response
+    console.warn('[SystemMonitor] Snapshot skipped:', err);
+  }
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const sn = searchParams.get('SN') || 'UNKNOWN';
@@ -58,6 +108,9 @@ export async function GET(request: Request) {
 
   // Record bridge heartbeat so the System Monitor can track connectivity
   await recordBridgeHeartbeat(sn, ip);
+
+  // Piggyback a system snapshot every 15 min (free, no paid cron needed)
+  maybeCreateSnapshot(sn).catch(() => {});
 
   // iClock option response — device settings
   // TimeZone=5 = UTC+5 (Pakistan Standard Time)
