@@ -33,11 +33,31 @@ function getAdminClient() {
 // GET /iclock/cdata  — Device registration / option handshake
 // The K50 calls this first to negotiate settings with the server.
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// recordBridgeHeartbeat — upsert last-seen timestamp for a device/bridge SN
+// Called on every GET handshake and every POST ATTLOG push.
+// ─────────────────────────────────────────────────────────────────────────────
+async function recordBridgeHeartbeat(sn: string, ipAddress?: string) {
+  try {
+    const adminClient = getAdminClient();
+    await adminClient.from('bridge_heartbeats').upsert(
+      { sn, last_seen: new Date().toISOString(), ip_address: ipAddress ?? null, updated_at: new Date().toISOString() },
+      { onConflict: 'sn' }
+    );
+  } catch {
+    // Non-critical — never block the device response for a heartbeat failure
+  }
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const sn = searchParams.get('SN') || 'UNKNOWN';
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? undefined;
 
   console.log(`[Biometric] Device handshake — SN: ${sn}`);
+
+  // Record bridge heartbeat so the System Monitor can track connectivity
+  await recordBridgeHeartbeat(sn, ip);
 
   // iClock option response — device settings
   // TimeZone=5 = UTC+5 (Pakistan Standard Time)
@@ -77,6 +97,10 @@ export async function POST(request: Request) {
   const { searchParams } = new URL(request.url);
   const table = (searchParams.get('table') || '').toUpperCase();
   const sn = searchParams.get('SN') || 'UNKNOWN';
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? undefined;
+
+  // Record bridge heartbeat on every POST regardless of table type
+  await recordBridgeHeartbeat(sn, ip);
 
   // Only process attendance logs; acknowledge all other table types
   if (table !== 'ATTLOG') {
@@ -93,6 +117,7 @@ export async function POST(request: Request) {
   } catch {
     return new Response('OK', { status: 200, headers: { 'Content-Type': 'text/plain' } });
   }
+
 
   console.log(`[Biometric] ATTLOG from SN=${sn}:\n${body}`);
 
