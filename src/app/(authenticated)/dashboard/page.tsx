@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { useRole } from '@/hooks/use-role';
-import { formatCurrency, formatDate, formatDateTime, formatMonthYear } from '@/lib/format';
+import { formatCurrency, formatDate, formatDateTime, formatTime, formatMonthYear, getTodayLocalDateString } from '@/lib/format';
 import { useGymSettings } from '@/hooks/use-gym-settings';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -13,9 +13,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Button } from '@/components/ui/button';
 import { motion, useMotionValue, useTransform, animate } from 'framer-motion';
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
-import { Wallet, Receipt, Zap, UserCheck, ArrowUpRight, ArrowDownRight, TrendingUp, Target, History, Landmark, Trash2, Calendar, Loader2 } from 'lucide-react';
+import { Wallet, Receipt, Zap, UserCheck, ArrowUpRight, ArrowDownRight, TrendingUp, Target, History, Landmark, Trash2, Calendar, Loader2, User } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 
 function AnimatedNumber({ value, format }: { value: number; format: (n: number) => string }) {
   const motionVal = useMotionValue(0);
@@ -78,13 +79,8 @@ function formatPaymentDateTime(dateStr: string | null) {
 
 function formatPaymentTime(dateStr: string | null) {
   if (!dateStr) return 'N/A';
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return 'N/A';
-  return d.toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
+  const val = formatTime(dateStr);
+  return val === '—' ? 'N/A' : val;
 }
 
 const CHART_COLORS = { revenue: '#a3e635', expenses: '#ef4444', profit: '#22c55e' };
@@ -97,9 +93,16 @@ export default function DashboardPage() {
   const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [trendMonths, setTrendMonths] = useState(6);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalDate, setModalDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [modalDate, setModalDate] = useState<string>(() => getTodayLocalDateString());
   const [isWalkinModalOpen, setIsWalkinModalOpen] = useState(false);
   const [deletingWalkinId, setDeletingWalkinId] = useState<string | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<{ open: boolean; photoUrl: string | null; title?: string; subtitle?: string }>({ open: false, photoUrl: null });
+
+  const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
+    if (!photoUrl) return;
+    setPhotoPreview({ open: true, photoUrl, title: title || 'Member Photo', subtitle });
+  };
+
 
   const [year, month] = selectedMonth.split('-').map(Number);
   const monthStart = `${selectedMonth}-01`;
@@ -118,15 +121,36 @@ export default function DashboardPage() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('fee_records')
-        .select('id, amount, amount_paid, paid, paid_at, payment_method, member_id, period_month, period_end, members(full_name, phone)')
+        .select('id, amount, amount_paid, paid, paid_at, payment_method, member_id, period_month, period_end, collected_by, created_at, members(member_number, full_name, phone, photo_url, created_at)')
         .or('paid.eq.true,amount_paid.gt.0')
         .order('paid_at', { ascending: false, nullsFirst: false })
         .limit(300);
 
       if (error) throw error;
+      return (data ?? []).map((r: any) => {
+        let effectivePaidAt = r.paid_at;
+        // If paid_at is the legacy static 12:00:00 or 00:00:00 placeholder, heal with real created_at
+        if (typeof r.paid_at === 'string' && (r.paid_at.includes('T12:00:00') || r.paid_at.includes('T00:00:00'))) {
+          effectivePaidAt = r.created_at || r.members?.created_at || r.paid_at;
+        }
+        return { ...r, paid_at: effectivePaidAt };
+      });
+    },
+  });
+
+
+  // Query profiles for staff name lookup (collected_by / marked_by attribution)
+  const { data: staffProfiles = [] } = useQuery({
+    queryKey: ['dash-profiles'],
+    enabled: role === 'admin',
+    queryFn: async () => {
+      const { data } = await supabase.from('profiles').select('id, full_name, role');
       return data ?? [];
     },
   });
+
+  const staffMap: Record<string, string> = {};
+  (staffProfiles as any[]).forEach((p) => { staffMap[p.id] = p.full_name || 'Staff'; });
 
   // ── Helper: parse walk-in PKR amount from notes string ("1-Day PKR 200")
   const parseWalkinAmount = (notes: string | null): number => {
@@ -142,7 +166,7 @@ export default function DashboardPage() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('attendance')
-        .select('id, guest_name, notes, check_in, source')
+        .select('id, guest_name, notes, check_in, source, marked_by')
         .not('guest_name', 'is', null)
         .order('check_in', { ascending: false })
         .limit(500);
@@ -152,6 +176,7 @@ export default function DashboardPage() {
       return (data ?? []).filter((w: any) => w.guest_name && w.guest_name.trim() !== '');
     },
   });
+
 
   // ── Walk-in stats for selected month
   const walkinThisMonth = walkinRecords.filter((w: any) => {
@@ -392,8 +417,10 @@ export default function DashboardPage() {
     paid: true,
     paid_at: w.check_in,
     payment_method: 'cash',
+    collected_by: w.marked_by || null,
     members: null,
   }));
+
 
   const combinedPaymentRecords = [
     ...allPaymentRecords,
@@ -508,7 +535,7 @@ export default function DashboardPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => { setModalDate(new Date().toISOString().slice(0, 10)); setIsModalOpen(true); }}
+            onClick={() => { setModalDate(getTodayLocalDateString()); setIsModalOpen(true); }}
             className="ml-2 border-primary/30 text-primary hover:bg-primary/10 text-xs"
           >
             View Details <ArrowUpRight className="h-3 w-3 ml-1" />
@@ -771,7 +798,7 @@ export default function DashboardPage() {
               variant="ghost"
               size="sm"
               onClick={() => {
-                setModalDate(new Date().toISOString().slice(0, 10));
+                setModalDate(getTodayLocalDateString());
                 setIsModalOpen(true);
               }}
               className="text-xs text-primary hover:text-primary hover:bg-primary/10 h-7 px-2 font-medium"
@@ -797,35 +824,59 @@ export default function DashboardPage() {
                 <div className="max-h-[280px] overflow-y-auto divide-y divide-border/40">
                   {todayPayments.map((f: any) => {
                     const isWalkin = !!f._isWalkin;
+                    const memberData = f.members as any;
                     const displayName = isWalkin
                       ? (f.guest_name || 'Walk-in Guest')
-                      : ((f.members as any)?.full_name ?? 'Unknown Member');
+                      : (memberData?.full_name ?? 'Unknown Member');
+                    const memberNumber = !isWalkin && memberData?.member_number ? `#${memberData.member_number}` : null;
+                    const memberPhoto = !isWalkin ? memberData?.photo_url : null;
                     const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
                     const totalAmount = Number(f.amount) || 0;
                     const isFullyPaid = f.paid || (amtPaid >= totalAmount && totalAmount > 0);
                     const isPartial = !isFullyPaid && amtPaid > 0;
+                    const receivedBy = f.collected_by ? staffMap[f.collected_by] : null;
 
                     return (
                       <div key={f.id} className="flex items-center justify-between px-5 py-3 hover:bg-accent/30 transition-colors">
                         <div className="flex items-center gap-3">
-                          <div className={`h-8 w-8 rounded-full grid place-items-center text-xs font-bold shrink-0 ${
-                            isWalkin ? 'bg-amber-500/20 text-amber-400' :
-                            isFullyPaid ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'
-                          }`}>
-                            {displayName.slice(0, 1).toUpperCase()}
-                          </div>
+                          {/* Member Photo / Avatar */}
+                          {memberPhoto ? (
+                            <button
+                              type="button"
+                              onClick={() => openFullPhoto(memberPhoto, displayName, memberNumber || undefined)}
+                              className="group relative rounded-full shrink-0 overflow-hidden ring-2 ring-transparent hover:ring-primary/50 transition-all"
+                              title="Click to view photo"
+                            >
+                              <img src={memberPhoto} alt={displayName} className="h-9 w-9 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                            </button>
+                          ) : (
+                            <div className={`h-9 w-9 rounded-full grid place-items-center text-xs font-bold shrink-0 ${
+                              isWalkin ? 'bg-amber-500/20 text-amber-400' :
+                              isFullyPaid ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'
+                            }`}>
+                              {displayName.slice(0, 1).toUpperCase()}
+                            </div>
+                          )}
                           <div>
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
                               <p className="text-sm font-medium">{displayName}</p>
+                              {memberNumber && (
+                                <span className="text-[10px] bg-primary/10 text-primary border border-primary/20 rounded px-1.5 py-0.5 font-mono font-medium">{memberNumber}</span>
+                              )}
                               {isWalkin && (
                                 <span className="text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/20 rounded px-1.5 py-0.5 font-medium">1-Day</span>
                               )}
                             </div>
-                            <div className="flex items-center gap-1.5 mt-0.5">
+                            <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                               <p className="text-xs text-muted-foreground font-mono">{formatPaymentTime(f.paid_at)}</p>
                               {f.payment_method && (
                                 <span className="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground uppercase font-mono">
                                   {f.payment_method}
+                                </span>
+                              )}
+                              {receivedBy && (
+                                <span className="text-[10px] text-muted-foreground flex items-center gap-0.5">
+                                  <User className="h-2.5 w-2.5" />{receivedBy}
                                 </span>
                               )}
                             </div>
@@ -846,6 +897,7 @@ export default function DashboardPage() {
                     );
                   })}
                 </div>
+
               </>
             )}
           </CardContent>
@@ -898,13 +950,13 @@ export default function DashboardPage() {
             <input
               type="date"
               value={modalDate}
-              max={new Date().toISOString().slice(0, 10)}
+              max={getTodayLocalDateString()}
               onChange={(e) => setModalDate(e.target.value)}
               className="flex-1 h-9 rounded-md border border-border bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer"
             />
             <button
               type="button"
-              onClick={() => setModalDate(new Date().toISOString().slice(0, 10))}
+              onClick={() => setModalDate(getTodayLocalDateString())}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0 underline underline-offset-2"
             >
               Today
@@ -937,14 +989,18 @@ export default function DashboardPage() {
             ) : (
               filteredModalPayments.map((f: any) => {
                 const isWalkin = !!f._isWalkin;
+                const memberData = f.members as any;
                 const displayName = isWalkin
                   ? (f.guest_name || '1-Day Guest')
-                  : ((f.members as any)?.full_name ?? 'Unknown Member');
+                  : (memberData?.full_name ?? 'Unknown Member');
+                const memberNumber = !isWalkin && memberData?.member_number ? `#${memberData.member_number}` : null;
+                const memberPhoto = !isWalkin ? memberData?.photo_url : null;
                 const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
                 const totalAmount = Number(f.amount) || 0;
                 const remaining = Math.max(0, totalAmount - amtPaid);
                 const isFullyPaid = f.paid || (amtPaid >= totalAmount && totalAmount > 0);
                 const isPartial = !isFullyPaid && amtPaid > 0;
+                const receivedBy = f.collected_by ? staffMap[f.collected_by] : null;
 
                 return (
                   <div
@@ -952,20 +1008,35 @@ export default function DashboardPage() {
                     className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-lg border border-border/50 bg-accent/20 hover:bg-accent/40 transition-colors gap-2"
                   >
                     <div className="flex items-center gap-3">
-                      <div className={`h-8 w-8 rounded-full grid place-items-center text-xs font-bold shrink-0 ${
-                        isWalkin ? 'bg-amber-500/20 text-amber-400' :
-                        isFullyPaid ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'
-                      }`}>
-                        {displayName.slice(0, 1).toUpperCase()}
-                      </div>
+                      {/* Member Photo / Avatar */}
+                      {memberPhoto ? (
+                        <button
+                          type="button"
+                          onClick={() => openFullPhoto(memberPhoto, displayName, memberNumber || undefined)}
+                          className="group relative rounded-full shrink-0 overflow-hidden ring-2 ring-transparent hover:ring-primary/50 transition-all"
+                          title="Click to view photo"
+                        >
+                          <img src={memberPhoto} alt={displayName} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                        </button>
+                      ) : (
+                        <div className={`h-10 w-10 rounded-full grid place-items-center text-xs font-bold shrink-0 ${
+                          isWalkin ? 'bg-amber-500/20 text-amber-400' :
+                          isFullyPaid ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'
+                        }`}>
+                          {displayName.slice(0, 1).toUpperCase()}
+                        </div>
+                      )}
                       <div className="space-y-0.5">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center flex-wrap gap-1.5">
                           <p className="text-sm font-semibold">{displayName}</p>
+                          {memberNumber && (
+                            <span className="text-[10px] bg-primary/10 text-primary border border-primary/20 rounded px-1.5 py-0.5 font-mono font-medium">{memberNumber}</span>
+                          )}
                           {isWalkin ? (
                             <span className="text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/20 rounded px-1.5 py-0.5 font-medium">1-Day</span>
                           ) : (
-                            (f.members as any)?.phone && (
-                              <span className="text-xs text-muted-foreground">({(f.members as any)?.phone})</span>
+                            memberData?.phone && (
+                              <span className="text-xs text-muted-foreground">({memberData.phone})</span>
                             )
                           )}
                         </div>
@@ -974,6 +1045,12 @@ export default function DashboardPage() {
                           {f.payment_method && (
                             <span className="px-1.5 py-0.5 rounded bg-muted text-[10px] uppercase font-mono text-muted-foreground">
                               {f.payment_method}
+                            </span>
+                          )}
+                          {receivedBy && (
+                            <span className="flex items-center gap-0.5 text-[11px] text-muted-foreground">
+                              <User className="h-3 w-3 shrink-0" />
+                              {receivedBy}
                             </span>
                           )}
                         </div>
@@ -1005,6 +1082,7 @@ export default function DashboardPage() {
               })
             )}
           </div>
+
 
           <DialogFooter className="mt-4 pt-3 border-t border-border">
             <Button variant="outline" size="sm" onClick={() => setIsModalOpen(false)}>
@@ -1122,8 +1200,15 @@ export default function DashboardPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Full-size Member Photo Lightbox */}
+      <PhotoPreviewDialog
+        open={photoPreview.open}
+        onOpenChange={(open) => setPhotoPreview((prev) => ({ ...prev, open }))}
+        photoUrl={photoPreview.photoUrl}
+        title={photoPreview.title}
+        subtitle={photoPreview.subtitle}
+      />
     </div>
   );
 }
-
-

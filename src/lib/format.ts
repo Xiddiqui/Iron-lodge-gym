@@ -27,6 +27,9 @@ export function formatDate(date: string | Date | null | undefined): string {
 
 export function formatDateTime(date: string | Date | null | undefined): string {
   if (!date) return '—';
+  if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return formatDate(date);
+  }
   const d = typeof date === 'string' ? new Date(date) : date;
   if (Number.isNaN(d.getTime())) return '—';
   const day = String(d.getDate()).padStart(2, '0');
@@ -38,6 +41,27 @@ export function formatDateTime(date: string | Date | null | undefined): string {
     hour12: true,
   });
   return `${day}/${month}/${year}, ${time}`;
+}
+
+export function formatTime(date: string | Date | null | undefined): string {
+  if (!date) return '—';
+  if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return '—';
+  }
+  const d = typeof date === 'string' ? new Date(date) : date;
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+export function getTodayLocalDateString(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 export function formatMonthYear(date: Date): string {
@@ -63,4 +87,5 @@ export function formatPhoneForWA(phone: string | null | undefined): string | nul
   }
   return cleaned;
 }
+
 

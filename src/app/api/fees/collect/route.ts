@@ -13,9 +13,26 @@ export async function POST(request: Request) {
   const { feeIds, amountPaid, discount, paymentMethod, paidAt, paid_at } = body;
 
   const rawPaidAt = paidAt || paid_at;
-  const paymentTimestamp = rawPaidAt
-    ? (typeof rawPaidAt === 'string' && rawPaidAt.length === 10 ? `${rawPaidAt}T12:00:00.000Z` : new Date(rawPaidAt).toISOString())
-    : new Date().toISOString();
+  let paymentTimestamp: string;
+  if (rawPaidAt) {
+    if (typeof rawPaidAt === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawPaidAt)) {
+      const now = new Date();
+      const todayUtc = now.toISOString().slice(0, 10);
+      const todayLocal = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      if (rawPaidAt === todayUtc || rawPaidAt === todayLocal) {
+        paymentTimestamp = now.toISOString();
+      } else {
+        const [y, m, d] = rawPaidAt.split('-').map(Number);
+        const combined = new Date(y, m - 1, d, now.getHours(), now.getMinutes(), now.getSeconds());
+        paymentTimestamp = !isNaN(combined.getTime()) ? combined.toISOString() : now.toISOString();
+      }
+    } else {
+      const parsed = new Date(rawPaidAt);
+      paymentTimestamp = !isNaN(parsed.getTime()) ? parsed.toISOString() : new Date().toISOString();
+    }
+  } else {
+    paymentTimestamp = new Date().toISOString();
+  }
 
   // Support legacy single feeId for backward compatibility
   const legacyFeeId = body.feeId;

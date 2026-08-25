@@ -1513,12 +1513,23 @@ export default function MembersPage() {
       toast.error('Please enter amount received or discount');
       return;
     }
+    const todayStr = getTodayLocalDateString();
+    let computedPaidAt: string;
+    if (!payDate || payDate === todayStr) {
+      computedPaidAt = new Date().toISOString();
+    } else {
+      const now = new Date();
+      const [y, m, d] = payDate.split('-').map(Number);
+      const combined = new Date(y, m - 1, d, now.getHours(), now.getMinutes(), now.getSeconds());
+      computedPaidAt = !isNaN(combined.getTime()) ? combined.toISOString() : new Date().toISOString();
+    }
+
     bulkPayMutation.mutate({
       feeIds: payModalUnpaidFees.map(f => f.id),
       amountPaid: payModalReceivedNum,
       discount: payModalDiscountNum,
       paymentMethod: payMethod,
-      paidAt: payDate || getTodayLocalDateString(),
+      paidAt: computedPaidAt,
     });
   }
 
@@ -2752,7 +2763,7 @@ export default function MembersPage() {
                               <Badge variant="destructive" className="text-xs">UNPAID</Badge>
                             )}
                           </td>
-                          <td className="p-3 text-muted-foreground text-xs">{fee.paid_at ? formatDate(fee.paid_at) : '—'}</td>
+                          <td className="p-3 text-muted-foreground text-xs">{fee.paid_at ? formatDateTime(fee.paid_at) : '—'}</td>
                           <td className="p-3 text-muted-foreground text-xs capitalize">{fee.payment_method || '—'}</td>
                         </tr>
                       );
@@ -2776,10 +2787,17 @@ export default function MembersPage() {
       <Dialog open={payModalOpen} onOpenChange={(open) => { setPayModalOpen(open); if (!open) setPayModalMember(null); }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle className="text-xl font-bold flex items-center gap-2">
-              <CreditCard className="h-5 w-5 text-primary" />
-              Collect Payment
-            </DialogTitle>
+            <div className="flex items-center justify-between pr-6">
+              <DialogTitle className="text-xl font-bold flex items-center gap-2">
+                <CreditCard className="h-5 w-5 text-primary" />
+                Collect Payment
+              </DialogTitle>
+              {payModalMember?.member_number && (
+                <Badge variant="outline" className="font-mono text-xs border-primary/40 text-primary bg-primary/10 font-bold px-2 py-0.5">
+                  ID: #{payModalMember.member_number}
+                </Badge>
+              )}
+            </div>
           </DialogHeader>
 
           {payModalMember && (
@@ -2799,21 +2817,30 @@ export default function MembersPage() {
                     className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
                     title="Click to view full size photo"
                   >
-                    <img src={payModalMember.photo_url} alt={payModalMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                    <img src={payModalMember.photo_url} alt={payModalMember.full_name} className="h-11 w-11 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
                     <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
                       <ZoomIn className="h-3.5 w-3.5 text-white" />
                     </div>
                   </button>
                 ) : (
-                  <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
+                  <div className="h-11 w-11 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
                     {payModalMember.full_name.slice(0, 1).toUpperCase()}
                   </div>
                 )}
-                <div>
-                  <div className="font-semibold">{payModalMember.full_name}</div>
-                  <div className="text-xs text-muted-foreground font-mono">#{payModalMember.member_number || 'N/A'}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-base text-foreground">{payModalMember.full_name}</span>
+                    <Badge variant="outline" className="font-mono text-xs border-primary/30 text-primary bg-primary/10 font-semibold px-1.5 py-0.5">
+                      #{payModalMember.member_number || 'N/A'}
+                    </Badge>
+                  </div>
+                  <div className="text-xs text-muted-foreground flex items-center gap-2 mt-0.5 flex-wrap">
+                    {payModalMember.phone && <span>{payModalMember.phone}</span>}
+                    {payModalMember.join_date && <span>• Joined {formatDate(payModalMember.join_date)}</span>}
+                  </div>
                 </div>
               </div>
+
 
               {/* Unpaid Months Breakdown */}
               <div className="space-y-2">
