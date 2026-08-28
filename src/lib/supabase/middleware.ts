@@ -27,7 +27,9 @@ export async function updateSession(request: NextRequest) {
   const isPublicRoute =
     request.nextUrl.pathname === '/' ||
     request.nextUrl.pathname.startsWith('/auth') ||
-    request.nextUrl.pathname.startsWith('/feedback');
+    request.nextUrl.pathname.startsWith('/feedback') ||
+    request.nextUrl.pathname.startsWith('/iclock') ||      // K50 biometric bridge (no browser session)
+    request.nextUrl.pathname.startsWith('/api/iclock');    // direct API calls also allowed unauthenticated
 
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();
