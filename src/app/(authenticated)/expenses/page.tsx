@@ -21,13 +21,18 @@ export default function ExpensesPage() {
   const { data: role } = useRole();
   const { data: currentUser } = useCurrentUser();
   const queryClient = useQueryClient();
-  const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState({ name: '', category: 'misc', amount: '', expense_date: new Date().toISOString().slice(0, 10), notes: '', is_reserve: false });
 
   const monthStart = `${selectedMonth}-01`;
   const [y, m] = selectedMonth.split('-').map(Number);
-  const monthEnd = new Date(y, m, 1).toISOString().slice(0, 10);
+  const nextY = m === 12 ? y + 1 : y;
+  const nextM = m === 12 ? 1 : m + 1;
+  const monthEnd = `${nextY}-${String(nextM).padStart(2, '0')}-01`;
 
   const { data: expenses = [], isLoading } = useQuery({
     queryKey: ['expenses', monthStart, monthEnd],
@@ -61,27 +66,18 @@ export default function ExpensesPage() {
         payload.notes = data.notes.trim();
       }
       if (currentUser?.id) {
-        payload.logged_by = currentUser.id;
+        payload.created_by = currentUser.id;
       }
-
-      let { error } = await supabase.from('expenses').insert(payload);
-
-      if (error && payload.logged_by) {
-        // Retry without logged_by if profile FK constraint or user profile mapping fails
-        delete payload.logged_by;
-        const retry = await supabase.from('expenses').insert(payload);
-        error = retry.error;
-      }
-
-      if (error) throw new Error(error.message || 'Failed to add expense');
+      const { error } = await supabase.from('expenses').insert(payload);
+      if (error) throw error;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['expenses'] });
       queryClient.invalidateQueries({ queryKey: ['dash-expenses'] });
       queryClient.invalidateQueries({ queryKey: ['dash-trend'] });
-      queryClient.invalidateQueries({ queryKey: ['reserve-'] });
-      toast.success('Expense added successfully');
+      toast.success('Expense added');
       setDialogOpen(false);
+      setForm({ name: '', category: 'misc', amount: '', expense_date: new Date().toISOString().slice(0, 10), notes: '', is_reserve: false });
     },
     onError: (e: any) => toast.error(e.message || 'Failed to add expense'),
   });
@@ -101,7 +97,12 @@ export default function ExpensesPage() {
   });
 
   const total = expenses.reduce((s: number, e: any) => s + Number(e.amount), 0);
-  const monthOptions = Array.from({ length: 12 }, (_, i) => { const d = new Date(); d.setMonth(d.getMonth() - i); return { value: d.toISOString().slice(0, 7), label: formatMonthYear(d) }; });
+  const monthOptions = Array.from({ length: 12 }, (_, i) => {
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const val = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    return { value: val, label: formatMonthYear(d) };
+  });
   const getCatLabel = (v: string) => EXPENSE_CATEGORIES.find((c) => c.value === v)?.label || v;
   const getCatColor = (v: string) => EXPENSE_CATEGORIES.find((c) => c.value === v)?.color || 'bg-gray-500';
 

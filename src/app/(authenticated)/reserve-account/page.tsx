@@ -71,7 +71,10 @@ export default function ReserveAccountPage() {
   const { data: role } = useRole();
   const { data: settings } = useGymSettings();
   const queryClient = useQueryClient();
-  const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
   const [isEditingPercent, setIsEditingPercent] = useState(false);
   const [percentInput, setPercentInput] = useState('');
 
@@ -97,9 +100,10 @@ export default function ReserveAccountPage() {
 
   // Month selector options
   const monthOptions = Array.from({ length: 12 }, (_, i) => {
-    const d = new Date();
-    d.setMonth(d.getMonth() - i);
-    return { value: d.toISOString().slice(0, 7), label: formatMonthYear(d) };
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const val = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    return { value: val, label: formatMonthYear(d) };
   });
 
   // Save reserve percentage mutation

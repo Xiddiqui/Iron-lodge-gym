@@ -2027,7 +2027,9 @@ export default function MembersPage() {
                     {isAdmin && (
                       <th className="text-left p-4 font-medium text-muted-foreground hidden lg:table-cell">Added By</th>
                     )}
-                    <th className="text-left p-4 font-medium text-muted-foreground">Total Fee</th>
+                    {isAdmin && (
+                      <th className="text-left p-4 font-medium text-muted-foreground">Total Fee</th>
+                    )}
                     <th className="text-left p-4 font-medium text-muted-foreground">Payment Status</th>
                     <th className="text-left p-4 font-medium text-muted-foreground">Status</th>
                     <th className="text-right p-4 font-medium text-muted-foreground">Actions</th>
@@ -2035,9 +2037,9 @@ export default function MembersPage() {
                 </thead>
                 <tbody>
                    {isLoading ? (
-                    <tr><td colSpan={isAdmin ? 10 : 9} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
+                    <tr><td colSpan={isAdmin ? 10 : 8} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
                   ) : filtered.length === 0 ? (
-                    <tr><td colSpan={isAdmin ? 10 : 9} className="text-center py-8 text-muted-foreground">No members found</td></tr>
+                    <tr><td colSpan={isAdmin ? 10 : 8} className="text-center py-8 text-muted-foreground">No members found</td></tr>
                   ) : paginatedMembers.map((m) => {
                     const assignedTrainer = trainers.find((t) => t.id === m.trainer_id);
                     const tenure = m.tenure_months || 1;
@@ -2117,16 +2119,18 @@ export default function MembersPage() {
                             })()}
                           </td>
                         )}
-                        <td className="p-4 font-medium">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span>{formatCurrency(totalFee)}</span>
-                            {m.tenure_months && m.tenure_months > 1 && (
-                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-semibold bg-primary/5 border-primary/30 text-primary">
-                                {m.tenure_months} Mo
-                              </Badge>
-                            )}
-                          </div>
-                        </td>
+                        {isAdmin && (
+                          <td className="p-4 font-medium">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span>{formatCurrency(totalFee)}</span>
+                              {m.tenure_months && m.tenure_months > 1 && (
+                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-semibold bg-primary/5 border-primary/30 text-primary">
+                                  {m.tenure_months} Mo
+                                </Badge>
+                              )}
+                            </div>
+                          </td>
+                        )}
                         <td className="p-4" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center gap-2">
                             {payStatus.status === 'paid' ? (

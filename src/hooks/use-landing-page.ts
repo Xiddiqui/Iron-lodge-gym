@@ -30,17 +30,29 @@ export function useLandingPageSettings() {
         try { localStorage.setItem('gym_primary_color', mergedTheme.primaryColor); } catch {}
       }
 
+      // Ensure any missing sections from defaults are included in sectionOrder
+      const savedOrder = savedData.sectionOrder || defaultLandingPageData.sectionOrder || [];
+      const defaultOrder = defaultLandingPageData.sectionOrder || [];
+      const completeOrder = Array.from(new Set([...savedOrder, ...defaultOrder]));
+
       return {
         theme: mergedTheme,
         hero: { ...defaultLandingPageData.hero, ...(savedData.hero || {}) },
         about: { ...defaultLandingPageData.about, ...(savedData.about || {}) },
         features: savedData.features || defaultLandingPageData.features,
+        schedule: { ...defaultLandingPageData.schedule!, ...(savedData.schedule || {}) },
+        video: { ...defaultLandingPageData.video!, ...(savedData.video || {}) },
         pricing: savedData.pricing || defaultLandingPageData.pricing,
         trainers: savedData.trainers || defaultLandingPageData.trainers,
         gallery: savedData.gallery || defaultLandingPageData.gallery,
         testimonials: savedData.testimonials || defaultLandingPageData.testimonials,
+        faq: { ...defaultLandingPageData.faq!, ...(savedData.faq || {}) },
+        cta: { ...defaultLandingPageData.cta!, ...(savedData.cta || {}) },
+        customBlocks: savedData.customBlocks || [],
         contact: { ...defaultLandingPageData.contact, ...(savedData.contact || {}) },
         sections: { ...defaultLandingPageData.sections, ...(savedData.sections || {}) },
+        sectionOrder: completeOrder,
+        seo: { ...defaultLandingPageData.seo, ...(savedData.seo || {}) },
       };
     },
   });

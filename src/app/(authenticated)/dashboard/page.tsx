@@ -1,7 +1,7 @@
 'use client';
 export const dynamic = 'force-dynamic';
 import { useState, useEffect } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { useRole } from '@/hooks/use-role';
 import { formatCurrency, formatDate, formatDateTime, formatTime, formatMonthYear, getTodayLocalDateString } from '@/lib/format';
@@ -17,12 +17,13 @@ import { Wallet, Receipt, Zap, UserCheck, ArrowUpRight, ArrowDownRight, Trending
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
+import { Skeleton } from '@/components/ui/skeleton';
 
 function AnimatedNumber({ value, format }: { value: number; format: (n: number) => string }) {
   const motionVal = useMotionValue(0);
   const display = useTransform(motionVal, (v) => format(Math.round(v)));
   useEffect(() => {
-    const controls = animate(motionVal, value, { duration: 1.1, ease: 'easeOut' });
+    const controls = animate(motionVal, value, { duration: 0.9, ease: 'easeOut' });
     return controls.stop;
   }, [value, motionVal]);
   return <motion.span>{display}</motion.span>;
@@ -88,9 +89,12 @@ const PIE_COLORS = ['#a3e635', '#f97316', '#ef4444'];
 
 export default function DashboardPage() {
   const queryClient = useQueryClient();
-  const { data: role } = useRole();
+  const { data: role, isLoading: isRoleLoading } = useRole();
   const { data: settings } = useGymSettings();
-  const [selectedMonth, setSelectedMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
   const [trendMonths, setTrendMonths] = useState(6);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalDate, setModalDate] = useState<string>(() => getTodayLocalDateString());
@@ -103,7 +107,6 @@ export default function DashboardPage() {
     setPhotoPreview({ open: true, photoUrl, title: title || 'Member Photo', subtitle });
   };
 
-
   const [year, month] = selectedMonth.split('-').map(Number);
   const monthStart = `${selectedMonth}-01`;
   const nextYear = month === 12 ? year + 1 : year;
@@ -115,9 +118,10 @@ export default function DashboardPage() {
   const startOfNextMonth = new Date(year, month, 1, 0, 0, 0, 0);
 
   // Query for recent payment records (Today's payments & modal history)
-  const { data: allPaymentRecords = [] } = useQuery({
+  const { data: allPaymentRecords = [], isLoading: isPaymentsLoading } = useQuery({
     queryKey: ['dash-recent-payment-records'],
     enabled: role === 'admin',
+    staleTime: 30_000,
     queryFn: async () => {
       const { data, error } = await supabase
         .from('fee_records')
@@ -138,11 +142,11 @@ export default function DashboardPage() {
     },
   });
 
-
   // Query profiles for staff name lookup (collected_by / marked_by attribution)
   const { data: staffProfiles = [] } = useQuery({
     queryKey: ['dash-profiles'],
     enabled: role === 'admin',
+    staleTime: 60_000,
     queryFn: async () => {
       const { data } = await supabase.from('profiles').select('id, full_name, role');
       return data ?? [];
@@ -160,9 +164,10 @@ export default function DashboardPage() {
   };
 
   // ── Query: walk-in (1-day) attendance records that have guest_name set
-  const { data: walkinRecords = [] } = useQuery({
+  const { data: walkinRecords = [], isLoading: isWalkinLoading } = useQuery({
     queryKey: ['dash-walkin-records'],
     enabled: role === 'admin',
+    staleTime: 30_000,
     queryFn: async () => {
       const { data, error } = await supabase
         .from('attendance')
@@ -176,7 +181,6 @@ export default function DashboardPage() {
       return (data ?? []).filter((w: any) => w.guest_name && w.guest_name.trim() !== '');
     },
   });
-
 
   // ── Walk-in stats for selected month
   const walkinThisMonth = walkinRecords.filter((w: any) => {
@@ -214,21 +218,29 @@ export default function DashboardPage() {
     }
   };
 
-
-  // Fee records for the month with auto-sync for missing member records
-  const { data: fees = [] } = useQuery({
+  // Fee records for the month with parallel member fetch and non-blocking background persistence
+  const { data: fees = [], isLoading: isFeesLoading } = useQuery({
     queryKey: ['dash-fees', monthStart, monthEnd],
     enabled: role === 'admin',
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
     queryFn: async () => {
-      // 1. Get existing fee records for selected month
-      const { data: existingFees, error } = await supabase
-        .from('fee_records')
-        .select('id, amount, amount_paid, paid, paid_at, member_id, period_month, period_end, collected_by, members(full_name, phone, join_date, tenure_months, amount_paid, monthly_fee, training_fees)')
-        .gte('period_month', monthStart)
-        .lt('period_month', monthEnd)
-        .order('paid', { ascending: false });
+      // Fetch both existing fee records and active members concurrently
+      const [{ data: existingFees, error: feeErr }, { data: activeMembers, error: memErr }] = await Promise.all([
+        supabase
+          .from('fee_records')
+          .select('id, amount, amount_paid, paid, paid_at, member_id, period_month, period_end, collected_by, members(full_name, phone, join_date, tenure_months, amount_paid, monthly_fee, training_fees)')
+          .gte('period_month', monthStart)
+          .lt('period_month', monthEnd)
+          .order('paid', { ascending: false }),
+        supabase
+          .from('members')
+          .select('id, full_name, phone, join_date, tenure_months, monthly_fee, training_fees, amount_paid, active')
+          .lte('join_date', monthEnd)
+      ]);
 
-      if (error) throw error;
+      if (feeErr) throw feeErr;
+
       let feeList = (existingFees ?? []).map((f: any) => {
         const m = f.members;
         if (m && m.join_date) {
@@ -247,21 +259,16 @@ export default function DashboardPage() {
         return f;
       });
 
-      // Auto-heal missing paid_at for records with amount_paid > 0
+      // Auto-heal missing paid_at in background without blocking query return
       const missingPaidAt = feeList.filter((f: any) => (Number(f.amount_paid) || 0) > 0 && !f.paid_at);
       if (missingPaidAt.length > 0) {
         const idsToUpdate = missingPaidAt.map((f: any) => f.id);
         const fallbackIso = `${monthStart}T12:00:00.000Z`;
-        await supabase.from('fee_records').update({ paid_at: fallbackIso }).in('id', idsToUpdate);
+        supabase.from('fee_records').update({ paid_at: fallbackIso }).in('id', idsToUpdate).then();
         feeList = feeList.map((f: any) => (idsToUpdate.includes(f.id) ? { ...f, paid_at: fallbackIso } : f));
       }
 
-      // 2. Fetch members joined on or before monthEnd to check if any active member lacks a fee_record for this month
-      const { data: activeMembers } = await supabase
-        .from('members')
-        .select('*')
-        .lte('join_date', monthEnd);
-
+      // Check if any active member lacks a fee record for this month
       if (activeMembers && activeMembers.length > 0) {
         const existingMemberIds = new Set(feeList.map((f: any) => f.member_id));
         const missingMembers = activeMembers.filter((m: any) => !existingMemberIds.has(m.id));
@@ -286,17 +293,17 @@ export default function DashboardPage() {
               paid: isPaid,
               paid_at: actualPaid > 0 ? (m.join_date ? `${m.join_date}T12:00:00.000Z` : `${monthStart}T12:00:00.000Z`) : null,
               payment_method: 'cash',
+              members: { full_name: m.full_name, phone: m.phone }
             };
           });
 
-          const { data: insertedRecords } = await supabase
+          // Non-blocking background persistence
+          supabase
             .from('fee_records')
-            .upsert(newRecords, { onConflict: 'member_id,period_month', ignoreDuplicates: true })
-            .select('id, amount, amount_paid, paid, paid_at, member_id, period_month, period_end, members(full_name, phone)');
+            .upsert(newRecords.map(({ members, ...r }) => r), { onConflict: 'member_id,period_month', ignoreDuplicates: true })
+            .then();
 
-          if (insertedRecords && insertedRecords.length > 0) {
-            feeList = [...feeList, ...insertedRecords];
-          }
+          feeList = [...feeList, ...newRecords];
         }
       }
 
@@ -305,9 +312,11 @@ export default function DashboardPage() {
   });
 
   // Expenses for the month
-  const { data: expenses = [] } = useQuery({
+  const { data: expenses = [], isLoading: isExpensesLoading } = useQuery({
     queryKey: ['dash-expenses', monthStart, monthEnd],
     enabled: role === 'admin',
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
     queryFn: async () => {
       const { data, error } = await supabase
         .from('expenses')
@@ -322,9 +331,11 @@ export default function DashboardPage() {
   });
 
   // Trend data
-  const { data: trendData = [] } = useQuery({
+  const { data: trendData = [], isLoading: isTrendLoading } = useQuery({
     queryKey: ['dash-trend', selectedMonth, trendMonths],
     enabled: role === 'admin',
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
     queryFn: async () => {
       const months: { key: string; label: string; revenue: number; expenses: number; profit: number }[] = [];
       const map = new Map<string, typeof months[0]>();
@@ -379,9 +390,11 @@ export default function DashboardPage() {
   });
 
   // Active members count
-  const { data: activeMembers } = useQuery({
+  const { data: activeMembers, isLoading: isActiveLoading } = useQuery({
     queryKey: ['dash-active', selectedMonth],
     enabled: role === 'admin',
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
     queryFn: async () => {
       const endCurrent = new Date(year, month, 0).toISOString().slice(0, 10);
       const endPrev = new Date(year, month - 1, 0).toISOString().slice(0, 10);
@@ -397,17 +410,16 @@ export default function DashboardPage() {
     const paidAmt = Number(f.amount_paid);
     if (!isNaN(paidAmt) && paidAmt > 0) return s + paidAmt;
     return s + (f.paid ? Number(f.amount) || 0 : 0);
-  }, 0) + walkinMonthRevenue;  // ← include walk-in revenue
+  }, 0) + walkinMonthRevenue;
 
   const totalExpenses = expenses.reduce((s: number, e: any) => s + Number(e.amount), 0);
   const netProfit = totalRevenue - totalExpenses;
-  const reserve = netProfit > 0 ? (netProfit * (settings?.reserve_percentage || 0) / 100) : 0
+  const reserve = netProfit > 0 ? (netProfit * (settings?.reserve_percentage || 0) / 100) : 0;
   const fullyPaidCount = fees.filter((f: any) => f.paid || (Number(f.amount_paid) >= Number(f.amount) && Number(f.amount) > 0)).length;
   const partiallyPaidCount = fees.filter((f: any) => !f.paid && Number(f.amount_paid) > 0 && Number(f.amount_paid) < Number(f.amount)).length;
   const unpaidCount = fees.filter((f: any) => !f.paid && (Number(f.amount_paid) || 0) === 0).length;
 
   // Payments calculations for Today's Card & Modal
-  // Merge fee-record payments + walk-in attendance payments into one combined list
   const allWalkinPayments = walkinRecords.map((w: any) => ({
     id: `walkin-${w.id}`,
     _isWalkin: true,
@@ -420,7 +432,6 @@ export default function DashboardPage() {
     collected_by: w.marked_by || null,
     members: null,
   }));
-
 
   const combinedPaymentRecords = [
     ...allPaymentRecords,
@@ -475,14 +486,36 @@ export default function DashboardPage() {
     amount: expenseByCategory[cat] || 0
   }));
 
-  // Month options
+  // Month options (safely anchored to day 1 to prevent day-of-month rollover duplicates)
   const monthOptions = Array.from({ length: 12 }, (_, i) => {
-    const d = new Date();
-    d.setMonth(d.getMonth() - i);
-    return { value: d.toISOString().slice(0, 7), label: formatMonthYear(d) };
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const val = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    return { value: val, label: formatMonthYear(d) };
   });
 
   const memberGrowth = activeMembers ? ((activeMembers.current - activeMembers.previous) / Math.max(activeMembers.previous, 1)) * 100 : 0;
+
+  // Loading flags for smooth UI coordination
+  const isFinancialLoading = isFeesLoading || isExpensesLoading || isWalkinLoading;
+  const isPaymentsSummaryLoading = isPaymentsLoading || isWalkinLoading;
+
+  if (isRoleLoading) {
+    return (
+      <div className="p-4 md:p-6 lg:p-8 space-y-6 animate-pulse">
+        <div className="flex justify-between items-center">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-9 w-44" />
+        </div>
+        <Skeleton className="h-28 w-full rounded-xl" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <Skeleton key={i} className="h-28 rounded-xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   if (role !== 'admin') return null;
 
@@ -514,23 +547,50 @@ export default function DashboardPage() {
           </div>
           <div>
             <p className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Today's Collections</p>
-            <p className="text-3xl font-display font-bold text-primary">
-              <AnimatedNumber value={todayTotalCollected} format={formatCurrency} />
-            </p>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {todayPayments.length} {todayPayments.length === 1 ? 'payment' : 'payments'} received today
-            </p>
+            {isPaymentsSummaryLoading ? (
+              <div className="py-1">
+                <Skeleton className="h-8 w-36" />
+                <Skeleton className="h-3.5 w-28 mt-1.5" />
+              </div>
+            ) : (
+              <>
+                <p className="text-3xl font-display font-bold text-primary">
+                  <AnimatedNumber value={todayTotalCollected} format={formatCurrency} />
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {todayPayments.length} {todayPayments.length === 1 ? 'payment' : 'payments'} received today
+                </p>
+              </>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-3">
           <div className="text-right">
             <p className="text-xs text-muted-foreground">Full Payments</p>
-            <p className="text-xl font-bold text-emerald-400">{todayPayments.filter((f: any) => { const a = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0); return f.paid || (a >= Number(f.amount) && Number(f.amount) > 0); }).length}</p>
+            {isPaymentsSummaryLoading ? (
+              <Skeleton className="h-6 w-10 ml-auto mt-1" />
+            ) : (
+              <p className="text-xl font-bold text-emerald-400">
+                {todayPayments.filter((f: any) => {
+                  const a = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
+                  return f.paid || (a >= Number(f.amount) && Number(f.amount) > 0);
+                }).length}
+              </p>
+            )}
           </div>
           <div className="w-px h-10 bg-border/50" />
           <div className="text-right">
             <p className="text-xs text-muted-foreground">Partial</p>
-            <p className="text-xl font-bold text-amber-400">{todayPayments.filter((f: any) => { const a = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0); return !f.paid && a > 0 && a < Number(f.amount); }).length}</p>
+            {isPaymentsSummaryLoading ? (
+              <Skeleton className="h-6 w-10 ml-auto mt-1" />
+            ) : (
+              <p className="text-xl font-bold text-amber-400">
+                {todayPayments.filter((f: any) => {
+                  const a = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
+                  return !f.paid && a > 0 && a < Number(f.amount);
+                }).length}
+              </p>
+            )}
           </div>
           <Button
             variant="outline"
@@ -547,6 +607,7 @@ export default function DashboardPage() {
 
       {/* Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        {/* Revenue */}
         <Card>
           <CardContent className="p-5">
             <div className="flex items-center justify-between">
@@ -555,10 +616,16 @@ export default function DashboardPage() {
             </div>
             <div className="mt-3">
               <p className="text-sm text-muted-foreground">Revenue</p>
-              <p className="text-2xl font-display font-bold"><AnimatedNumber value={totalRevenue} format={formatCurrency} /></p>
+              {isFinancialLoading ? (
+                <Skeleton className="h-7 w-32 mt-1.5" />
+              ) : (
+                <p className="text-2xl font-display font-bold"><AnimatedNumber value={totalRevenue} format={formatCurrency} /></p>
+              )}
             </div>
           </CardContent>
         </Card>
+
+        {/* Expenses */}
         <Card>
           <CardContent className="p-5">
             <div className="flex items-center justify-between">
@@ -567,10 +634,16 @@ export default function DashboardPage() {
             </div>
             <div className="mt-3">
               <p className="text-sm text-muted-foreground">Expenses</p>
-              <p className="text-2xl font-display font-bold"><AnimatedNumber value={totalExpenses} format={formatCurrency} /></p>
+              {isExpensesLoading ? (
+                <Skeleton className="h-7 w-32 mt-1.5" />
+              ) : (
+                <p className="text-2xl font-display font-bold"><AnimatedNumber value={totalExpenses} format={formatCurrency} /></p>
+              )}
             </div>
           </CardContent>
         </Card>
+
+        {/* Net Profit */}
         <Card>
           <CardContent className="p-5">
             <div className="flex items-center justify-between">
@@ -581,10 +654,16 @@ export default function DashboardPage() {
             </div>
             <div className="mt-3">
               <p className="text-sm text-muted-foreground">Net Profit</p>
-              <p className="text-2xl font-display font-bold"><AnimatedNumber value={netProfit - reserve} format={formatCurrency} /></p>
+              {isFinancialLoading ? (
+                <Skeleton className="h-7 w-32 mt-1.5" />
+              ) : (
+                <p className="text-2xl font-display font-bold"><AnimatedNumber value={netProfit - reserve} format={formatCurrency} /></p>
+              )}
             </div>
           </CardContent>
         </Card>
+
+        {/* Active Members */}
         <Card>
           <CardContent className="p-5">
             <div className="flex items-center justify-between">
@@ -593,10 +672,16 @@ export default function DashboardPage() {
             </div>
             <div className="mt-3">
               <p className="text-sm text-muted-foreground">Active Members</p>
-              <p className="text-2xl font-display font-bold"><AnimatedNumber value={activeMembers?.current ?? 0} format={(n) => String(n)} /></p>
+              {isActiveLoading ? (
+                <Skeleton className="h-7 w-20 mt-1.5" />
+              ) : (
+                <p className="text-2xl font-display font-bold"><AnimatedNumber value={activeMembers?.current ?? 0} format={(n) => String(n)} /></p>
+              )}
             </div>
           </CardContent>
         </Card>
+
+        {/* Reserve */}
         {(settings?.reserve_percentage ?? 0) > 0 && (
           <Card>
             <CardContent className="p-5">
@@ -605,7 +690,11 @@ export default function DashboardPage() {
               </div>
               <div className="mt-3">
                 <p className="text-sm text-muted-foreground">Reserve (This Month)</p>
-                <p className="text-2xl font-display font-bold"><AnimatedNumber value={netProfit > 0 ? (netProfit * (settings?.reserve_percentage || 0) / 100) : 0} format={formatCurrency} /></p>
+                {isFinancialLoading ? (
+                  <Skeleton className="h-7 w-28 mt-1.5" />
+                ) : (
+                  <p className="text-2xl font-display font-bold"><AnimatedNumber value={netProfit > 0 ? (netProfit * (settings?.reserve_percentage || 0) / 100) : 0} format={formatCurrency} /></p>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -630,20 +719,26 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={trendData}>
-                  <defs>
-                    <linearGradient id="gRev" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#a3e635" stopOpacity={0.3} /><stop offset="95%" stopColor="#a3e635" stopOpacity={0} /></linearGradient>
-                    <linearGradient id="gExp" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#ef4444" stopOpacity={0.3} /><stop offset="95%" stopColor="#ef4444" stopOpacity={0} /></linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
-                  <XAxis dataKey="label" tick={{ fill: '#8c8c8c', fontSize: 12 }} />
-                  <YAxis tick={{ fill: '#8c8c8c', fontSize: 12 }} />
-                  <Tooltip contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
-                  <Area type="monotone" dataKey="revenue" stroke="#a3e635" fill="url(#gRev)" strokeWidth={2} />
-                  <Area type="monotone" dataKey="expenses" stroke="#ef4444" fill="url(#gExp)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
+              {isTrendLoading ? (
+                <div className="h-full w-full flex items-center justify-center p-4">
+                  <Skeleton className="h-full w-full rounded-lg" />
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={trendData}>
+                    <defs>
+                      <linearGradient id="gRev" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#a3e635" stopOpacity={0.3} /><stop offset="95%" stopColor="#a3e635" stopOpacity={0} /></linearGradient>
+                      <linearGradient id="gExp" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#ef4444" stopOpacity={0.3} /><stop offset="95%" stopColor="#ef4444" stopOpacity={0} /></linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
+                    <XAxis dataKey="label" tick={{ fill: '#8c8c8c', fontSize: 12 }} />
+                    <YAxis tick={{ fill: '#8c8c8c', fontSize: 12 }} />
+                    <Tooltip contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
+                    <Area type="monotone" dataKey="revenue" stroke="#a3e635" fill="url(#gRev)" strokeWidth={2} />
+                    <Area type="monotone" dataKey="expenses" stroke="#ef4444" fill="url(#gExp)" strokeWidth={2} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -655,27 +750,34 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="h-64 flex items-center justify-center">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                  data={[
-                    { name: 'Paid', value: fullyPaidCount },
-                    { name: 'Partially Paid', value: partiallyPaidCount },
-                    { name: 'Unpaid', value: unpaidCount },
-                  ]}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={50}
-                  outerRadius={80}
-                  paddingAngle={5}
-                  dataKey="value"
-                >
-                    {PIE_COLORS.map((color, i) => <Cell key={i} fill={color} />)}
-                  </Pie>
-                  <Tooltip contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
-                  <Legend />
-                </PieChart>
-              </ResponsiveContainer>
+              {isFeesLoading ? (
+                <div className="flex flex-col items-center justify-center gap-3">
+                  <Skeleton className="h-32 w-32 rounded-full" />
+                  <Skeleton className="h-4 w-28" />
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={[
+                        { name: 'Paid', value: fullyPaidCount },
+                        { name: 'Partially Paid', value: partiallyPaidCount },
+                        { name: 'Unpaid', value: unpaidCount },
+                      ]}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={50}
+                      outerRadius={80}
+                      paddingAngle={5}
+                      dataKey="value"
+                    >
+                      {PIE_COLORS.map((color, i) => <Cell key={i} fill={color} />)}
+                    </Pie>
+                    <Tooltip contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -710,22 +812,38 @@ export default function DashboardPage() {
             {/* Right: stats */}
             <div className="flex flex-wrap items-center gap-4 sm:gap-6">
               <div className="text-center cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setIsWalkinModalOpen(true)} title="Click to view all walk-in visitors">
-                <p className="text-2xl font-display font-bold text-amber-400">{walkinThisMonth.length}</p>
+                {isWalkinLoading ? (
+                  <Skeleton className="h-7 w-12 mx-auto" />
+                ) : (
+                  <p className="text-2xl font-display font-bold text-amber-400">{walkinThisMonth.length}</p>
+                )}
                 <p className="text-[11px] text-muted-foreground mt-0.5">Total (This Month)</p>
               </div>
               <div className="w-px h-10 bg-border/50 hidden sm:block" />
               <div className="text-center">
-                <p className="text-2xl font-display font-bold text-primary">{formatCurrency(walkinMonthRevenue)}</p>
+                {isWalkinLoading ? (
+                  <Skeleton className="h-7 w-20 mx-auto" />
+                ) : (
+                  <p className="text-2xl font-display font-bold text-primary">{formatCurrency(walkinMonthRevenue)}</p>
+                )}
                 <p className="text-[11px] text-muted-foreground mt-0.5">Walk-in Revenue</p>
               </div>
               <div className="w-px h-10 bg-border/50 hidden sm:block" />
               <div className="text-center">
-                <p className="text-2xl font-display font-bold text-emerald-400">{walkinAvgPerHead > 0 ? formatCurrency(walkinAvgPerHead) : '—'}</p>
+                {isWalkinLoading ? (
+                  <Skeleton className="h-7 w-16 mx-auto" />
+                ) : (
+                  <p className="text-2xl font-display font-bold text-emerald-400">{walkinAvgPerHead > 0 ? formatCurrency(walkinAvgPerHead) : '—'}</p>
+                )}
                 <p className="text-[11px] text-muted-foreground mt-0.5">Avg Per Head</p>
               </div>
               <div className="w-px h-10 bg-border/50 hidden sm:block" />
               <div className="text-center">
-                <p className="text-2xl font-display font-bold text-violet-400">{walkinToday.length}</p>
+                {isWalkinLoading ? (
+                  <Skeleton className="h-7 w-12 mx-auto" />
+                ) : (
+                  <p className="text-2xl font-display font-bold text-violet-400">{walkinToday.length}</p>
+                )}
                 <p className="text-[11px] text-muted-foreground mt-0.5">Today's Walk-ins</p>
               </div>
             </div>
@@ -774,7 +892,7 @@ export default function DashboardPage() {
               </div>
             </div>
           )}
-          {walkinThisMonth.length === 0 && (
+          {!isWalkinLoading && walkinThisMonth.length === 0 && (
             <p className="text-xs text-muted-foreground mt-3 text-center">No walk-in visitors recorded this month. Use the <strong>1 Day</strong> button on the Attendance page to add them.</p>
           )}
         </CardContent>
@@ -788,7 +906,7 @@ export default function DashboardPage() {
             <CardTitle className="text-base flex items-center gap-2">
               <History className="h-4 w-4 text-primary" />
               Today's Payments
-              {todayPayments.length > 0 && (
+              {!isPaymentsSummaryLoading && todayPayments.length > 0 && (
                 <span className="ml-1 text-xs bg-primary/15 text-primary border border-primary/20 rounded-full px-2 py-0.5 font-medium">
                   {todayPayments.length}
                 </span>
@@ -807,7 +925,25 @@ export default function DashboardPage() {
             </Button>
           </CardHeader>
           <CardContent className="p-0">
-            {todayPayments.length === 0 ? (
+            {isPaymentsSummaryLoading ? (
+              <div className="p-4 space-y-3">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div key={i} className="flex items-center justify-between py-1">
+                    <div className="flex items-center gap-3">
+                      <Skeleton className="h-9 w-9 rounded-full" />
+                      <div className="space-y-1.5">
+                        <Skeleton className="h-3.5 w-28" />
+                        <Skeleton className="h-3 w-20" />
+                      </div>
+                    </div>
+                    <div className="space-y-1 text-right">
+                      <Skeleton className="h-4 w-16 ml-auto" />
+                      <Skeleton className="h-3 w-10 ml-auto" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : todayPayments.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground px-6">
                 <Receipt className="h-8 w-8 mx-auto mb-2 opacity-40" />
                 <p className="text-sm">No payments received today</p>
@@ -910,19 +1046,25 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={expenseChartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
-                  <XAxis dataKey="category" tick={{ fill: '#8c8c8c', fontSize: 12 }} />
-                  <YAxis tick={{ fill: '#8c8c8c', fontSize: 12 }} />
-                  <Tooltip cursor={false} contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
-                  <Bar dataKey="amount" radius={[4, 4, 0, 0]} maxBarSize={48} activeBar={false}>
-                    {expenseChartData.map((entry, i) => (
-                      <Cell key={i} fill={categoryColors[entry.category] || '#6b7280'} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              {isExpensesLoading ? (
+                <div className="h-full w-full flex items-center justify-center p-4">
+                  <Skeleton className="h-full w-full rounded-lg" />
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={expenseChartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1f1f24" />
+                    <XAxis dataKey="category" tick={{ fill: '#8c8c8c', fontSize: 12 }} />
+                    <YAxis tick={{ fill: '#8c8c8c', fontSize: 12 }} />
+                    <Tooltip cursor={false} contentStyle={{ background: '#0c0c0e', border: '1px solid #1f1f24', borderRadius: 8, color: '#fafafa' }} />
+                    <Bar dataKey="amount" radius={[4, 4, 0, 0]} maxBarSize={48} activeBar={false}>
+                      {expenseChartData.map((entry, i) => (
+                        <Cell key={i} fill={categoryColors[entry.category] || '#6b7280'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>
