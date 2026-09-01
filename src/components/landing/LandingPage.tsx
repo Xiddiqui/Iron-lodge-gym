@@ -1,7 +1,6 @@
 'use client';
-import { useState, useEffect, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
-import { supabase } from '@/lib/supabase/client';
+import { useState, useMemo } from 'react';
+import Link from 'next/link';
 import { useLandingPageSettings } from '@/hooks/use-landing-page';
 import { useGymSettings } from '@/hooks/use-gym-settings';
 import {
@@ -29,8 +28,6 @@ import {
   Phone,
   Mail,
   MessageCircle,
-  LayoutDashboard,
-  LogIn,
   Menu,
   X,
   ChevronRight,
@@ -170,7 +167,6 @@ function toVideoEmbedUrl(url: string): string {
 }
 
 export default function LandingPage({ overrideData }: { overrideData?: LandingPageData }) {
-  const router = useRouter();
   const { data: fetchedData, isLoading } = useLandingPageSettings();
   const { data: gymSettings } = useGymSettings();
 
@@ -178,32 +174,11 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
   const gymName = gymSettings?.gym_name || 'Iron Lodge Gym';
   const logoUrl = gymSettings?.logo_url;
 
-  const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [activeImage, setActiveImage] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<string>('All');
   const [openFaqId, setOpenFaqId] = useState<string | null>(null);
   const [isPlayingVideo, setIsPlayingVideo] = useState(false);
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setIsLoggedIn(!!session);
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setIsLoggedIn(!!session);
-    });
-
-    return () => subscription.unsubscribe();
-  }, []);
-
-  const handleDashboardClick = () => {
-    if (isLoggedIn) {
-      router.push('/dashboard');
-    } else {
-      router.push('/auth');
-    }
-  };
 
   const primaryColor = data.theme?.primaryColor || '#a3e635';
   const secondaryColor = data.theme?.secondaryColor || '#22c55e';
@@ -709,8 +684,8 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
                   </div>
                 </div>
 
-                <button
-                  onClick={handleDashboardClick}
+                <a
+                  href="#contact"
                   className="w-full py-3.5 rounded-xl font-bold text-sm text-white transition-all shadow-md hover:opacity-90 active:scale-95 flex items-center justify-center gap-2"
                   style={{
                     backgroundColor: plan.isPopular ? primaryColor : '#1e293b',
@@ -719,7 +694,7 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
                 >
                   <span>{plan.ctaText || 'Get Started'}</span>
                   <ChevronRight className="h-4 w-4" />
-                </button>
+                </a>
               </div>
             ))}
           </div>
@@ -1137,9 +1112,9 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
           <div className="mt-16 pt-8 border-t border-slate-800/80 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-4">
             <p>© {new Date().getFullYear()} {gymName}. All rights reserved.</p>
             <div className="flex items-center gap-6">
-              <button onClick={handleDashboardClick} className="hover:text-slate-300 transition">
-                {isLoggedIn ? 'Dashboard' : 'Portal Login'}
-              </button>
+              <Link href="/dashboard" className="hover:text-slate-300 transition">
+                Dashboard
+              </Link>
             </div>
           </div>
         </div>
@@ -1296,41 +1271,12 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
             {sections.contact && <a href="#contact" className="hover:text-white transition-colors">Contact</a>}
           </nav>
 
-          {/* Action / Member Portal Button */}
-          <div className="hidden sm:flex items-center gap-4">
-            <button
-              onClick={handleDashboardClick}
-              className="px-5 py-2.5 rounded-xl font-semibold text-sm text-white flex items-center gap-2 transition-all shadow-lg hover:opacity-90 active:scale-95"
-              style={{ backgroundColor: primaryColor }}
-            >
-              {isLoggedIn ? (
-                <>
-                  <LayoutDashboard className="h-4 w-4" />
-                  <span>Go to Dashboard</span>
-                </>
-              ) : (
-                <>
-                  <LogIn className="h-4 w-4" />
-                  <span>Member Login</span>
-                </>
-              )}
-            </button>
-          </div>
-
           {/* Mobile Menu Button */}
-          <div className="lg:hidden flex items-center gap-3">
-            <button
-              onClick={handleDashboardClick}
-              className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white flex items-center gap-1.5"
-              style={{ backgroundColor: primaryColor }}
-            >
-              {isLoggedIn ? <LayoutDashboard className="h-3.5 w-3.5" /> : <LogIn className="h-3.5 w-3.5" />}
-              <span>Portal</span>
-            </button>
-
+          <div className="lg:hidden flex items-center">
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
               className="p-2 text-slate-400 hover:text-white"
+              aria-label="Toggle Navigation Menu"
             >
               {mobileMenuOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
             </button>

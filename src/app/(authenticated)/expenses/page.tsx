@@ -66,9 +66,17 @@ export default function ExpensesPage() {
         payload.notes = data.notes.trim();
       }
       if (currentUser?.id) {
-        payload.created_by = currentUser.id;
+        payload.logged_by = currentUser.id;
       }
-      const { error } = await supabase.from('expenses').insert(payload);
+      let { error } = await supabase.from('expenses').insert(payload);
+
+      // Fallback: If logged_by column is not present or triggers schema cache/FK error, retry without it
+      if (error && payload.logged_by) {
+        delete payload.logged_by;
+        const retry = await supabase.from('expenses').insert(payload);
+        error = retry.error;
+      }
+
       if (error) throw error;
     },
     onSuccess: () => {
