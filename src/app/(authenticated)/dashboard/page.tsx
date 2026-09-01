@@ -241,7 +241,20 @@ export default function DashboardPage() {
 
       if (feeErr) throw feeErr;
 
-      let feeList = (existingFees ?? []).map((f: any) => {
+      let feeList = (existingFees ?? []).filter((f: any) => {
+        const m = f.members;
+        if (m && m.join_date) {
+          const [jY, jM] = m.join_date.split('-').map(Number);
+          if (jY && jM) {
+            const joinPeriodMonth = `${jY}-${String(jM).padStart(2, '0')}-01`;
+            if (f.period_month < joinPeriodMonth) {
+              supabase.from('fee_records').delete().eq('id', f.id).then();
+              return false;
+            }
+          }
+        }
+        return true;
+      }).map((f: any) => {
         const m = f.members;
         if (m && m.join_date) {
           const [jY, jM] = m.join_date.split('-').map(Number);
@@ -271,7 +284,14 @@ export default function DashboardPage() {
       // Check if any active member lacks a fee record for this month
       if (activeMembers && activeMembers.length > 0) {
         const existingMemberIds = new Set(feeList.map((f: any) => f.member_id));
-        const missingMembers = activeMembers.filter((m: any) => !existingMemberIds.has(m.id));
+        const missingMembers = activeMembers.filter((m: any) => {
+          if (existingMemberIds.has(m.id)) return false;
+          if (!m.join_date) return false;
+          const [jY, jM] = m.join_date.split('-').map(Number);
+          if (!jY || !jM) return false;
+          const joinPeriodMonth = `${jY}-${String(jM).padStart(2, '0')}-01`;
+          return joinPeriodMonth <= monthStart;
+        });
 
         if (missingMembers.length > 0) {
           const lastDay = new Date(year, month, 0).getDate();

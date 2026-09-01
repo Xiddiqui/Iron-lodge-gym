@@ -37,12 +37,30 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Member not found' }, { status: 404 });
     }
 
-    // Generate fee records from join_date to current month
-    const joinDate = new Date(member.join_date);
+    if (!member.join_date) {
+      return NextResponse.json({ message: 'Member has no join date', generated: 0 });
+    }
+
+    // Safely parse join_date without timezone offset shifting
+    const [jYear, jMonth] = member.join_date.split('-').map(Number);
+    if (!jYear || !jMonth) {
+      return NextResponse.json({ error: 'Invalid join date' }, { status: 400 });
+    }
+
+    const joinPeriodMonth = `${jYear}-${String(jMonth).padStart(2, '0')}-01`;
+
+    // 1. Delete any invalid fee records strictly before the member's join date month
+    await supabase
+      .from('fee_records')
+      .delete()
+      .eq('member_id', member.id)
+      .lt('period_month', joinPeriodMonth);
+
+    // 2. Generate fee records from join month to current month
     const now = new Date();
     const records = [];
 
-    let cursor = new Date(joinDate.getFullYear(), joinDate.getMonth(), 1);
+    let cursor = new Date(jYear, jMonth - 1, 1);
     const endMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
     while (cursor <= endMonth) {
@@ -97,7 +115,7 @@ export async function POST(request: Request) {
   // Get all active members
   const { data: members, error: membersError } = await supabase
     .from('members')
-    .select('id, monthly_fee, training_fees')
+    .select('id, monthly_fee, training_fees, join_date')
     .eq('active', true);
 
   if (membersError) {
@@ -108,8 +126,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ message: 'No active members found', generated: 0 });
   }
 
+  // Filter members who joined on or before this billing month
+  const eligibleMembers = members.filter((m) => {
+    if (!m.join_date) return true;
+    const [jYear, jMonth] = m.join_date.split('-').map(Number);
+    if (!jYear || !jMonth) return true;
+    const joinPeriodMonth = `${jYear}-${String(jMonth).padStart(2, '0')}-01`;
+    return joinPeriodMonth <= periodMonth;
+  });
+
+  if (eligibleMembers.length === 0) {
+    return NextResponse.json({ message: 'No eligible members for this month', generated: 0 });
+  }
+
   // Build fee records
-  const bulkRecords = members.map((m) => {
+  const bulkRecords = eligibleMembers.map((m) => {
     const totalFee = (Number(m.monthly_fee) || 0) + (Number(m.training_fees) || 0);
     return {
       member_id: m.id,
@@ -134,6 +165,6 @@ export async function POST(request: Request) {
   return NextResponse.json({
     message: `Generated fee records for ${periodMonth}`,
     generated: inserted?.length ?? 0,
-    total_members: members.length,
+    total_members: eligibleMembers.length,
   });
 }

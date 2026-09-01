@@ -294,9 +294,11 @@ function getCurrentMonthKey(): string {
 // Helper: get all months from join_date to current month
 function getMonthsBetween(joinDate: string): string[] {
   const months: string[] = [];
-  const join = new Date(joinDate);
+  if (!joinDate) return months;
+  const [jY, jM] = joinDate.split('-').map(Number);
+  if (!jY || !jM) return months;
+  let cursor = new Date(jY, jM - 1, 1);
   const now = new Date();
-  let cursor = new Date(join.getFullYear(), join.getMonth(), 1);
   const end = new Date(now.getFullYear(), now.getMonth(), 1);
 
   while (cursor <= end) {
@@ -322,8 +324,8 @@ function formatPeriodMonth(periodMonth: string): string {
 // Helper: compute the next fee due date based on join_date and paid fee records
 function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
   if (!m.join_date) return '—';
-  const joinDate = new Date(m.join_date);
-  const joinDay = joinDate.getDate() || 1;
+  const [jYear, jMonth, jDay] = m.join_date.split('-').map(Number);
+  const joinDay = jDay || 1;
 
   const records = (feeRecords || []).filter(fr => fr.member_id === m.id);
   const paidRecords = records.filter(fr => fr.paid || (Number(fr.amount_paid) >= Number(fr.amount) && Number(fr.amount) > 0));
@@ -677,7 +679,21 @@ export default function MembersPage() {
         .eq('member_id', selectedMember.id)
         .order('period_month', { ascending: false });
       if (error) throw error;
-      return data as FeeRecord[];
+
+      if (!selectedMember.join_date) return (data || []) as FeeRecord[];
+      const [jY, jM] = selectedMember.join_date.split('-').map(Number);
+      if (!jY || !jM) return (data || []) as FeeRecord[];
+      const joinPeriodMonth = `${jY}-${String(jM).padStart(2, '0')}-01`;
+
+      // Clean up invalid pre-join records in background
+      const invalidRecords = (data || []).filter((fr: any) => fr.period_month < joinPeriodMonth);
+      if (invalidRecords.length > 0) {
+        const invalidIds = invalidRecords.map((fr: any) => fr.id);
+        supabase.from('fee_records').delete().in('id', invalidIds).then();
+      }
+
+      const validRecords = (data || []).filter((fr: any) => fr.period_month >= joinPeriodMonth);
+      return validRecords as FeeRecord[];
     },
     enabled: !!selectedMember,
   });
