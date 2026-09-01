@@ -12,10 +12,10 @@ export function useStaffTracker() {
     // Initial ping on session load
     pingStaffSession(user.id);
 
-    // Periodic heartbeat every 60 seconds
+    // Periodic heartbeat every 3 minutes
     const interval = setInterval(() => {
       pingStaffSession(user.id);
-    }, 60000);
+    }, 180000);
 
     return () => clearInterval(interval);
   }, [user?.id]);

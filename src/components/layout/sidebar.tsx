@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard, Users, CalendarCheck, MessageSquare,
   Receipt, Settings, LogOut, Dumbbell, Menu, X, Landmark,
-  Coffee, Lock, Monitor
+  Coffee, Lock
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useRole } from '@/hooks/use-role';
@@ -27,7 +27,6 @@ const NAV_ITEMS = [
   { to: '/enquiries', label: 'Enquiries', icon: MessageSquare, adminOnly: true },
   { to: '/expenses', label: 'Expenses', icon: Receipt, adminOnly: true },
   { to: '/reserve-account', label: 'Reserve', icon: Landmark, adminOnly: true },
-  { to: '/system-monitor', label: 'System Monitor', icon: Monitor, adminOnly: true },
   { to: '/settings', label: 'Settings', icon: Settings, adminOnly: true },
 ];
 
@@ -60,7 +59,7 @@ export function Sidebar() {
       return count ?? 0;
     },
     enabled: role === 'admin',
-    refetchInterval: 10000,
+    staleTime: 5 * 60 * 1000,
   });
 
   useEffect(() => setMobileOpen(false), [pathname]);
@@ -68,7 +67,7 @@ export function Sidebar() {
   // Redirect staff from admin-only pages
   useEffect(() => {
     if (roleLoading || !role) return;
-    if (role !== 'admin' && (pathname === '/dashboard' || pathname === '/expenses' || pathname === '/settings' || pathname === '/enquiries' || pathname === '/reserve-account' || pathname === '/system-monitor')) {
+    if (role !== 'admin' && (pathname === '/dashboard' || pathname === '/expenses' || pathname === '/settings' || pathname === '/enquiries' || pathname === '/reserve-account')) {
       router.replace('/members');
     }
   }, [role, roleLoading, pathname, router]);

@@ -9,6 +9,6 @@ export function useCurrentUser() {
       const { data, error } = await supabase.auth.getUser();
       return error ? null : data.user;
     },
-    staleTime: 0,
+    staleTime: 5 * 60 * 1000,
   });
 }

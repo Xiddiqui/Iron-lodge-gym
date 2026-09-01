@@ -472,7 +472,7 @@ export function BiometricAlertsProvider({
   }, [dismissAlert]);
 
   useEffect(() => {
-    // 1. Supabase Realtime WebSocket subscription
+    // Supabase Realtime WebSocket subscription — pushes new check-in/duplicate events instantly
     const channel = supabase
       .channel('biometric-notifications-alerts')
       .on(
@@ -488,27 +488,8 @@ export function BiometricAlertsProvider({
       )
       .subscribe();
 
-    // 2. Fallback polling every 3 seconds for recent notifications (created in last 30s)
-    const pollInterval = setInterval(async () => {
-      try {
-        const thirtySecsAgo = new Date(Date.now() - 30000).toISOString();
-        const { data } = await supabase
-          .from('biometric_notifications')
-          .select('*')
-          .gte('created_at', thirtySecsAgo)
-          .order('created_at', { ascending: true });
-
-        if (data && data.length > 0) {
-          data.forEach((item) => handleNewNotification(item as BiometricNotification));
-        }
-      } catch {
-        // Ignore polling error
-      }
-    }, 3000);
-
     return () => {
       supabase.removeChannel(channel);
-      clearInterval(pollInterval);
     };
   }, [handleNewNotification]);
 

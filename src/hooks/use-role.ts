@@ -8,8 +8,7 @@ export function useRole() {
   return useQuery({
     queryKey: ['my-role', user?.id],
     enabled: !!user?.id,
-    staleTime: 0,
-    refetchOnMount: 'always' as const,
+    staleTime: 5 * 60 * 1000,
     queryFn: async () => {
       const { data } = await supabase.rpc('get_my_role');
       return data as 'admin' | 'staff' | null;
