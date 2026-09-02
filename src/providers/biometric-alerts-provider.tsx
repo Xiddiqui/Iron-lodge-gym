@@ -23,6 +23,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Fingerprint, AlertTriangle, X, CheckCircle, DollarSign, Clock, Volume2, VolumeX } from 'lucide-react';
+import { normalizeImageSrc } from '@/lib/image-utils';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -292,9 +293,9 @@ function CheckInAlert({
 
         {/* Member Row */}
         <div className="flex items-center gap-3">
-          {n.member_photo_url ? (
+          {normalizeImageSrc(n.member_photo_url) ? (
             <img
-              src={n.member_photo_url}
+              src={normalizeImageSrc(n.member_photo_url)!}
               alt={n.member_name}
               className="h-14 w-14 rounded-full object-cover border-2 border-emerald-500/40 shadow-lg"
             />
@@ -372,9 +373,9 @@ function DuplicateAlert({
 
         {/* Member Row */}
         <div className="flex items-center gap-3">
-          {n.member_photo_url ? (
+          {normalizeImageSrc(n.member_photo_url) ? (
             <img
-              src={n.member_photo_url}
+              src={normalizeImageSrc(n.member_photo_url)!}
               alt={n.member_name}
               className="h-14 w-14 rounded-full object-cover border-2 border-red-500/50 shadow-lg"
             />

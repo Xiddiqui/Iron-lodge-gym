@@ -88,4 +88,42 @@ export function formatPhoneForWA(phone: string | null | undefined): string | nul
   return cleaned;
 }
 
+export function formatPeriodMonth(periodMonth: string | null | undefined, joinDate?: string | null): string {
+  if (!periodMonth || !periodMonth.includes('-')) return periodMonth || '—';
+  const [y, m] = periodMonth.split('-').map(Number);
+  if (!y || !m) return periodMonth;
+
+  if (joinDate && typeof joinDate === 'string' && joinDate.includes('-')) {
+    const cleanJoinDate = joinDate.slice(0, 10);
+    const [, , jD] = cleanJoinDate.split('-').map(Number);
+    const joinDay = jD || 1;
+
+    // Start date in cycle month
+    const daysInStartMonth = new Date(y, m, 0).getDate();
+    const startDay = Math.min(joinDay, daysInStartMonth);
+    const startDate = new Date(y, m - 1, startDay);
+
+    // End date is 1 month later
+    const nextMonthObj = new Date(y, m, 1);
+    const nextY = nextMonthObj.getFullYear();
+    const nextM = nextMonthObj.getMonth() + 1;
+    const daysInNextMonth = new Date(nextY, nextM, 0).getDate();
+    const endDay = Math.min(joinDay, daysInNextMonth);
+    const endDate = new Date(nextY, nextM - 1, endDay);
+
+    const startMonthStr = startDate.toLocaleDateString('en-US', { month: 'short' });
+    const endMonthStr = endDate.toLocaleDateString('en-US', { month: 'short' });
+
+    if (y === nextY) {
+      return `${startDay} ${startMonthStr} – ${endDay} ${endMonthStr} ${y}`;
+    } else {
+      return `${startDay} ${startMonthStr} ${y} – ${endDay} ${endMonthStr} ${nextY}`;
+    }
+  }
+
+  const dateObj = new Date(y, m - 1, 1);
+  return dateObj.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+}
+
+
 

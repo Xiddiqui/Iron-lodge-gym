@@ -33,6 +33,7 @@ import {
   ZoomIn,
 } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
+import { normalizeImageSrc } from '@/lib/image-utils';
 import { toast } from 'sonner';
 
 interface Trainer {
@@ -99,10 +100,11 @@ export default function TrainersPage() {
   }>({ open: false, photoUrl: null });
 
   const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
-    if (!photoUrl) return;
+    const resolved = normalizeImageSrc(photoUrl);
+    if (!resolved) return;
     setFullPhotoPreview({
       open: true,
-      photoUrl,
+      photoUrl: resolved,
       title: title || 'Photo View',
       subtitle,
     });
@@ -402,30 +404,34 @@ export default function TrainersPage() {
                       >
                         <td className="p-4">
                           <div className="flex items-center gap-3">
-                            {t.photo_url ? (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openFullPhoto(t.photo_url, t.name, t.specialization || 'Trainer');
-                                }}
-                                className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                                title="Click to view full size photo"
-                              >
-                                <img
-                                  src={t.photo_url}
-                                  alt={t.name}
-                                  className="h-10 w-10 rounded-full object-cover border border-border shrink-0 group-hover:scale-110 transition-transform"
-                                />
-                                <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                                  <ZoomIn className="h-3.5 w-3.5 text-white" />
+                            {(() => {
+                              const trainerPhoto = normalizeImageSrc(t.photo_url);
+                              return trainerPhoto ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openFullPhoto(trainerPhoto, t.name, t.specialization || 'Trainer');
+                                  }}
+                                  className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                  title="Click to view full size photo"
+                                >
+                                  <img
+                                    src={trainerPhoto}
+                                    alt={t.name}
+                                    className="h-10 w-10 rounded-full object-cover border border-border shrink-0 group-hover:scale-110 transition-transform"
+                                    loading="lazy"
+                                  />
+                                  <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                    <ZoomIn className="h-3.5 w-3.5 text-white" />
+                                  </div>
+                                </button>
+                              ) : (
+                                <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
+                                  {t.name.slice(0, 1).toUpperCase()}
                                 </div>
-                              </button>
-                            ) : (
-                              <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
-                                {t.name.slice(0, 1).toUpperCase()}
-                              </div>
-                            )}
+                              );
+                            })()}
                             <div>
                               <div className="font-medium text-foreground">{t.name}</div>
                               {t.specialization && (
@@ -505,13 +511,13 @@ export default function TrainersPage() {
             <div className="relative w-40 h-40 rounded-full overflow-hidden border-2 border-primary/40 bg-background shadow-inner grid place-items-center">
               {isCameraActive ? (
                 <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-              ) : form.photo_url ? (
+              ) : normalizeImageSrc(form.photo_url) ? (
                 <div
                   className="relative w-full h-full group cursor-pointer"
-                  onClick={() => openFullPhoto(form.photo_url, form.name || 'Trainer Preview', 'Photo Preview')}
+                  onClick={() => openFullPhoto(normalizeImageSrc(form.photo_url), form.name || 'Trainer Preview', 'Photo Preview')}
                   title="Click to view full size photo"
                 >
-                  <img src={form.photo_url} alt="Trainer Preview" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                  <img src={normalizeImageSrc(form.photo_url)!} alt="Trainer Preview" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
                   <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                     <ZoomIn className="h-5 w-5 text-white" />
                   </div>
@@ -667,33 +673,37 @@ export default function TrainersPage() {
               {/* Header Details */}
               <DialogHeader>
                 <div className="flex items-start gap-4">
-                  {selectedTrainer.photo_url ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        openFullPhoto(
-                          selectedTrainer.photo_url,
-                          selectedTrainer.name,
-                          selectedTrainer.specialization || 'Trainer'
-                        )
-                      }
-                      className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                      title="Click to view full size photo"
-                    >
-                      <img
-                        src={selectedTrainer.photo_url}
-                        alt={selectedTrainer.name}
-                        className="h-16 w-16 rounded-full object-cover border-2 border-primary/30 shrink-0 group-hover:scale-110 transition-transform"
-                      />
-                      <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                        <ZoomIn className="h-4 w-4 text-white" />
+                  {(() => {
+                    const selectedPhoto = normalizeImageSrc(selectedTrainer.photo_url);
+                    return selectedPhoto ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openFullPhoto(
+                            selectedPhoto,
+                            selectedTrainer.name,
+                            selectedTrainer.specialization || 'Trainer'
+                          )
+                        }
+                        className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                        title="Click to view full size photo"
+                      >
+                        <img
+                          src={selectedPhoto}
+                          alt={selectedTrainer.name}
+                          className="h-16 w-16 rounded-full object-cover border-2 border-primary/30 shrink-0 group-hover:scale-110 transition-transform"
+                          loading="lazy"
+                        />
+                        <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                          <ZoomIn className="h-4 w-4 text-white" />
+                        </div>
+                      </button>
+                    ) : (
+                      <div className="h-16 w-16 rounded-full bg-primary/20 grid place-items-center text-xl font-bold text-primary shrink-0">
+                        {selectedTrainer.name.slice(0, 1).toUpperCase()}
                       </div>
-                    </button>
-                  ) : (
-                    <div className="h-16 w-16 rounded-full bg-primary/20 grid place-items-center text-xl font-bold text-primary shrink-0">
-                      {selectedTrainer.name.slice(0, 1).toUpperCase()}
-                    </div>
-                  )}
+                    );
+                  })()}
                   <div className="space-y-1">
                     <DialogTitle className="text-2xl">{selectedTrainer.name}</DialogTitle>
                     {selectedTrainer.specialization && (
@@ -780,29 +790,33 @@ export default function TrainersPage() {
                             </td>
                             <td className="p-3">
                               <div className="flex items-center gap-2">
-                                {m.photo_url ? (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      openFullPhoto(m.photo_url, m.full_name, `Member #${m.member_number || 'N/A'}`)
-                                    }
-                                    className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                                    title="Click to view full size photo"
-                                  >
-                                    <img
-                                      src={m.photo_url}
-                                      alt={m.full_name}
-                                      className="h-7 w-7 rounded-full object-cover border border-border shrink-0 group-hover:scale-110 transition-transform"
-                                    />
-                                    <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                                      <ZoomIn className="h-2 w-2 text-white" />
+                                {(() => {
+                                  const clientPhoto = normalizeImageSrc(m.photo_url);
+                                  return clientPhoto ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        openFullPhoto(clientPhoto, m.full_name, `Member #${m.member_number || 'N/A'}`)
+                                      }
+                                      className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                      title="Click to view full size photo"
+                                    >
+                                      <img
+                                        src={clientPhoto}
+                                        alt={m.full_name}
+                                        className="h-7 w-7 rounded-full object-cover border border-border shrink-0 group-hover:scale-110 transition-transform"
+                                        loading="lazy"
+                                      />
+                                      <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                        <ZoomIn className="h-2 w-2 text-white" />
+                                      </div>
+                                    </button>
+                                  ) : (
+                                    <div className="h-7 w-7 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
+                                      {m.full_name.slice(0, 1).toUpperCase()}
                                     </div>
-                                  </button>
-                                ) : (
-                                  <div className="h-7 w-7 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
-                                    {m.full_name.slice(0, 1).toUpperCase()}
-                                  </div>
-                                )}
+                                  );
+                                })()}
                                 <span className="font-medium text-foreground">{m.full_name}</span>
                               </div>
                             </td>

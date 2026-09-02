@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic';
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
-import { formatCurrency, formatDate, formatDateTime } from '@/lib/format';
+import { formatCurrency, formatDate, formatDateTime, formatPeriodMonth } from '@/lib/format';
 import { useRole } from '@/hooks/use-role';
 import { useCurrentUser } from '@/hooks/use-session';
 import { Card, CardContent } from '@/components/ui/card';
@@ -16,6 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
+import { normalizeImageSrc } from '@/lib/image-utils';
 import { toast } from 'sonner';
 import { isMemberAssignedToStaff, embedStaffIdsInNotes, stripStaffIdsFromNotes, getAssignedStaffIds } from '@/lib/staff-assignments';
 import { PAYMENT_METHODS } from '@/lib/constants';
@@ -204,18 +205,20 @@ async function syncMemberFeeRecords(
     }
   }
 
-  // Also ensure fee records exist up to the current month for any months AFTER the tenure
+  // Also ensure fee records exist up to the active cycle for any months AFTER the tenure
   const now = new Date();
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth() + 1;
+  const currentDay = now.getDate();
+  const latestDueMonthDate = currentDay >= joinDay
+    ? new Date(now.getFullYear(), now.getMonth(), 1)
+    : new Date(now.getFullYear(), now.getMonth() - 1, 1);
+
   const lastTenureDate = new Date(jYear, jMonth - 1 + tenure - 1, 1);
   let extraCursor = new Date(lastTenureDate.getFullYear(), lastTenureDate.getMonth() + 1, 1);
-  const currentMonthDate = new Date(currentYear, currentMonth - 1, 1);
 
   const monthlyFeeRate = tenure > 0 ? Math.round(totalPayableForTenure / tenure) : totalPayableForTenure;
   const extraRecords = [];
 
-  while (extraCursor <= currentMonthDate) {
+  while (extraCursor <= latestDueMonthDate) {
     const eYear = extraCursor.getFullYear();
     const eMonth = extraCursor.getMonth() + 1;
     const ePeriodMonth = `${eYear}-${String(eMonth).padStart(2, '0')}-01`;
@@ -270,7 +273,7 @@ async function syncMemberFeeRecords(
       .lt('period_month', firstPeriodMonth);
   }
 
-  // Delete any future unpaid records beyond both the tenure window and current month
+  // Delete any future unpaid records beyond both the tenure window and latest due month
   const allValidMonths = [
     ...tenureRecords.map((r) => r.period_month),
     ...extraRecords.map((r) => r.period_month),
@@ -310,16 +313,6 @@ function getMonthsBetween(joinDate: string): string[] {
   return months;
 }
 
-// Helper: format period month for display
-function formatPeriodMonth(periodMonth: string): string {
-  if (!periodMonth || !periodMonth.includes('-')) return periodMonth || '—';
-  const [y, m] = periodMonth.split('-').map(Number);
-  if (y && m) {
-    const dateObj = new Date(y, m - 1, 1);
-    return dateObj.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-  }
-  return periodMonth;
-}
 
 // Helper: compute the next fee due date based on join_date and paid fee records
 function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
@@ -364,7 +357,7 @@ export default function MembersPage() {
   const { data: currentUser } = useCurrentUser();
   const isAdmin = userRole === 'admin';
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<'all' | 'active' | 'inactive' | 'pending'>('all');
+  const [filter, setFilter] = useState<'all' | 'active' | 'inactive' | 'unpaid' | 'pending'>('all');
   const [genderFilter, setGenderFilter] = useState<'all' | 'male' | 'female'>('all');
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 20;
@@ -506,10 +499,11 @@ export default function MembersPage() {
   }>({ open: false, photoUrl: null });
 
   const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
-    if (!photoUrl) return;
+    const resolved = normalizeImageSrc(photoUrl);
+    if (!resolved) return;
     setFullPhotoPreview({
       open: true,
-      photoUrl,
+      photoUrl: resolved,
       title: title || 'Member Photo',
       subtitle,
     });
@@ -592,9 +586,10 @@ export default function MembersPage() {
         const m = memberMap.get(fr.member_id);
         if (!m || !m.join_date) return true;
 
-        const [jY, jM] = m.join_date.split('-').map(Number);
+        const [jY, jM, jD] = m.join_date.split('-').map(Number);
         if (!jY || !jM) return true;
         const joinPeriodMonth = `${jY}-${String(jM).padStart(2, '0')}-01`;
+        const joinDay = jD || 1;
 
         // Record strictly before join date is invalid
         if (fr.period_month < joinPeriodMonth) {
@@ -606,6 +601,21 @@ export default function MembersPage() {
         const tenure = Math.max(1, Number(m.tenure_months) || 1);
         const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
         const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+
+        // Check latest allowed due month based on current day vs member join day
+        const now = new Date();
+        const currentDay = now.getDate();
+        const latestDueMonth = currentDay >= joinDay
+          ? new Date(now.getFullYear(), now.getMonth(), 1)
+          : new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const latestDueMonthKey = `${latestDueMonth.getFullYear()}-${String(latestDueMonth.getMonth() + 1).padStart(2, '0')}-01`;
+        const maxAllowedPeriod = lastTenurePeriod > latestDueMonthKey ? lastTenurePeriod : latestDueMonthKey;
+
+        // If unpaid and in future beyond maxAllowedPeriod, delete and filter out
+        if (!fr.paid && Number(fr.amount_paid || 0) === 0 && fr.period_month > maxAllowedPeriod) {
+          priorRecordIds.push(fr.id);
+          return false;
+        }
 
         if (fr.period_month > lastTenurePeriod) {
           // If after tenure and not collected manually via collect modal, it must be unpaid
@@ -681,9 +691,10 @@ export default function MembersPage() {
       if (error) throw error;
 
       if (!selectedMember.join_date) return (data || []) as FeeRecord[];
-      const [jY, jM] = selectedMember.join_date.split('-').map(Number);
+      const [jY, jM, jD] = selectedMember.join_date.split('-').map(Number);
       if (!jY || !jM) return (data || []) as FeeRecord[];
       const joinPeriodMonth = `${jY}-${String(jM).padStart(2, '0')}-01`;
+      const joinDay = jD || 1;
 
       // Clean up invalid pre-join records in background
       const invalidRecords = (data || []).filter((fr: any) => fr.period_month < joinPeriodMonth);
@@ -692,7 +703,29 @@ export default function MembersPage() {
         supabase.from('fee_records').delete().in('id', invalidIds).then();
       }
 
-      const validRecords = (data || []).filter((fr: any) => fr.period_month >= joinPeriodMonth);
+      // Check max allowed active cycle:
+      const now = new Date();
+      const currentDay = now.getDate();
+      const latestDueMonth = currentDay >= joinDay
+        ? new Date(now.getFullYear(), now.getMonth(), 1)
+        : new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const latestDueMonthKey = `${latestDueMonth.getFullYear()}-${String(latestDueMonth.getMonth() + 1).padStart(2, '0')}-01`;
+
+      const tenure = Math.max(1, Number(selectedMember.tenure_months) || 1);
+      const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
+      const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+      const maxAllowedPeriod = lastTenurePeriod > latestDueMonthKey ? lastTenurePeriod : latestDueMonthKey;
+
+      const futureUnpaidRecords = (data || []).filter((fr: any) => !fr.paid && Number(fr.amount_paid || 0) === 0 && fr.period_month > maxAllowedPeriod);
+      if (futureUnpaidRecords.length > 0) {
+        const futureIds = futureUnpaidRecords.map((fr: any) => fr.id);
+        supabase.from('fee_records').delete().in('id', futureIds).then();
+      }
+
+      const validRecords = (data || []).filter((fr: any) => 
+        fr.period_month >= joinPeriodMonth && 
+        (fr.paid || Number(fr.amount_paid || 0) > 0 || fr.period_month <= maxAllowedPeriod)
+      );
       return validRecords as FeeRecord[];
     },
     enabled: !!selectedMember,
@@ -1555,28 +1588,6 @@ export default function MembersPage() {
     return members.filter((m) => isMemberAssignedToStaff(m, currentUser.id));
   }, [members, isAdmin, currentUser?.id]);
 
-  const filtered = useMemo(() => {
-    return staffFilteredMembers
-      .filter((m) => {
-        const cleanSearch = search.trim().toLowerCase();
-        const matchSearch =
-          !cleanSearch ||
-          m.full_name.toLowerCase().includes(cleanSearch) ||
-          (m.phone || '').toLowerCase().includes(cleanSearch) ||
-          (m.member_number || '').toLowerCase().includes(cleanSearch) ||
-          (m.cnic || '').toLowerCase().includes(cleanSearch);
-        const matchFilter = filter === 'all' ? true : filter === 'active' ? m.active : !m.active;
-        const mGender = (m.gender || 'male').toLowerCase();
-        const matchGender = genderFilter === 'all' ? true : mGender === genderFilter;
-        return matchSearch && matchFilter && matchGender;
-      })
-      .sort(compareMemberNumbers);
-  }, [staffFilteredMembers, search, filter, genderFilter]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const safePage = Math.min(currentPage, totalPages);
-  const paginatedMembers = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
-
   // Helper to get payment status info for a member
   // Uses the member's join_date to determine their billing day (e.g. joined Aug 10 → due on 10th each month)
   function getMemberPaymentStatus(m: Member) {
@@ -1683,6 +1694,46 @@ export default function MembersPage() {
     };
   }
 
+  // Count of unpaid members
+  const unpaidCount = useMemo(() => {
+    return staffFilteredMembers.filter((m) => {
+      const s = getMemberPaymentStatus(m);
+      return s.status === 'unpaid' || s.status === 'partial' || s.unpaidMonths > 0;
+    }).length;
+  }, [staffFilteredMembers, memberCurrentFee, memberUnpaidFees, allFeeRecords]);
+
+  const filtered = useMemo(() => {
+    return staffFilteredMembers
+      .filter((m) => {
+        const cleanSearch = search.trim().toLowerCase();
+        const matchSearch =
+          !cleanSearch ||
+          m.full_name.toLowerCase().includes(cleanSearch) ||
+          (m.phone || '').toLowerCase().includes(cleanSearch) ||
+          (m.member_number || '').toLowerCase().includes(cleanSearch) ||
+          (m.cnic || '').toLowerCase().includes(cleanSearch);
+
+        let matchFilter = true;
+        if (filter === 'active') {
+          matchFilter = m.active;
+        } else if (filter === 'inactive') {
+          matchFilter = !m.active;
+        } else if (filter === 'unpaid') {
+          const s = getMemberPaymentStatus(m);
+          matchFilter = s.status === 'unpaid' || s.status === 'partial' || s.unpaidMonths > 0;
+        }
+
+        const mGender = (m.gender || 'male').toLowerCase();
+        const matchGender = genderFilter === 'all' ? true : mGender === genderFilter;
+        return matchSearch && matchFilter && matchGender;
+      })
+      .sort(compareMemberNumbers);
+  }, [staffFilteredMembers, search, filter, genderFilter, memberCurrentFee, memberUnpaidFees, allFeeRecords]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedMembers = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
   return (
     <div className="p-4 md:p-6 lg:p-8 space-y-6">
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -1722,7 +1773,7 @@ export default function MembersPage() {
               type="button"
               variant={filter === 'all' ? 'default' : 'ghost'}
               size="sm"
-              onClick={() => setFilter('all')}
+              onClick={() => { setFilter('all'); setCurrentPage(1); }}
               className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
                 filter === 'all' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
               }`}
@@ -1733,7 +1784,7 @@ export default function MembersPage() {
               type="button"
               variant={filter === 'active' ? 'default' : 'ghost'}
               size="sm"
-              onClick={() => setFilter('active')}
+              onClick={() => { setFilter('active'); setCurrentPage(1); }}
               className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
                 filter === 'active' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
               }`}
@@ -1744,21 +1795,34 @@ export default function MembersPage() {
               type="button"
               variant={filter === 'inactive' ? 'default' : 'ghost'}
               size="sm"
-              onClick={() => setFilter('inactive')}
+              onClick={() => { setFilter('inactive'); setCurrentPage(1); }}
               className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
                 filter === 'inactive' ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
               }`}
             >
               Inactive ({members.filter((m) => !m.active).length})
             </Button>
+            <Button
+              type="button"
+              variant={filter === 'unpaid' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => { setFilter('unpaid'); setCurrentPage(1); }}
+              className={`h-7 px-3 text-xs font-semibold rounded-md transition-all ${
+                filter === 'unpaid'
+                  ? 'bg-red-600 text-white shadow-sm hover:bg-red-700'
+                  : 'text-red-600 hover:text-red-700 hover:bg-red-500/10'
+              }`}
+            >
+              Unpaid ({unpaidCount})
+            </Button>
             {isAdmin && (
               <Button
                 type="button"
                 variant={filter === 'pending' ? 'default' : 'ghost'}
                 size="sm"
-                onClick={() => setFilter('pending')}
+                onClick={() => { setFilter('pending'); setCurrentPage(1); }}
                 className={`h-7 px-3 text-xs font-semibold rounded-md transition-all flex items-center gap-1.5 ${
-                  filter === 'pending' ? 'bg-amber-600 text-white shadow-sm' : 'text-amber-600 hover:text-amber-700 hover:bg-amber-500/10'
+                  filter === 'pending' ? 'bg-amber-600 text-white shadow-sm hover:bg-amber-700' : 'text-amber-600 hover:text-amber-700 hover:bg-amber-500/10'
                 }`}
               >
                 <span>Pending Approvals</span>
@@ -1900,30 +1964,33 @@ export default function MembersPage() {
                     <CardContent className="p-4 sm:p-5">
                       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-border/60">
                         <div className="flex items-center gap-3">
-                          {targetMember?.photo_url ? (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openFullPhoto(
-                                  targetMember.photo_url,
-                                  targetMember.full_name || changes.full_name || 'Member',
-                                  `Member #${targetMember.member_number || changes.member_number || 'N/A'}`
-                                );
-                              }}
-                              className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                              title="Click to view full size photo"
-                            >
-                              <img src={targetMember.photo_url} alt={targetMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
-                              <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                                <ZoomIn className="h-3.5 w-3.5 text-white" />
+                          {(() => {
+                            const targetPhoto = normalizeImageSrc(targetMember?.photo_url);
+                            return targetPhoto ? (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openFullPhoto(
+                                    targetPhoto,
+                                    targetMember?.full_name || changes.full_name || 'Member',
+                                    `Member #${targetMember?.member_number || changes.member_number || 'N/A'}`
+                                  );
+                                }}
+                                className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                title="Click to view full size photo"
+                              >
+                                <img src={targetPhoto} alt={targetMember?.full_name || 'Member'} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" loading="lazy" />
+                                <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                  <ZoomIn className="h-3.5 w-3.5 text-white" />
+                                </div>
+                              </button>
+                            ) : (
+                              <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
+                                {(targetMember?.full_name || changes.full_name || 'M').slice(0, 1).toUpperCase()}
                               </div>
-                            </button>
-                          ) : (
-                            <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
-                              {(targetMember?.full_name || changes.full_name || 'M').slice(0, 1).toUpperCase()}
-                            </div>
-                          )}
+                            );
+                          })()}
                           <div>
                             <div className="flex items-center gap-2">
                               <span className="font-bold text-base">{targetMember?.full_name || changes.full_name || 'Member'}</span>
@@ -2074,30 +2141,33 @@ export default function MembersPage() {
                         </td>
                         <td className="p-4">
                           <div className="flex items-center gap-3">
-                            {m.photo_url ? (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openFullPhoto(
-                                    m.photo_url,
-                                    m.full_name,
-                                    `Member #${m.member_number || 'N/A'} • ${m.active ? 'Active' : 'Inactive'}`
-                                  );
-                                }}
-                                className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                                title="Click to view full size photo"
-                              >
-                                <img src={m.photo_url} alt={m.full_name} className="h-9 w-9 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
-                                <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                                  <ZoomIn className="h-3 w-3 text-white" />
+                            {(() => {
+                              const memberPhoto = normalizeImageSrc(m.photo_url);
+                              return memberPhoto ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openFullPhoto(
+                                      memberPhoto,
+                                      m.full_name,
+                                      `Member #${m.member_number || 'N/A'} • ${m.active ? 'Active' : 'Inactive'}`
+                                    );
+                                  }}
+                                  className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                  title="Click to view full size photo"
+                                >
+                                  <img src={memberPhoto} alt={m.full_name} className="h-9 w-9 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" loading="lazy" />
+                                  <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                    <ZoomIn className="h-3 w-3 text-white" />
+                                  </div>
+                                </button>
+                              ) : (
+                                <div className="h-9 w-9 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
+                                  {m.full_name.slice(0, 1).toUpperCase()}
                                 </div>
-                              </button>
-                            ) : (
-                              <div className="h-9 w-9 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
-                                {m.full_name.slice(0, 1).toUpperCase()}
-                              </div>
-                            )}
+                              );
+                            })()}
                             <div className="flex flex-col">
                               <span className="font-medium">{m.full_name}</span>
                               {pendingEditReq && (
@@ -2294,13 +2364,13 @@ export default function MembersPage() {
             <div className="relative h-36 w-36 rounded-full overflow-hidden border-4 border-muted bg-accent/40 flex items-center justify-center shadow-inner">
               {isCameraActive ? (
                 <video ref={videoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
-              ) : form.photo_url ? (
+              ) : normalizeImageSrc(form.photo_url) ? (
                 <div
                   className="relative h-full w-full group cursor-pointer"
-                  onClick={() => openFullPhoto(form.photo_url, form.full_name || 'Member Photo', 'Photo Preview')}
+                  onClick={() => openFullPhoto(normalizeImageSrc(form.photo_url), form.full_name || 'Member Photo', 'Photo Preview')}
                   title="Click to view full size photo"
                 >
-                  <img src={form.photo_url} alt="Client Photo" className="h-full w-full object-cover group-hover:scale-105 transition-transform" />
+                  <img src={normalizeImageSrc(form.photo_url)!} alt="Client Photo" className="h-full w-full object-cover group-hover:scale-105 transition-transform" />
                   <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                     <ZoomIn className="h-5 w-5 text-white" />
                   </div>
@@ -2590,29 +2660,32 @@ export default function MembersPage() {
         <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle className="text-xl flex items-center gap-3">
-              {selectedMember?.photo_url ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    openFullPhoto(
-                      selectedMember.photo_url,
-                      selectedMember.full_name,
-                      `Member #${selectedMember.member_number || 'N/A'} • ${selectedMember.active ? 'Active' : 'Inactive'}`
-                    )
-                  }
-                  className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                  title="Click to view full size photo"
-                >
-                  <img src={selectedMember.photo_url} alt={selectedMember.full_name} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
-                  <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                    <ZoomIn className="h-3.5 w-3.5 text-white" />
+              {(() => {
+                const selectedPhoto = normalizeImageSrc(selectedMember?.photo_url);
+                return selectedPhoto ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openFullPhoto(
+                        selectedPhoto,
+                        selectedMember?.full_name,
+                        `Member #${selectedMember?.member_number || 'N/A'} • ${selectedMember?.active ? 'Active' : 'Inactive'}`
+                      )
+                    }
+                    className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                    title="Click to view full size photo"
+                  >
+                    <img src={selectedPhoto} alt={selectedMember?.full_name} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" loading="lazy" />
+                    <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                      <ZoomIn className="h-3.5 w-3.5 text-white" />
+                    </div>
+                  </button>
+                ) : (
+                  <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
+                    {selectedMember?.full_name?.slice(0, 1).toUpperCase()}
                   </div>
-                </button>
-              ) : (
-                <div className="h-10 w-10 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
-                  {selectedMember?.full_name?.slice(0, 1).toUpperCase()}
-                </div>
-              )}
+                );
+              })()}
               <div>
                 <div>{selectedMember?.full_name}</div>
                 <div className="text-xs font-mono font-normal text-muted-foreground">Member #{selectedMember?.member_number || 'N/A'}</div>
@@ -2762,7 +2835,7 @@ export default function MembersPage() {
 
                       return (
                         <tr key={fee.id} className="border-b border-border/50 last:border-0">
-                          <td className="p-3 font-medium">{formatPeriodMonth(fee.period_month)}</td>
+                          <td className="p-3 font-medium whitespace-nowrap">{formatPeriodMonth(fee.period_month, selectedMember?.join_date)}</td>
                           <td className="p-3">{formatCurrency(feeAmount)}</td>
                           <td className="p-3">
                             <span className={isPaid ? 'text-green-600 font-semibold' : isPartial ? 'text-amber-600 font-semibold' : 'text-muted-foreground'}>
@@ -2824,29 +2897,32 @@ export default function MembersPage() {
             <div className="space-y-5 pt-2">
               {/* Member Info */}
               <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/40 border border-border">
-                {payModalMember.photo_url ? (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      openFullPhoto(
-                        payModalMember.photo_url,
-                        payModalMember.full_name,
-                        `Member #${payModalMember.member_number || 'N/A'}`
-                      )
-                    }
-                    className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                    title="Click to view full size photo"
-                  >
-                    <img src={payModalMember.photo_url} alt={payModalMember.full_name} className="h-11 w-11 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
-                    <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                      <ZoomIn className="h-3.5 w-3.5 text-white" />
+                {(() => {
+                  const payPhoto = normalizeImageSrc(payModalMember.photo_url);
+                  return payPhoto ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openFullPhoto(
+                          payPhoto,
+                          payModalMember.full_name,
+                          `Member #${payModalMember.member_number || 'N/A'}`
+                        )
+                      }
+                      className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                      title="Click to view full size photo"
+                    >
+                      <img src={payPhoto} alt={payModalMember.full_name} className="h-11 w-11 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" loading="lazy" />
+                      <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                        <ZoomIn className="h-3.5 w-3.5 text-white" />
+                      </div>
+                    </button>
+                  ) : (
+                    <div className="h-11 w-11 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
+                      {payModalMember.full_name.slice(0, 1).toUpperCase()}
                     </div>
-                  </button>
-                ) : (
-                  <div className="h-11 w-11 rounded-full bg-primary/20 grid place-items-center text-sm font-semibold text-primary shrink-0">
-                    {payModalMember.full_name.slice(0, 1).toUpperCase()}
-                  </div>
-                )}
+                  );
+                })()}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-semibold text-base text-foreground">{payModalMember.full_name}</span>
@@ -2872,7 +2948,7 @@ export default function MembersPage() {
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-border bg-muted/50">
-                        <th className="text-left p-2 font-medium text-muted-foreground">Month</th>
+                        <th className="text-left p-2 font-medium text-muted-foreground">Period</th>
                         <th className="text-right p-2 font-medium text-muted-foreground">Fee</th>
                         <th className="text-right p-2 font-medium text-muted-foreground">Already Paid</th>
                         <th className="text-right p-2 font-medium text-muted-foreground">Remaining</th>
@@ -2887,7 +2963,7 @@ export default function MembersPage() {
                         const rem = Math.max(0, amt - paid);
                         return (
                           <tr key={fr.id} className="border-b border-border/50 last:border-0">
-                            <td className="p-2 font-medium">{formatPeriodMonth(fr.period_month)}</td>
+                            <td className="p-2 font-medium whitespace-nowrap">{formatPeriodMonth(fr.period_month, payModalMember?.join_date)}</td>
                             <td className="p-2 text-right">{formatCurrency(amt)}</td>
                             <td className="p-2 text-right text-green-600">{paid > 0 ? formatCurrency(paid) : '—'}</td>
                             <td className="p-2 text-right font-semibold text-red-500">{formatCurrency(rem)}</td>
@@ -3170,33 +3246,37 @@ export default function MembersPage() {
                 {validSelectedMembers[bulkCurrentIndex] && (
                   <div className="flex items-center justify-between p-3 bg-background border border-border rounded-md shadow-sm">
                     <div className="flex items-center gap-3">
-                      {validSelectedMembers[bulkCurrentIndex].photo_url ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            openFullPhoto(
-                              validSelectedMembers[bulkCurrentIndex].photo_url,
-                              validSelectedMembers[bulkCurrentIndex].full_name,
-                              `Member #${validSelectedMembers[bulkCurrentIndex].member_number || 'N/A'}`
-                            )
-                          }
-                          className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                          title="Click to view full size photo"
-                        >
-                          <img
-                            src={validSelectedMembers[bulkCurrentIndex].photo_url!}
-                            alt={validSelectedMembers[bulkCurrentIndex].full_name}
-                            className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform"
-                          />
-                          <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                            <ZoomIn className="h-3.5 w-3.5 text-white" />
+                      {(() => {
+                        const bulkPhoto = normalizeImageSrc(validSelectedMembers[bulkCurrentIndex].photo_url);
+                        return bulkPhoto ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openFullPhoto(
+                                bulkPhoto,
+                                validSelectedMembers[bulkCurrentIndex].full_name,
+                                `Member #${validSelectedMembers[bulkCurrentIndex].member_number || 'N/A'}`
+                              )
+                            }
+                            className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                            title="Click to view full size photo"
+                          >
+                            <img
+                              src={bulkPhoto}
+                              alt={validSelectedMembers[bulkCurrentIndex].full_name}
+                              className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform"
+                              loading="lazy"
+                            />
+                            <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                              <ZoomIn className="h-3.5 w-3.5 text-white" />
+                            </div>
+                          </button>
+                        ) : (
+                          <div className="h-10 w-10 rounded-full bg-green-600/20 grid place-items-center font-bold text-green-700 dark:text-green-400 shrink-0">
+                            {validSelectedMembers[bulkCurrentIndex].full_name.slice(0, 1).toUpperCase()}
                           </div>
-                        </button>
-                      ) : (
-                        <div className="h-10 w-10 rounded-full bg-green-600/20 grid place-items-center font-bold text-green-700 dark:text-green-400 shrink-0">
-                          {validSelectedMembers[bulkCurrentIndex].full_name.slice(0, 1).toUpperCase()}
-                        </div>
-                      )}
+                        );
+                      })()}
                       <div>
                         <div className="font-semibold text-sm flex items-center gap-2">
                           {validSelectedMembers[bulkCurrentIndex].full_name}
@@ -3374,26 +3454,29 @@ export default function MembersPage() {
                             onChange={() => {}} // handled by parent div click
                             className="h-4 w-4 rounded border-border text-primary focus:ring-primary accent-green-600"
                           />
-                          {m.photo_url ? (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openFullPhoto(m.photo_url, m.full_name, `Member #${m.member_number || 'N/A'}`);
-                              }}
-                              className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                              title="Click to view full size photo"
-                            >
-                              <img src={m.photo_url} alt={m.full_name} className="h-8 w-8 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
-                              <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                                <ZoomIn className="h-2.5 w-2.5 text-white" />
+                          {(() => {
+                            const assignPhoto = normalizeImageSrc(m.photo_url);
+                            return assignPhoto ? (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openFullPhoto(assignPhoto, m.full_name, `Member #${m.member_number || 'N/A'}`);
+                                }}
+                                className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                title="Click to view full size photo"
+                              >
+                                <img src={assignPhoto} alt={m.full_name} className="h-8 w-8 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" loading="lazy" />
+                                <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                  <ZoomIn className="h-2.5 w-2.5 text-white" />
+                                </div>
+                              </button>
+                            ) : (
+                              <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
+                                {m.full_name.slice(0, 1).toUpperCase()}
                               </div>
-                            </button>
-                          ) : (
-                            <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
-                              {m.full_name.slice(0, 1).toUpperCase()}
-                            </div>
-                          )}
+                            );
+                          })()}
                           <div>
                             <div className="font-medium text-sm leading-none flex items-center gap-2">
                               {m.full_name}

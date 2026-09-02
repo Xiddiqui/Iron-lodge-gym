@@ -42,12 +42,13 @@ export async function POST(request: Request) {
     }
 
     // Safely parse join_date without timezone offset shifting
-    const [jYear, jMonth] = member.join_date.split('-').map(Number);
+    const [jYear, jMonth, jDay] = member.join_date.split('-').map(Number);
     if (!jYear || !jMonth) {
       return NextResponse.json({ error: 'Invalid join date' }, { status: 400 });
     }
 
     const joinPeriodMonth = `${jYear}-${String(jMonth).padStart(2, '0')}-01`;
+    const joinDay = jDay || 1;
 
     // 1. Delete any invalid fee records strictly before the member's join date month
     await supabase
@@ -56,14 +57,26 @@ export async function POST(request: Request) {
       .eq('member_id', member.id)
       .lt('period_month', joinPeriodMonth);
 
-    // 2. Generate fee records from join month to current month
+    // 2. Generate fee records only up to the cycle that has actually started
     const now = new Date();
+    const currentDay = now.getDate();
+    const latestDueMonth = currentDay >= joinDay
+      ? new Date(now.getFullYear(), now.getMonth(), 1)
+      : new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const latestDueMonthKey = `${latestDueMonth.getFullYear()}-${String(latestDueMonth.getMonth() + 1).padStart(2, '0')}-01`;
+
+    // Delete any future unpaid fee records beyond the latest active cycle
+    await supabase
+      .from('fee_records')
+      .delete()
+      .eq('member_id', member.id)
+      .gt('period_month', latestDueMonthKey)
+      .eq('paid', false);
+
     const records = [];
-
     let cursor = new Date(jYear, jMonth - 1, 1);
-    const endMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    while (cursor <= endMonth) {
+    while (cursor <= latestDueMonth) {
       const y = cursor.getFullYear();
       const m = cursor.getMonth() + 1;
       const periodMonth = `${y}-${String(m).padStart(2, '0')}-01`;
@@ -126,13 +139,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ message: 'No active members found', generated: 0 });
   }
 
-  // Filter members who joined on or before this billing month
+  // Filter members who joined on or before this billing month, and whose billing day has started
+  const now = new Date();
+  const isCurrentCalendarMonth = periodMonth === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+
   const eligibleMembers = members.filter((m) => {
     if (!m.join_date) return true;
-    const [jYear, jMonth] = m.join_date.split('-').map(Number);
+    const [jYear, jMonth, jDay] = m.join_date.split('-').map(Number);
     if (!jYear || !jMonth) return true;
     const joinPeriodMonth = `${jYear}-${String(jMonth).padStart(2, '0')}-01`;
-    return joinPeriodMonth <= periodMonth;
+    if (joinPeriodMonth > periodMonth) return false;
+
+    if (isCurrentCalendarMonth && now.getDate() < (jDay || 1)) {
+      return false;
+    }
+    return true;
   });
 
   if (eligibleMembers.length === 0) {

@@ -13,6 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
+import { normalizeImageSrc } from '@/lib/image-utils';
 import {
   CalendarCheck, Plus, Search, Loader2, Clock, LogOut,
   UserCheck, Shield, Coffee, ChevronDown, ChevronUp, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle, Banknote, X, Trash2
@@ -52,10 +53,11 @@ export default function AttendancePage() {
   }>({ open: false, photoUrl: null });
 
   const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
-    if (!photoUrl) return;
+    const resolved = normalizeImageSrc(photoUrl);
+    if (!resolved) return;
     setPhotoPreview({
       open: true,
-      photoUrl,
+      photoUrl: resolved,
       title: title || 'Member Photo',
       subtitle,
     });
@@ -785,7 +787,7 @@ export default function AttendancePage() {
                       filteredAttendance.map((a: any) => {
                         const displayName = a.members?.full_name || a.guest_name || a.notes?.replace(/^1-Day Walk-in: /, '').split(' | ')[0] || 'Walk-in Guest';
                         const displayPhone = a.members?.phone || (a.guest_name ? '1-Day Visit' : null);
-                        const photoUrl = a.members?.photo_url;
+                        const photoUrl = normalizeImageSrc(a.members?.photo_url);
 
                         return (
                           <tr key={a.id} className="border-b border-border/50 hover:bg-accent/30 transition-colors">
@@ -807,6 +809,7 @@ export default function AttendancePage() {
                                       src={photoUrl}
                                       alt={displayName}
                                       className="h-10 w-10 rounded-full object-cover border border-border/80 group-hover/avatar:scale-105 group-hover/avatar:ring-2 group-hover/avatar:ring-primary/50 transition-all"
+                                      loading="lazy"
                                     />
                                   </div>
                                 ) : (
@@ -1173,16 +1176,18 @@ export default function AttendancePage() {
           <div className="max-h-64 overflow-y-auto space-y-1">
             {filteredMembers.map((m: any) => {
               const existingRecord = attendance.find((a: any) => a.member_id === m.id);
-              return (
-                <div key={m.id} className="flex items-center justify-between p-3 rounded-lg hover:bg-accent transition-colors">
-                  <div className="flex items-center gap-3">
-                    {m.photo_url ? (
-                      <img
-                        src={m.photo_url}
-                        alt={m.full_name}
-                        className="h-8 w-8 rounded-full object-cover border border-border shrink-0"
-                      />
-                    ) : (
+                const memberPhoto = normalizeImageSrc(m.photo_url);
+                return (
+                  <div key={m.id} className="flex items-center justify-between p-3 rounded-lg hover:bg-accent transition-colors">
+                    <div className="flex items-center gap-3">
+                      {memberPhoto ? (
+                        <img
+                          src={memberPhoto}
+                          alt={m.full_name}
+                          className="h-8 w-8 rounded-full object-cover border border-border shrink-0"
+                          loading="lazy"
+                        />
+                      ) : (
                       <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
                         {m.full_name.slice(0, 1).toUpperCase()}
                       </div>

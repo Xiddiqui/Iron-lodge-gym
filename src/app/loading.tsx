@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase/client';
 import { Dumbbell, Loader2 } from 'lucide-react';
+import { normalizeImageSrc } from '@/lib/image-utils';
 
 export default function Loading() {
   const [gymName, setGymName] = useState('Iron Lodge Gym');
@@ -75,7 +76,7 @@ export default function Loading() {
           {/* Logo Badge Container */}
           <div className="relative h-24 w-24 sm:h-28 sm:w-28 rounded-2xl bg-white p-3.5 shadow-2xl backdrop-blur-xl flex items-center justify-center overflow-hidden">
             {/* Always show local logo as base layer */}
-            {(!remoteLogoLoaded || remoteLogoError || !logoUrl) && (
+            {(!remoteLogoLoaded || remoteLogoError || !normalizeImageSrc(logoUrl)) && (
               <img
                 src="/logo.png"
                 alt={gymName}
@@ -88,9 +89,9 @@ export default function Loading() {
               />
             )}
             {/* Load remote logo on top; hidden until loaded */}
-            {logoUrl && !remoteLogoError && (
+            {normalizeImageSrc(logoUrl) && !remoteLogoError && (
               <img
-                src={logoUrl}
+                src={normalizeImageSrc(logoUrl)!}
                 alt={gymName}
                 className={`absolute inset-0 h-full w-full object-contain p-3.5 filter drop-shadow-lg transition-opacity duration-300 ${remoteLogoLoaded ? 'opacity-100 animate-pulse' : 'opacity-0'}`}
                 onLoad={() => setRemoteLogoLoaded(true)}

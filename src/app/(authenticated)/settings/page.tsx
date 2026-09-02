@@ -15,6 +15,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Settings, Save, Upload, Loader2, Users, Shield, Plus, Search, UserCheck, CheckSquare, Square, Pencil, Trash2, Camera, User, X, Globe, Sparkles, ZoomIn } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
+import { normalizeImageSrc } from '@/lib/image-utils';
 import { toast } from 'sonner';
 import OnePagerCustomizer from '@/components/settings/one-pager-customizer';
 
@@ -52,10 +53,11 @@ export default function SettingsPage() {
   }>({ open: false, photoUrl: null });
 
   const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
-    if (!photoUrl) return;
+    const resolved = normalizeImageSrc(photoUrl);
+    if (!resolved) return;
     setFullPhotoPreview({
       open: true,
-      photoUrl,
+      photoUrl: resolved,
       title: title || 'Staff Photo',
       subtitle,
     });
@@ -488,9 +490,9 @@ export default function SettingsPage() {
               <div className="space-y-2">
                 <Label htmlFor="logo">Logo</Label>
                 <div className="flex items-center gap-4">
-                  {logoPreview || settings?.logo_url ? (
+                  {normalizeImageSrc(logoPreview || settings?.logo_url) ? (
                     <img
-                      src={logoPreview || settings?.logo_url || ''}
+                      src={normalizeImageSrc(logoPreview || settings?.logo_url)!}
                       alt="Logo preview"
                       className="h-14 w-14 rounded-xl object-contain border border-border bg-slate-100 dark:bg-slate-800 p-1"
                     />
@@ -561,23 +563,26 @@ export default function SettingsPage() {
                       <tr key={p.id} className="border-b border-border/50 hover:bg-accent/30 transition-colors">
                         <td className="p-4">
                           <div className="flex items-center gap-3">
-                            {p.photo_url ? (
-                              <button
-                                type="button"
-                                onClick={() => openFullPhoto(p.photo_url, p.full_name, `${p.role.toUpperCase()} • ${p.email || ''}`)}
-                                className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
-                                title="Click to view full size photo"
-                              >
-                                <img src={p.photo_url} alt={p.full_name} className="h-8 w-8 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
-                                <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
-                                  <ZoomIn className="h-2.5 w-2.5 text-white" />
+                            {(() => {
+                              const staffPhoto = normalizeImageSrc(p.photo_url);
+                              return staffPhoto ? (
+                                <button
+                                  type="button"
+                                  onClick={() => openFullPhoto(staffPhoto, p.full_name, `${p.role.toUpperCase()} • ${p.email || ''}`)}
+                                  className="group relative rounded-full ring-2 ring-transparent hover:ring-primary/60 transition-all cursor-pointer overflow-hidden shrink-0"
+                                  title="Click to view full size photo"
+                                >
+                                  <img src={staffPhoto} alt={p.full_name} className="h-8 w-8 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" loading="lazy" />
+                                  <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-full">
+                                    <ZoomIn className="h-2.5 w-2.5 text-white" />
+                                  </div>
+                                </button>
+                              ) : (
+                                <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
+                                  {(p.full_name || '?').slice(0, 1).toUpperCase()}
                                 </div>
-                              </button>
-                            ) : (
-                              <div className="h-8 w-8 rounded-full bg-primary/20 grid place-items-center text-xs font-semibold text-primary shrink-0">
-                                {(p.full_name || '?').slice(0, 1).toUpperCase()}
-                              </div>
-                            )}
+                              );
+                            })()}
                             <span className="font-medium">{p.full_name}</span>
                           </div>
                         </td>
@@ -677,13 +682,13 @@ export default function SettingsPage() {
                   <div className="relative w-32 h-32 rounded-full overflow-hidden border-2 border-primary/40 bg-slate-100 dark:bg-slate-800 shadow-inner grid place-items-center">
                     {isStaffCameraActive ? (
                       <video ref={staffVideoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-                    ) : newStaff.photo_url ? (
+                    ) : normalizeImageSrc(newStaff.photo_url) ? (
                       <div
                         className="relative w-full h-full group cursor-pointer"
-                        onClick={() => openFullPhoto(newStaff.photo_url, newStaff.full_name || 'Staff Preview', 'Photo Preview')}
+                        onClick={() => openFullPhoto(normalizeImageSrc(newStaff.photo_url), newStaff.full_name || 'Staff Preview', 'Photo Preview')}
                         title="Click to view full size photo"
                       >
-                        <img src={newStaff.photo_url} alt="Staff Preview" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                        <img src={normalizeImageSrc(newStaff.photo_url)!} alt="Staff Preview" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
                         <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                           <ZoomIn className="h-4 w-4 text-white" />
                         </div>

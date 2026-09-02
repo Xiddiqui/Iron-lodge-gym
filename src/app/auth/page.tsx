@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Loader2, Dumbbell } from 'lucide-react';
 import { toast } from 'sonner';
+import { normalizeImageSrc } from '@/lib/image-utils';
 
 import { recordStaffLogin } from '@/lib/staff-attendance';
 
@@ -67,9 +68,9 @@ export default function AuthPage() {
       <Card className="w-full max-w-md relative z-10 border-border/50">
         <CardHeader className="text-center space-y-4">
           <div className="mx-auto h-20 w-20 rounded-2xl overflow-hidden shadow-elegant bg-primary flex items-center justify-center p-1.5 border border-border/20">
-            {!imageError && logoUrl ? (
+            {!imageError && normalizeImageSrc(logoUrl) ? (
               <img
-                src={logoUrl}
+                src={normalizeImageSrc(logoUrl)!}
                 alt={gymName}
                 className="h-full w-full object-contain rounded-xl"
                 onError={() => {

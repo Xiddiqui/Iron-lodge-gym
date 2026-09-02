@@ -5,6 +5,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Button } from '@/components/ui/button';
 import { Download, ExternalLink, X, ZoomIn } from 'lucide-react';
 
+import { normalizeImageSrc, isRemoteImageUrl } from '@/lib/image-utils';
+
 export interface PhotoPreviewDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -20,28 +22,61 @@ export function PhotoPreviewDialog({
   title = 'Photo View',
   subtitle,
 }: PhotoPreviewDialogProps) {
-  if (!photoUrl) return null;
+  const [loadError, setLoadError] = React.useState(false);
+  const resolvedUrl = normalizeImageSrc(photoUrl);
 
-  const handleDownload = () => {
+  React.useEffect(() => {
+    setLoadError(false);
+  }, [photoUrl]);
+
+  if (!resolvedUrl) return null;
+
+  const handleDownload = async () => {
+    const sanitizedTitle = (title || 'photo').replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    const filename = `${sanitizedTitle}-fullsize.jpg`;
+
     try {
-      const link = document.createElement('a');
-      link.href = photoUrl;
-      const sanitizedTitle = (title || 'photo').replace(/[^a-z0-9]/gi, '_').toLowerCase();
-      link.download = `${sanitizedTitle}-fullsize.jpg`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } catch (err) {
-      window.open(photoUrl, '_blank');
+      if (isRemoteImageUrl(resolvedUrl)) {
+        // Fetch remote URL as blob for reliable cross-origin downloading
+        const response = await fetch(resolvedUrl);
+        if (!response.ok) throw new Error('Failed to fetch image blob');
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(blobUrl);
+      } else {
+        // Direct download for Base64 Data URI
+        const link = document.createElement('a');
+        link.href = resolvedUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+    } catch {
+      // Fallback if blob download fails
+      window.open(resolvedUrl, '_blank');
     }
   };
 
   const handleOpenTab = () => {
-    const w = window.open('');
-    if (w) {
-      w.document.write(`<title>${title}</title><body style="margin:0;background:#09090b;display:flex;align-items:center;justify-content:center;min-height:100vh;"><img src="${photoUrl}" style="max-width:100%;max-height:100vh;object-fit:contain;" /></body>`);
+    if (isRemoteImageUrl(resolvedUrl)) {
+      window.open(resolvedUrl, '_blank');
     } else {
-      window.open(photoUrl, '_blank');
+      const w = window.open('');
+      if (w) {
+        w.document.write(
+          `<title>${title}</title><body style="margin:0;background:#09090b;display:flex;align-items:center;justify-content:center;min-height:100vh;"><img src="${resolvedUrl}" style="max-width:100%;max-height:100vh;object-fit:contain;" /></body>`
+        );
+      } else {
+        window.open(resolvedUrl, '_blank');
+      }
     }
   };
 
@@ -89,17 +124,27 @@ export function PhotoPreviewDialog({
 
         {/* Image Display Area */}
         <div className="relative w-full bg-black/80 dark:bg-black/90 flex items-center justify-center p-3 sm:p-6 min-h-[300px] max-h-[75vh] overflow-hidden group">
-          <img
-            src={photoUrl}
-            alt={title || 'Fullsize Photo'}
-            className="max-h-[68vh] w-auto max-w-full object-contain rounded-lg shadow-xl transition-all duration-300 group-hover:scale-[1.01]"
-          />
+          {loadError ? (
+            <div className="text-center p-8 text-muted-foreground">
+              <p className="text-sm font-medium">Unable to load image preview</p>
+              <p className="text-xs opacity-70 mt-1 font-mono break-all max-w-md">
+                The image file may have been moved or is unreachable.
+              </p>
+            </div>
+          ) : (
+            <img
+              src={resolvedUrl}
+              alt={title || 'Fullsize Photo'}
+              onError={() => setLoadError(true)}
+              className="max-h-[68vh] w-auto max-w-full object-contain rounded-lg shadow-xl transition-all duration-300 group-hover:scale-[1.01]"
+            />
+          )}
         </div>
 
         {/* Footer info */}
         <div className="px-5 py-2.5 bg-muted/40 border-t border-border/60 text-xs text-muted-foreground flex items-center justify-between">
           <span className="flex items-center gap-1.5">
-            <ZoomIn className="h-3.5 w-3.5 text-primary" /> Full-resolution member photo
+            <ZoomIn className="h-3.5 w-3.5 text-primary" /> Full-resolution photo
           </span>
           <Button
             type="button"

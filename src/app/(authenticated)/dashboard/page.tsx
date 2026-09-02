@@ -17,6 +17,7 @@ import { Wallet, Receipt, Zap, UserCheck, ArrowUpRight, ArrowDownRight, Trending
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
+import { normalizeImageSrc } from '@/lib/image-utils';
 import { Skeleton } from '@/components/ui/skeleton';
 
 function AnimatedNumber({ value, format }: { value: number; format: (n: number) => string }) {
@@ -103,8 +104,9 @@ export default function DashboardPage() {
   const [photoPreview, setPhotoPreview] = useState<{ open: boolean; photoUrl: string | null; title?: string; subtitle?: string }>({ open: false, photoUrl: null });
 
   const openFullPhoto = (photoUrl: string | null, title?: string, subtitle?: string) => {
-    if (!photoUrl) return;
-    setPhotoPreview({ open: true, photoUrl, title: title || 'Member Photo', subtitle });
+    const resolved = normalizeImageSrc(photoUrl);
+    if (!resolved) return;
+    setPhotoPreview({ open: true, photoUrl: resolved, title: title || 'Member Photo', subtitle });
   };
 
   const [year, month] = selectedMonth.split('-').map(Number);
@@ -284,13 +286,22 @@ export default function DashboardPage() {
       // Check if any active member lacks a fee record for this month
       if (activeMembers && activeMembers.length > 0) {
         const existingMemberIds = new Set(feeList.map((f: any) => f.member_id));
+        const now = new Date();
+        const isCurrentCalendarMonth = monthStart === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+
         const missingMembers = activeMembers.filter((m: any) => {
           if (existingMemberIds.has(m.id)) return false;
           if (!m.join_date) return false;
-          const [jY, jM] = m.join_date.split('-').map(Number);
+          const [jY, jM, jD] = m.join_date.split('-').map(Number);
           if (!jY || !jM) return false;
           const joinPeriodMonth = `${jY}-${String(jM).padStart(2, '0')}-01`;
-          return joinPeriodMonth <= monthStart;
+          if (joinPeriodMonth > monthStart) return false;
+
+          // If viewing current month, and today is before the member's billing day, this cycle hasn't started yet
+          if (isCurrentCalendarMonth && now.getDate() < (jD || 1)) {
+            return false;
+          }
+          return true;
         });
 
         if (missingMembers.length > 0) {
@@ -985,7 +996,7 @@ export default function DashboardPage() {
                       ? (f.guest_name || 'Walk-in Guest')
                       : (memberData?.full_name ?? 'Unknown Member');
                     const memberNumber = !isWalkin && memberData?.member_number ? `#${memberData.member_number}` : null;
-                    const memberPhoto = !isWalkin ? memberData?.photo_url : null;
+                    const memberPhoto = !isWalkin ? normalizeImageSrc(memberData?.photo_url) : null;
                     const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
                     const totalAmount = Number(f.amount) || 0;
                     const isFullyPaid = f.paid || (amtPaid >= totalAmount && totalAmount > 0);
@@ -1003,7 +1014,7 @@ export default function DashboardPage() {
                               className="group relative rounded-full shrink-0 overflow-hidden ring-2 ring-transparent hover:ring-primary/50 transition-all"
                               title="Click to view photo"
                             >
-                              <img src={memberPhoto} alt={displayName} className="h-9 w-9 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                              <img src={memberPhoto} alt={displayName} className="h-9 w-9 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" loading="lazy" />
                             </button>
                           ) : (
                             <div className={`h-9 w-9 rounded-full grid place-items-center text-xs font-bold shrink-0 ${
@@ -1156,7 +1167,7 @@ export default function DashboardPage() {
                   ? (f.guest_name || '1-Day Guest')
                   : (memberData?.full_name ?? 'Unknown Member');
                 const memberNumber = !isWalkin && memberData?.member_number ? `#${memberData.member_number}` : null;
-                const memberPhoto = !isWalkin ? memberData?.photo_url : null;
+                const memberPhoto = !isWalkin ? normalizeImageSrc(memberData?.photo_url) : null;
                 const amtPaid = Number(f.amount_paid) > 0 ? Number(f.amount_paid) : (f.paid ? Number(f.amount) || 0 : 0);
                 const totalAmount = Number(f.amount) || 0;
                 const remaining = Math.max(0, totalAmount - amtPaid);
@@ -1178,7 +1189,7 @@ export default function DashboardPage() {
                           className="group relative rounded-full shrink-0 overflow-hidden ring-2 ring-transparent hover:ring-primary/50 transition-all"
                           title="Click to view photo"
                         >
-                          <img src={memberPhoto} alt={displayName} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" />
+                          <img src={memberPhoto} alt={displayName} className="h-10 w-10 rounded-full object-cover border border-border group-hover:scale-110 transition-transform" loading="lazy" />
                         </button>
                       ) : (
                         <div className={`h-10 w-10 rounded-full grid place-items-center text-xs font-bold shrink-0 ${

@@ -13,6 +13,7 @@ import { useRole } from '@/hooks/use-role';
 import { useCurrentUser } from '@/hooks/use-session';
 import { useGymSettings } from '@/hooks/use-gym-settings';
 import { useStaffBreak } from '@/hooks/use-staff-break';
+import { normalizeImageSrc } from '@/lib/image-utils';
 import { supabase } from '@/lib/supabase/client';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -91,7 +92,7 @@ export function Sidebar() {
     <aside className="flex h-full w-64 flex-col bg-gradient-sidebar text-sidebar-foreground border-r border-sidebar-border relative overflow-hidden">
       {/* Header */}
       <div className="relative px-5 py-5 flex items-center gap-3 border-b border-sidebar-border">
-        <img src={settings?.logo_url || '/logo.png'} alt="Iron Lodge Gym" className="h-11 w-15 rounded-xl object-cover shadow-elegant bg-primary" />
+        <img src={normalizeImageSrc(settings?.logo_url) || '/logo.png'} alt="Iron Lodge Gym" className="h-11 w-15 rounded-xl object-cover shadow-elegant bg-primary" />
         <div className="min-w-0">
           <p className="font-display font-semibold truncate tracking-tight">{settings?.gym_name ?? 'Gym Manager'}</p>
           {role === 'admin' && (
@@ -200,7 +201,7 @@ export function Sidebar() {
           {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
         <div className="flex items-center gap-2">
-          <img src={settings?.logo_url || '/logo.png'} alt="Iron Lodge Gym" className="h-8 w-8 rounded-lg object-cover shadow-elegant bg-background" />
+          <img src={normalizeImageSrc(settings?.logo_url) || '/logo.png'} alt="Iron Lodge Gym" className="h-8 w-8 rounded-lg object-cover shadow-elegant bg-background" />
           <span className="font-display font-semibold">{settings?.gym_name ?? 'Gym Manager'}</span>
         </div>
         <div className="w-9" />

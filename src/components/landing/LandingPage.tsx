@@ -12,6 +12,7 @@ import {
   FaqItem,
   CustomContentBlock,
 } from '@/types/landing-page';
+import { normalizeImageSrc } from '@/lib/image-utils';
 
 import {
   Dumbbell,
@@ -182,7 +183,7 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
 
   const primaryColor = data.theme?.primaryColor || '#a3e635';
   const secondaryColor = data.theme?.secondaryColor || '#22c55e';
-  const displayLogo = logoUrl || '/logo.png';
+  const displayLogo = normalizeImageSrc(logoUrl) || '/logo.png';
   const selectedFont = FONT_MAP[data.theme?.fontFamily || 'outfit'] || 'inherit';
 
   // Section order
@@ -835,8 +836,8 @@ export default function LandingPage({ overrideData }: { overrideData?: LandingPa
                 </div>
 
                 <div className="flex items-center gap-3 pt-4 border-t border-slate-800/60">
-                  {t.avatarUrl ? (
-                    <img src={t.avatarUrl} alt={t.name} className="h-10 w-10 rounded-full object-cover" />
+                  {normalizeImageSrc(t.avatarUrl) ? (
+                    <img src={normalizeImageSrc(t.avatarUrl)!} alt={t.name} className="h-10 w-10 rounded-full object-cover" />
                   ) : (
                     <div className="h-10 w-10 rounded-full bg-slate-800 grid place-items-center font-bold text-white">
                       {t.name[0]}
