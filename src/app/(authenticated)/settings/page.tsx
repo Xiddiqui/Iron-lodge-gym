@@ -15,7 +15,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Settings, Save, Upload, Loader2, Users, Shield, Plus, Search, UserCheck, CheckSquare, Square, Pencil, Trash2, Camera, User, X, Globe, Sparkles, ZoomIn } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
-import { normalizeImageSrc } from '@/lib/image-utils';
+import { normalizeImageSrc, compressImageFile } from '@/lib/image-utils';
 import { toast } from 'sonner';
 import OnePagerCustomizer from '@/components/settings/one-pager-customizer';
 
@@ -192,27 +192,17 @@ export default function SettingsPage() {
         try {
           const { error: uploadError } = await supabase.storage
             .from('gym-assets')
-            .upload(path, logoFile, { upsert: true });
+            .upload(path, logoFile, { upsert: true, cacheControl: '31536000' });
 
           if (!uploadError) {
             const { data: urlData } = supabase.storage.from('gym-assets').getPublicUrl(path);
             logoUrl = urlData.publicUrl;
           } else {
-            // Base64 fallback if storage bucket missing or error
-            const base64 = await new Promise<string>((resolve) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(reader.result as string);
-              reader.readAsDataURL(logoFile);
-            });
-            logoUrl = base64;
+            // Compressed base64 fallback if storage bucket missing or error
+            logoUrl = await compressImageFile(logoFile, 500, 500, 0.8);
           }
         } catch {
-          const base64 = await new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.readAsDataURL(logoFile);
-          });
-          logoUrl = base64;
+          logoUrl = await compressImageFile(logoFile, 500, 500, 0.8);
         }
       }
 

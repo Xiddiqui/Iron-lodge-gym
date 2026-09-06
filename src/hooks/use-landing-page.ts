@@ -6,10 +6,12 @@ import { LandingPageData, defaultLandingPageData } from '@/types/landing-page';
 export function useLandingPageSettings() {
   return useQuery({
     queryKey: ['landing-page-settings'],
+    staleTime: 10 * 60 * 1000,
+    gcTime: 30 * 60 * 1000,
     queryFn: async (): Promise<LandingPageData> => {
       const { data, error } = await supabase
         .from('gym_settings')
-        .select('gym_name, logo_url, landing_page_data')
+        .select('landing_page_data')
         .eq('id', 1)
         .maybeSingle();
 

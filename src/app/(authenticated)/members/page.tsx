@@ -14,9 +14,9 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Fingerprint } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
-import { normalizeImageSrc } from '@/lib/image-utils';
+import { normalizeImageSrc, compressImageFile, compressDataUrl } from '@/lib/image-utils';
 import { toast } from 'sonner';
 import { isMemberAssignedToStaff, embedStaffIdsInNotes, stripStaffIdsFromNotes, getAssignedStaffIds } from '@/lib/staff-assignments';
 import { PAYMENT_METHODS } from '@/lib/constants';
@@ -366,7 +366,9 @@ export default function MembersPage() {
   const { data: profiles = [] } = useQuery({
     queryKey: ['profiles'],
     queryFn: async () => {
-      const { data, error } = await supabase.from('profiles').select('*');
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, email, role, section_access, auto_assign_male, auto_assign_female');
       if (error) return [];
       return data as Profile[];
     },
@@ -569,12 +571,16 @@ export default function MembersPage() {
     queryKey: ['all_fee_records'],
     queryFn: async () => {
       const { data: feeData, error: feeErr } = await supabase.from('fee_records')
-        .select('*')
+        .select('id, member_id, amount, amount_paid, discount, period_month, period_end, paid, paid_at, payment_method, collected_by')
         .order('period_month', { ascending: false });
       if (feeErr) throw feeErr;
 
-      const { data: memberData } = await supabase.from('members')
-        .select('id, join_date, tenure_months, monthly_fee, training_fees, amount_paid, active');
+      let memberData: any[] | undefined = queryClient.getQueryData<any[]>(['members']);
+      if (!memberData || memberData.length === 0) {
+        const { data } = await supabase.from('members')
+          .select('id, join_date, tenure_months, monthly_fee, training_fees, amount_paid, active');
+        memberData = data || [];
+      }
 
       if (!memberData || memberData.length === 0) return (feeData || []) as FeeRecord[];
 
@@ -751,6 +757,22 @@ export default function MembersPage() {
     },
   });
 
+  // Fetch Member Attendance Records (for detail dialog attendance tab)
+  const { data: memberAttendance = [], isLoading: loadingAttendance } = useQuery({
+    queryKey: ['member_attendance', selectedMember?.id],
+    queryFn: async () => {
+      if (!selectedMember?.id) return [];
+      const { data, error } = await supabase
+        .from('attendance')
+        .select('id, check_in, check_out, source, notes, guest_name, marked_by, profiles(full_name)')
+        .eq('member_id', selectedMember.id)
+        .order('check_in', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: !!selectedMember?.id && detailOpen,
+  });
+
   // When opening member detail, ensure fee records exist for all months
   useEffect(() => {
     if (selectedMember && detailOpen) {
@@ -793,7 +815,7 @@ export default function MembersPage() {
     }
   }, [dialogOpen]);
 
-  const capturePhoto = () => {
+  const capturePhoto = async () => {
     if (!videoRef.current) return;
     const canvas = document.createElement('canvas');
     canvas.width = videoRef.current.videoWidth || 300;
@@ -801,32 +823,32 @@ export default function MembersPage() {
     const ctx = canvas.getContext('2d');
     if (ctx) {
       ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-      setForm((prev) => ({ ...prev, photo_url: dataUrl }));
+      const rawDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      const compressedDataUrl = await compressDataUrl(rawDataUrl, 400, 400, 0.72);
+      setForm((prev) => ({ ...prev, photo_url: compressedDataUrl }));
       stopCamera();
-      toast.success('Photo captured!');
+      toast.success('Photo captured & compressed!');
     }
   };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (!file.type.startsWith('image/')) {
       toast.error('Please select a valid image file');
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result as string;
-      if (dataUrl) {
-        setForm((prev) => ({ ...prev, photo_url: dataUrl }));
-        stopCamera();
-        toast.success('Image selected from device');
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressed = await compressImageFile(file, 400, 400, 0.72);
+      setForm((prev) => ({ ...prev, photo_url: compressed }));
+      stopCamera();
+      toast.success('Image compressed & selected from device');
+    } catch (err: any) {
+      console.error('Failed to compress image:', err);
+      toast.error('Failed to process image');
+    }
     e.target.value = '';
   };
 
@@ -2866,11 +2888,154 @@ export default function MembersPage() {
               </div>
             </TabsContent>
 
-            <TabsContent value="attendance" className="pt-4">
-              <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                <CalendarDays className="h-12 w-12 mb-4 opacity-20" />
-                <p>Attendance history coming soon.</p>
-              </div>
+            <TabsContent value="attendance" className="pt-4 space-y-4">
+              {loadingAttendance ? (
+                <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                  <Loader2 className="h-8 w-8 animate-spin mb-2 text-primary" />
+                  <p className="text-xs">Loading attendance history...</p>
+                </div>
+              ) : (
+                <>
+                  {/* Summary Metric Cards */}
+                  {(() => {
+                    const now = new Date();
+                    const currentMonth = now.getMonth();
+                    const currentYear = now.getFullYear();
+                    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+                    const totalDays = memberAttendance.length;
+                    const thisMonthCount = memberAttendance.filter((a: any) => {
+                      const d = new Date(a.check_in);
+                      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+                    }).length;
+                    const last30DaysCount = memberAttendance.filter((a: any) => {
+                      return new Date(a.check_in) >= thirtyDaysAgo;
+                    }).length;
+                    const lastVisit = memberAttendance[0]?.check_in;
+
+                    return (
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        <div className="bg-muted/40 p-3 rounded-lg border border-border/60">
+                          <div className="text-xs text-muted-foreground font-medium flex items-center gap-1.5">
+                            <CalendarDays className="h-3.5 w-3.5 text-primary" /> Total Visits
+                          </div>
+                          <div className="text-xl font-bold font-mono mt-1 text-foreground">
+                            {totalDays} <span className="text-xs font-normal text-muted-foreground">days</span>
+                          </div>
+                        </div>
+
+                        <div className="bg-muted/40 p-3 rounded-lg border border-border/60">
+                          <div className="text-xs text-muted-foreground font-medium flex items-center gap-1.5">
+                            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> This Month
+                          </div>
+                          <div className="text-xl font-bold font-mono mt-1 text-emerald-400">
+                            {thisMonthCount} <span className="text-xs font-normal text-muted-foreground">days</span>
+                          </div>
+                        </div>
+
+                        <div className="bg-muted/40 p-3 rounded-lg border border-border/60">
+                          <div className="text-xs text-muted-foreground font-medium flex items-center gap-1.5">
+                            <Clock className="h-3.5 w-3.5 text-blue-400" /> Last 30 Days
+                          </div>
+                          <div className="text-xl font-bold font-mono mt-1 text-blue-400">
+                            {last30DaysCount} <span className="text-xs font-normal text-muted-foreground">days</span>
+                          </div>
+                        </div>
+
+                        <div className="bg-muted/40 p-3 rounded-lg border border-border/60">
+                          <div className="text-xs text-muted-foreground font-medium flex items-center gap-1.5">
+                            <Fingerprint className="h-3.5 w-3.5 text-violet-400" /> Last Seen
+                          </div>
+                          <div className="text-xs font-semibold font-mono mt-1.5 text-foreground truncate">
+                            {lastVisit
+                              ? new Date(lastVisit).toLocaleDateString('en-PK', {
+                                  day: 'numeric',
+                                  month: 'short',
+                                  timeZone: 'Asia/Karachi',
+                                }) +
+                                ' ' +
+                                new Date(lastVisit).toLocaleTimeString('en-PK', {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  hour12: true,
+                                  timeZone: 'Asia/Karachi',
+                                })
+                              : 'Never'}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Attendance Log Table */}
+                  {memberAttendance.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-12 text-muted-foreground border border-dashed rounded-lg">
+                      <CalendarDays className="h-10 w-10 mb-3 opacity-20" />
+                      <p className="text-sm font-medium">No attendance records found</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">This member has not checked in yet.</p>
+                    </div>
+                  ) : (
+                    <div className="border border-border/60 rounded-lg overflow-hidden max-h-72 overflow-y-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-muted/60 sticky top-0 border-b border-border/60">
+                          <tr>
+                            <th className="text-left p-2.5 font-semibold text-muted-foreground">Date &amp; Day</th>
+                            <th className="text-left p-2.5 font-semibold text-muted-foreground">Check In</th>
+                            <th className="text-left p-2.5 font-semibold text-muted-foreground">Method</th>
+                            <th className="text-left p-2.5 font-semibold text-muted-foreground">Marked By</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border/40">
+                          {memberAttendance.map((rec: any) => {
+                            const checkInDate = new Date(rec.check_in);
+                            const dayName = checkInDate.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'Asia/Karachi' });
+                            const formattedDate = checkInDate.toLocaleDateString('en-PK', {
+                              day: '2-digit',
+                              month: 'short',
+                              year: 'numeric',
+                              timeZone: 'Asia/Karachi',
+                            });
+                            const formattedTime = checkInDate.toLocaleTimeString('en-PK', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              hour12: true,
+                              timeZone: 'Asia/Karachi',
+                            });
+
+                            return (
+                              <tr key={rec.id} className="hover:bg-muted/20 transition-colors">
+                                <td className="p-2.5 font-medium">
+                                  <span className="font-mono text-foreground">{formattedDate}</span>
+                                  <span className="text-[11px] text-muted-foreground ml-1.5">({dayName})</span>
+                                </td>
+                                <td className="p-2.5 font-mono font-semibold text-primary">
+                                  {formattedTime}
+                                </td>
+                                <td className="p-2.5">
+                                  {rec.source === 'biometric' ? (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-violet-400 bg-violet-500/10 border border-violet-500/20 px-2 py-0.5 rounded-full">
+                                      <Fingerprint className="h-3 w-3" /> Biometric
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground bg-accent px-2 py-0.5 rounded-full border border-border/40">
+                                      ✍️ Manual
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-2.5 text-muted-foreground text-[11px]">
+                                  {rec.source === 'biometric'
+                                    ? 'Fingerprint Machine'
+                                    : rec.profiles?.full_name || 'Staff'}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
             </TabsContent>
           </Tabs>
         </DialogContent>

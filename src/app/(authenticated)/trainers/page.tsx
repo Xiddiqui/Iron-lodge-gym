@@ -129,7 +129,7 @@ export default function TrainersPage() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('members')
-        .select('*')
+        .select('id, member_number, full_name, phone, cnic, email, join_date, monthly_fee, training_fees, trainer_id, active')
         .order('full_name', { ascending: true });
       if (error) throw error;
       return data as Member[];

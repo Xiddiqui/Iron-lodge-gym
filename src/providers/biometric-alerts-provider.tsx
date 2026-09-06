@@ -258,28 +258,58 @@ function CheckInAlert({
   onDismiss: () => void;
 }) {
   const initials = getMemberInitials(n.member_name);
+  const isDueOrOverdue = n.fee_status === 'due' || n.fee_status === 'overdue';
+  const isOverdue = n.fee_status === 'overdue';
 
   return (
     <div
-      className="relative rounded-2xl overflow-hidden shadow-2xl border border-emerald-500/40 w-full"
+      className={`relative rounded-2xl overflow-hidden shadow-2xl w-full border ${
+        isDueOrOverdue ? 'border-red-500/50 shadow-red-950/50' : 'border-emerald-500/40'
+      }`}
       style={{
-        background: 'linear-gradient(135deg, rgba(16,20,30,0.98) 0%, rgba(5,46,22,0.98) 100%)',
+        background: isDueOrOverdue
+          ? 'linear-gradient(135deg, rgba(16,20,30,0.98) 0%, rgba(60,5,5,0.98) 100%)'
+          : 'linear-gradient(135deg, rgba(16,20,30,0.98) 0%, rgba(5,46,22,0.98) 100%)',
         backdropFilter: 'blur(20px)',
       }}
     >
       {/* Glow strip */}
-      <div className="h-1.5 w-full bg-gradient-to-r from-emerald-400 via-green-400 to-emerald-500" />
+      <div
+        className={`h-1.5 w-full ${
+          isDueOrOverdue
+            ? 'bg-gradient-to-r from-red-500 via-rose-400 to-red-500 animate-pulse'
+            : 'bg-gradient-to-r from-emerald-400 via-green-400 to-emerald-500'
+        }`}
+      />
 
       <div className="p-4">
         {/* Header */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-full bg-emerald-500/20 border border-emerald-500/40 grid place-items-center">
-              <Fingerprint className="h-4 w-4 text-emerald-400" />
+            <div
+              className={`h-8 w-8 rounded-full grid place-items-center ${
+                isDueOrOverdue
+                  ? 'bg-red-500/20 border border-red-500/40 animate-pulse'
+                  : 'bg-emerald-500/20 border border-emerald-500/40'
+              }`}
+            >
+              {isDueOrOverdue ? (
+                <AlertTriangle className="h-4 w-4 text-red-400" />
+              ) : (
+                <Fingerprint className="h-4 w-4 text-emerald-400" />
+              )}
             </div>
             <div>
-              <p className="text-xs font-semibold text-emerald-400 uppercase tracking-widest">
-                Biometric Check-In
+              <p
+                className={`text-xs font-bold uppercase tracking-widest ${
+                  isDueOrOverdue ? 'text-red-400' : 'text-emerald-400'
+                }`}
+              >
+                {isOverdue
+                  ? '⚠️ Fee Overdue Alert'
+                  : isDueOrOverdue
+                  ? '⚠️ Fee Due Alert'
+                  : 'Biometric Check-In'}
               </p>
             </div>
           </div>
@@ -297,31 +327,63 @@ function CheckInAlert({
             <img
               src={normalizeImageSrc(n.member_photo_url)!}
               alt={n.member_name}
-              className="h-14 w-14 rounded-full object-cover border-2 border-emerald-500/40 shadow-lg"
+              className={`h-14 w-14 rounded-full object-cover border-2 shadow-lg ${
+                isDueOrOverdue ? 'border-red-500/50 shadow-red-500/20' : 'border-emerald-500/40'
+              }`}
             />
           ) : (
-            <div className="h-14 w-14 rounded-full bg-gradient-to-br from-emerald-400 to-green-600 grid place-items-center text-white font-bold text-lg shadow-lg shadow-emerald-500/20 border-2 border-emerald-500/40 shrink-0">
+            <div
+              className={`h-14 w-14 rounded-full grid place-items-center text-white font-bold text-lg shadow-lg border-2 shrink-0 ${
+                isDueOrOverdue
+                  ? 'bg-gradient-to-br from-red-500 to-rose-700 border-red-500/40 shadow-red-500/20'
+                  : 'bg-gradient-to-br from-emerald-400 to-green-600 border-emerald-500/40 shadow-emerald-500/20'
+              }`}
+            >
               {initials}
             </div>
           )}
           <div className="min-w-0 flex-1">
             <p className="text-lg font-bold text-white truncate">{n.member_name}</p>
             {n.member_number && (
-              <p className="text-xs text-emerald-400/80 font-mono font-semibold">Member #{n.member_number}</p>
+              <p
+                className={`text-xs font-mono font-semibold ${
+                  isDueOrOverdue ? 'text-red-300/90' : 'text-emerald-400/80'
+                }`}
+              >
+                Member #{n.member_number}
+              </p>
+            )}
+            {isDueOrOverdue && (
+              <p className="text-xs text-red-400 font-semibold mt-0.5">
+                {isOverdue ? 'Payment is overdue' : 'Fee payment pending'}
+              </p>
             )}
           </div>
         </div>
 
+        {/* Prominent warning banner for fee due */}
+        {isDueOrOverdue && n.fee_amount_due && n.fee_amount_due > 0 && (
+          <div className="mt-3 p-2.5 rounded-xl bg-red-500/15 border border-red-500/30 flex items-center justify-between">
+            <span className="text-xs font-semibold text-red-300">Amount Due:</span>
+            <span className="font-mono font-bold text-sm text-red-200">
+              PKR {n.fee_amount_due.toLocaleString()}
+            </span>
+          </div>
+        )}
+
         {/* Time + Fee */}
-        <div className="mt-3.5 flex items-center justify-between gap-2 flex-wrap bg-white/5 p-2.5 rounded-xl border border-white/10">
+        <div className="mt-3 flex items-center justify-between gap-2 flex-wrap bg-white/5 p-2.5 rounded-xl border border-white/10">
           <div className="flex items-center gap-1.5 text-white/80 text-xs">
-            <Clock className="h-4 w-4 text-emerald-400" />
+            <Clock className={`h-4 w-4 ${isDueOrOverdue ? 'text-red-400' : 'text-emerald-400'}`} />
             <span className="font-mono font-bold text-white text-sm">{formatTime(n.check_in_time)}</span>
           </div>
           <FeeStatusBadge status={n.fee_status} amountDue={n.fee_amount_due} />
         </div>
 
-        <AutoDismissBar durationMs={30000} color="bg-emerald-400" />
+        <AutoDismissBar
+          durationMs={30000}
+          color={isDueOrOverdue ? 'bg-red-400' : 'bg-emerald-400'}
+        />
       </div>
     </div>
   );
@@ -455,7 +517,7 @@ export function BiometricAlertsProvider({
     // Audio & Voice
     if (voiceEnabledRef.current) {
       if (notification.type === 'checkin') {
-        if (notification.fee_status === 'overdue') {
+        if (notification.fee_status === 'overdue' || notification.fee_status === 'due') {
           playWarningTone();
         } else {
           playCheckinChime();

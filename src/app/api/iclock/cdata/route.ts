@@ -39,9 +39,24 @@ export async function GET(request: Request) {
 
   console.log(`[Biometric] Device handshake — SN: ${sn}`);
 
+  // Format current Pakistan Standard Time (PKT / UTC+5) for device RTC sync
+  const now = new Date();
+  const pktDateFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Karachi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const pktDateTimeStr = pktDateFormatter.format(now).replace(', ', ' ').replace(',', ' ');
+
   // iClock option response — device settings
   // TimeZone=5 = UTC+5 (Pakistan Standard Time)
   // Realtime=1 = push punches immediately, don't batch
+  // DateTime=YYYY-MM-DD HH:MM:SS = synchronizes device hardware clock
   const optionResponse = [
     `GET OPTION FROM: ${sn}`,
     'Stamp=9999',
@@ -53,6 +68,7 @@ export async function GET(request: Request) {
     'TransFlag=1111000000',
     'TimeZone=5',
     'Realtime=1',
+    `DateTime=${pktDateTimeStr}`,
     'Encrypt=None',
   ].join('\n');
 
@@ -156,18 +172,30 @@ async function processPunch({
   // Parse punch time — device sends in PKT (UTC+5), convert to UTC
   // "2026-08-04 14:30:00" → "2026-08-04T14:30:00+05:00" → UTC ISO string
   const pktDateStr = dateStr.replace(' ', 'T') + '+05:00';
-  const punchTime = new Date(pktDateStr);
+  let punchTime = new Date(pktDateStr);
 
   if (isNaN(punchTime.getTime())) {
     console.warn(`[Biometric] Invalid date string: ${dateStr}`);
     return;
   }
 
+  // Check for device RTC clock drift on live incoming punches:
+  // If the device sent a timestamp for today (PKT date) but the time of day is drifted (> 15 mins),
+  // the device's internal RTC is off (e.g. 1pm instead of 8pm). Use real current arrival time.
+  const now = new Date();
+  const pktTodayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Karachi' }).format(now); // "YYYY-MM-DD"
+  const punchDateStr = dateStr.slice(0, 10);
+  const driftMs = Math.abs(now.getTime() - punchTime.getTime());
+  if (punchDateStr === pktTodayStr && driftMs > 15 * 60 * 1000) {
+    console.warn(`[Biometric] Device RTC drift detected (device: ${dateStr}, actual PKT: ${now.toISOString()}). Using current timestamp.`);
+    punchTime = now;
+  }
+
   // Look up active member by member_number (pin)
   // Try exact match first
   let { data: member } = await adminClient
     .from('members')
-    .select('id, full_name, photo_url, member_number')
+    .select('id, full_name, photo_url, member_number, join_date, tenure_months, monthly_fee, training_fees, amount_paid')
     .eq('member_number', pin)
     .eq('active', true)
     .maybeSingle();
@@ -177,7 +205,7 @@ async function processPunch({
     const numPin = Number(pin).toString();
     const { data: allActiveMembers } = await adminClient
       .from('members')
-      .select('id, full_name, photo_url, member_number')
+      .select('id, full_name, photo_url, member_number, join_date, tenure_months, monthly_fee, training_fees, amount_paid')
       .eq('active', true);
 
     if (allActiveMembers) {
@@ -191,6 +219,11 @@ async function processPunch({
     console.warn(`[Biometric] No active member found matching pin/member_number="${pin}"`);
     return { success: false, reason: `No active member with member_number="${pin}" found in database` };
   }
+
+  // Avoid broadcasting heavy base64 strings over Supabase Realtime WebSockets
+  const safePhotoUrl = member.photo_url && (member.photo_url.startsWith('http') || member.photo_url.length < 2048)
+    ? member.photo_url
+    : null;
 
   // Determine the UTC date for this punch (used for "same day" dedup check)
   const punchDateUTC = punchTime.toISOString().slice(0, 10); // "YYYY-MM-DD"
@@ -208,8 +241,8 @@ async function processPunch({
     .limit(1)
     .maybeSingle();
 
-  // Fetch member's current fee status
-  const feeStatus = await getMemberFeeStatus(adminClient, member.id);
+  // Fetch member's current fee status with billing cycle & tenure reconciliation
+  const feeStatus = await getMemberFeeStatus(adminClient, member);
 
   if (existing) {
     // ── DUPLICATE SCAN ─────────────────────────────────────────────────────
@@ -220,7 +253,7 @@ async function processPunch({
       type: 'duplicate',
       member_id: member.id,
       member_name: member.full_name,
-      member_photo_url: member.photo_url,
+      member_photo_url: safePhotoUrl,
       member_number: member.member_number,
       fee_status: feeStatus.status,
       fee_amount_due: feeStatus.amountDue,
@@ -247,7 +280,7 @@ async function processPunch({
           type: 'duplicate',
           member_id: member.id,
           member_name: member.full_name,
-          member_photo_url: member.photo_url,
+          member_photo_url: safePhotoUrl,
           member_number: member.member_number,
           fee_status: feeStatus.status,
           fee_amount_due: feeStatus.amountDue,
@@ -265,7 +298,7 @@ async function processPunch({
       type: 'checkin',
       member_id: member.id,
       member_name: member.full_name,
-      member_photo_url: member.photo_url,
+      member_photo_url: safePhotoUrl,
       member_number: member.member_number,
       fee_status: feeStatus.status,
       fee_amount_due: feeStatus.amountDue,
@@ -279,25 +312,69 @@ async function processPunch({
 // ─────────────────────────────────────────────────────────────────────────────
 async function getMemberFeeStatus(
   adminClient: ReturnType<typeof getAdminClient>,
-  memberId: string
+  member: any
 ): Promise<{ status: 'paid' | 'due' | 'overdue'; amountDue: number }> {
   const { data: records } = await adminClient
     .from('fee_records')
-    .select('paid, period_month, period_end, amount')
-    .eq('member_id', memberId)
-    .order('period_month', { ascending: false })
-    .limit(1);
+    .select('id, paid, amount, amount_paid, discount, period_month, period_end, collected_by, payment_method')
+    .eq('member_id', member.id)
+    .order('period_month', { ascending: false });
 
-  const record = records?.[0];
-  if (!record) return { status: 'due', amountDue: 0 };
-  if (record.paid) return { status: 'paid', amountDue: 0 };
+  const now = new Date();
+  const currentDay = now.getDate();
+  const [jYear, jMonth, jDay] = (member.join_date || '').split('-').map(Number);
+  const joinDay = jDay || 1;
+  const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 
-  const periodEnd = new Date(record.period_end);
-  const today = new Date();
+  // Check if current month fee is not yet due based on member's join billing day
+  const feeNotDueYet = currentDay < joinDay;
+  const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}-01`;
+  const activeCycleKey = feeNotDueYet ? prevMonthKey : currentMonthKey;
 
-  if (periodEnd < today) {
-    return { status: 'overdue', amountDue: Number(record.amount) };
+  const totalFee = (Number(member.monthly_fee) || 0) + (Number(member.training_fees) || 0);
+
+  // Check tenure
+  const tenure = Math.max(1, Number(member.tenure_months) || 1);
+  const lastTenureDate = new Date(jYear || now.getFullYear(), (jMonth || (now.getMonth() + 1)) - 1 + tenure - 1, 1);
+  const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+
+  // If active cycle is within registration tenure and member paid registration fee
+  if (activeCycleKey <= lastTenurePeriod && Number(member.amount_paid) >= totalFee) {
+    return { status: 'paid', amountDue: 0 };
   }
 
-  return { status: 'due', amountDue: Number(record.amount) };
+  const activeRecord = (records || []).find((r: any) => r.period_month === activeCycleKey);
+
+  // If active record is marked paid
+  if (activeRecord && activeRecord.paid) {
+    return { status: 'paid', amountDue: 0 };
+  }
+
+  // If active record has partial payment
+  if (activeRecord && Number(activeRecord.amount_paid) > 0) {
+    const netDue = Math.max(0, Number(activeRecord.amount) - Number(activeRecord.discount || 0) - Number(activeRecord.amount_paid));
+    if (netDue <= 0) return { status: 'paid', amountDue: 0 };
+    return { status: 'due', amountDue: netDue };
+  }
+
+  // If fee for this month isn't due yet and no active record or previous was paid
+  if (feeNotDueYet && (!activeRecord || activeRecord.paid)) {
+    return { status: 'paid', amountDue: 0 };
+  }
+
+  // Check if overdue: only if currentDay > joinDay + 5 (grace period) or period_end < today
+  const isOverdue = !feeNotDueYet && (
+    (activeRecord?.period_end && new Date(activeRecord.period_end) < now) ||
+    currentDay > (joinDay + 5)
+  );
+
+  const amountDue = activeRecord
+    ? Math.max(0, Number(activeRecord.amount) - Number(activeRecord.discount || 0) - Number(activeRecord.amount_paid || 0))
+    : totalFee;
+
+  return {
+    status: isOverdue ? 'overdue' : 'due',
+    amountDue,
+  };
 }

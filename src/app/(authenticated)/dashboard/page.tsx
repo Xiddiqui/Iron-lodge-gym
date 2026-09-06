@@ -123,14 +123,14 @@ export default function DashboardPage() {
   const { data: allPaymentRecords = [], isLoading: isPaymentsLoading } = useQuery({
     queryKey: ['dash-recent-payment-records'],
     enabled: role === 'admin',
-    staleTime: 30_000,
+    staleTime: 300_000,
     queryFn: async () => {
       const { data, error } = await supabase
         .from('fee_records')
         .select('id, amount, amount_paid, paid, paid_at, payment_method, member_id, period_month, period_end, collected_by, created_at, members(member_number, full_name, phone, photo_url, created_at)')
         .or('paid.eq.true,amount_paid.gt.0')
         .order('paid_at', { ascending: false, nullsFirst: false })
-        .limit(300);
+        .limit(100);
 
       if (error) throw error;
       return (data ?? []).map((r: any) => {
@@ -148,7 +148,7 @@ export default function DashboardPage() {
   const { data: staffProfiles = [] } = useQuery({
     queryKey: ['dash-profiles'],
     enabled: role === 'admin',
-    staleTime: 60_000,
+    staleTime: 300_000,
     queryFn: async () => {
       const { data } = await supabase.from('profiles').select('id, full_name, role');
       return data ?? [];
@@ -169,14 +169,14 @@ export default function DashboardPage() {
   const { data: walkinRecords = [], isLoading: isWalkinLoading } = useQuery({
     queryKey: ['dash-walkin-records'],
     enabled: role === 'admin',
-    staleTime: 30_000,
+    staleTime: 300_000,
     queryFn: async () => {
       const { data, error } = await supabase
         .from('attendance')
         .select('id, guest_name, notes, check_in, source, marked_by')
         .not('guest_name', 'is', null)
         .order('check_in', { ascending: false })
-        .limit(500);
+        .limit(200);
       // If the column doesn't exist yet (migration not run), return empty
       if (error?.code === '42703') return [];
       if (error) throw error;
@@ -225,7 +225,7 @@ export default function DashboardPage() {
     queryKey: ['dash-fees', monthStart, monthEnd],
     enabled: role === 'admin',
     placeholderData: keepPreviousData,
-    staleTime: 30_000,
+    staleTime: 300_000,
     queryFn: async () => {
       // Fetch both existing fee records and active members concurrently
       const [{ data: existingFees, error: feeErr }, { data: activeMembers, error: memErr }] = await Promise.all([
@@ -347,7 +347,7 @@ export default function DashboardPage() {
     queryKey: ['dash-expenses', monthStart, monthEnd],
     enabled: role === 'admin',
     placeholderData: keepPreviousData,
-    staleTime: 30_000,
+    staleTime: 300_000,
     queryFn: async () => {
       const { data, error } = await supabase
         .from('expenses')
@@ -366,7 +366,7 @@ export default function DashboardPage() {
     queryKey: ['dash-trend', selectedMonth, trendMonths],
     enabled: role === 'admin',
     placeholderData: keepPreviousData,
-    staleTime: 60_000,
+    staleTime: 300_000,
     queryFn: async () => {
       const months: { key: string; label: string; revenue: number; expenses: number; profit: number }[] = [];
       const map = new Map<string, typeof months[0]>();
@@ -425,7 +425,7 @@ export default function DashboardPage() {
     queryKey: ['dash-active', selectedMonth],
     enabled: role === 'admin',
     placeholderData: keepPreviousData,
-    staleTime: 60_000,
+    staleTime: 300_000,
     queryFn: async () => {
       const endCurrent = new Date(year, month, 0).toISOString().slice(0, 10);
       const endPrev = new Date(year, month - 1, 0).toISOString().slice(0, 10);

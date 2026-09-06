@@ -8,7 +8,7 @@ export function useGymSettings() {
     queryFn: async () => {
       const { data } = await supabase
         .from('gym_settings')
-        .select('*')
+        .select('id, gym_name, logo_url, currency, timezone, reserve_percentage, created_at, updated_at')
         .eq('id', 1)
         .maybeSingle();
       return data;

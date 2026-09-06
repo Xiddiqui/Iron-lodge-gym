@@ -16,7 +16,7 @@ import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { normalizeImageSrc } from '@/lib/image-utils';
 import {
   CalendarCheck, Plus, Search, Loader2, Clock, LogOut,
-  UserCheck, Shield, Coffee, ChevronDown, ChevronUp, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle, Banknote, X, Trash2
+  UserCheck, Shield, Coffee, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle, Banknote, X, Trash2
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -83,6 +83,8 @@ export default function AttendancePage() {
   const [feeFilter, setFeeFilter] = useState<'all' | 'unpaid' | 'paid' | 'overdue' | 'due' | 'partial'>('all');
   const [attSearch, setAttSearch] = useState('');
   const [deletingAttId, setDeletingAttId] = useState<string | null>(null);
+  const [currentAttPage, setCurrentAttPage] = useState(1);
+  const ITEMS_PER_PAGE = 20;
 
   const isAdmin = userRole === 'admin';
 
@@ -90,97 +92,98 @@ export default function AttendancePage() {
   // Compute fee status from member fee records & member profile
   // ─────────────────────────────────────────────────────────────────
   const computeMemberFeeStatus = (memberId: string, memberFees: any[], memberObj?: any): MemberFeeInfo => {
+    const now = new Date();
+    const currentDay = now.getDate();
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
+    const totalFee = ((memberObj?.monthly_fee || 0) + (memberObj?.training_fees || 0));
+
+    // Parse member join date to determine billing day
+    const [jYear, jMonth, jDay] = (memberObj?.join_date || '').split('-').map(Number);
+    const joinDay = jDay || 1;
+
+    // Determine the active billing cycle month key
+    const feeNotDueYet = currentDay < joinDay;
+    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+    const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}-01`;
+    const activeCycleKey = feeNotDueYet ? prevMonthKey : currentMonthKey;
+
+    // Check tenure coverage
+    const tenure = Math.max(1, Number(memberObj?.tenure_months) || 1);
+    const lastTenureDate = new Date(jYear || now.getFullYear(), (jMonth || (now.getMonth() + 1)) - 1 + tenure - 1, 1);
+    const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+
+    // If within registration tenure and member paid registration amount
+    if (activeCycleKey <= lastTenurePeriod && Number(memberObj?.amount_paid) >= totalFee && totalFee > 0) {
+      return { status: 'paid' };
+    }
+
     if (!memberFees || memberFees.length === 0) {
-      const totalFee = ((memberObj?.monthly_fee || 0) + (memberObj?.training_fees || 0));
       if (totalFee > 0) {
+        // No fee records but fee exists — check if fee is not due yet
+        if (feeNotDueYet) return { status: 'paid' };
+        return { status: 'due', amountDue: totalFee, totalAmount: totalFee };
+      }
+      return { status: 'paid' };
+    }
+
+    // Find the fee record for the active billing cycle
+    const activeFee = memberFees.find((fr) => fr.period_month === activeCycleKey);
+
+    // If the active cycle fee record is marked fully paid
+    if (activeFee && activeFee.paid) {
+      return { status: 'paid' };
+    }
+
+    // If active record exists with full payment via amount_paid
+    if (activeFee) {
+      const feeAmount = Number(activeFee.amount) || 0;
+      const discount = Number(activeFee.discount) || 0;
+      const amountPaid = Number(activeFee.amount_paid) || 0;
+      const netDue = Math.max(0, feeAmount - discount - amountPaid);
+
+      if (netDue <= 0) {
+        return { status: 'paid' };
+      }
+
+      // Partial payment
+      if (amountPaid > 0) {
+        const effectiveDue = Math.max(feeAmount - discount, 1);
+        const paidPercent = Math.round((amountPaid / effectiveDue) * 100);
         return {
-          status: 'due',
-          amountDue: totalFee,
-          totalAmount: totalFee,
+          status: 'partial',
+          amountDue: netDue,
+          amountPaid,
+          totalAmount: feeAmount - discount,
+          paidPercent,
         };
       }
-      return {
-        status: 'paid',
-      };
     }
 
-    // Filter unpaid records — exclude future fee records (period_end not yet reached)
-    // A fee whose period_end is still in the future is not yet due; don't flag it.
-    const unpaidRecords = memberFees.filter((fr) => {
-      const feeAmount = Number(fr.amount) || 0;
-      const discount = Number(fr.discount) || 0;
-      const amountPaid = Number(fr.amount_paid) || 0;
-      const netDue = Math.max(0, feeAmount - discount - amountPaid);
-      if (!fr.paid && netDue > 0) {
-        // If there's a period_end and it's in the future, this fee isn't due yet
-        if (fr.period_end) {
-          const periodEnd = new Date(fr.period_end);
-          periodEnd.setHours(23, 59, 59, 999);
-          if (periodEnd > today) return false; // not yet due — skip
-        }
-        return true;
-      }
-      return false;
-    });
-
-    if (unpaidRecords.length === 0) {
-      return {
-        status: 'paid',
-      };
+    // If fee not due yet (before billing day) and no unpaid active cycle record
+    if (feeNotDueYet && !activeFee) {
+      return { status: 'paid' };
     }
 
-    // Check if any unpaid record is overdue
-    const overdueRecord = unpaidRecords.find((fr) => {
-      if (!fr.period_end) return false;
-      const end = new Date(fr.period_end);
-      end.setHours(23, 59, 59, 999);
-      return end < today;
-    });
+    // Check for overdue: past the period_end or past billing day + grace
+    const isOverdue = !feeNotDueYet && (
+      (activeFee?.period_end && new Date(activeFee.period_end) < today) ||
+      currentDay > (joinDay + 5)
+    );
 
-    // Total net due across all unpaid records
-    const totalNetDue = unpaidRecords.reduce((sum, fr) => {
-      const feeAmount = Number(fr.amount) || 0;
-      const discount = Number(fr.discount) || 0;
-      const amountPaid = Number(fr.amount_paid) || 0;
-      return sum + Math.max(0, feeAmount - discount - amountPaid);
-    }, 0);
+    const amountDue = activeFee
+      ? Math.max(0, Number(activeFee.amount) - Number(activeFee.discount || 0) - Number(activeFee.amount_paid || 0))
+      : totalFee;
 
-    // Latest fee record (first since sorted by period_month desc)
-    const latestRecord = memberFees[0];
-    const latestFeeAmount = Number(latestRecord.amount) || 0;
-    const latestDiscount = Number(latestRecord.discount) || 0;
-    const latestPaid = Number(latestRecord.amount_paid) || 0;
-    const latestNetDue = Math.max(0, latestFeeAmount - latestDiscount - latestPaid);
-
-    if (overdueRecord) {
-      return {
-        status: 'overdue',
-        amountDue: totalNetDue,
-        amountPaid: latestPaid > 0 ? latestPaid : undefined,
-        totalAmount: latestFeeAmount - latestDiscount,
-      };
-    }
-
-    if (latestPaid > 0 && latestNetDue > 0) {
-      const totalForPercent = Math.max(latestFeeAmount - latestDiscount, 1);
-      const paidPercent = Math.round((latestPaid / totalForPercent) * 100);
-      return {
-        status: 'partial',
-        amountDue: totalNetDue,
-        amountPaid: latestPaid,
-        totalAmount: latestFeeAmount - latestDiscount,
-        paidPercent,
-      };
-    }
+    const feeAmount = activeFee ? Number(activeFee.amount) || 0 : totalFee;
+    const discount = activeFee ? Number(activeFee.discount) || 0 : 0;
 
     return {
-      status: 'due',
-      amountDue: totalNetDue,
-      amountPaid: latestPaid > 0 ? latestPaid : undefined,
-      totalAmount: latestFeeAmount - latestDiscount,
+      status: isOverdue ? 'overdue' : 'due',
+      amountDue,
+      totalAmount: feeAmount - discount,
     };
   };
 
@@ -193,7 +196,7 @@ export default function AttendancePage() {
     nextDay.setDate(nextDay.getDate() + 1);
     const { data, error } = await supabase
       .from('attendance')
-      .select('*, members(id, full_name, phone, member_number, photo_url, monthly_fee, training_fees, join_date), profiles(full_name)')
+      .select('*, members(id, full_name, phone, member_number, photo_url, monthly_fee, training_fees, join_date, tenure_months, amount_paid), profiles(full_name)')
       .gte('check_in', `${forDate}T00:00:00`)
       .lt('check_in', nextDay.toISOString().slice(0, 10) + 'T00:00:00')
       .order('check_in', { ascending: false });
@@ -367,9 +370,30 @@ export default function AttendancePage() {
         if (error.code === '23505') throw new Error('Already marked for today');
         throw error;
       }
+
+      // If fee is due or overdue, send notification for red popup alert
+      const feeInfo = memberFeeStatuses[memberId];
+      const memberObj = members.find((m: any) => m.id === memberId);
+      if (feeInfo && (feeInfo.status === 'due' || feeInfo.status === 'overdue')) {
+        await supabase.from('biometric_notifications').insert({
+          type: 'checkin',
+          member_id: memberId,
+          member_name: memberObj?.full_name || 'Member',
+          member_photo_url: memberObj?.photo_url || null,
+          member_number: memberObj?.member_number || null,
+          fee_status: feeInfo.status,
+          fee_amount_due: feeInfo.amountDue || null,
+          check_in_time: new Date().toISOString(),
+        });
+      }
+      return { memberId, feeInfo };
     },
-    onSuccess: () => {
-      toast.success('Attendance marked');
+    onSuccess: (res) => {
+      if (res?.feeInfo && (res.feeInfo.status === 'due' || res.feeInfo.status === 'overdue')) {
+        toast.warning(`Attendance marked — Fee is ${res.feeInfo.status.toUpperCase()} (PKR ${res.feeInfo.amountDue?.toLocaleString() || 0})`);
+      } else {
+        toast.success('Attendance marked');
+      }
       setDialogOpen(false);
     },
     onError: (e: any) => toast.error(e.message),
@@ -501,10 +525,21 @@ export default function AttendancePage() {
     });
   }, [attendance, memberFeeStatuses, attSearch, feeFilter]);
 
+  // Reset page to 1 when filters change
+  useEffect(() => { setCurrentAttPage(1); }, [attSearch, feeFilter, date]);
+
+  // Pagination computed values
+  const totalAttPages = Math.max(1, Math.ceil(filteredAttendance.length / ITEMS_PER_PAGE));
+  const safeAttPage = Math.min(currentAttPage, totalAttPages);
+  const paginatedAttendance = filteredAttendance.slice(
+    (safeAttPage - 1) * ITEMS_PER_PAGE,
+    safeAttPage * ITEMS_PER_PAGE
+  );
+
   const formatTimeStr = (isoStr: string | null) => {
     if (!isoStr) return '—';
-    return new Date(isoStr).toLocaleTimeString('en-US', {
-      hour: '2-digit', minute: '2-digit', hour12: true,
+    return new Date(isoStr).toLocaleTimeString('en-PK', {
+      hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Karachi',
     });
   };
 
@@ -784,7 +819,7 @@ export default function AttendancePage() {
                         </td>
                       </tr>
                     ) : (
-                      filteredAttendance.map((a: any) => {
+                      paginatedAttendance.map((a: any) => {
                         const displayName = a.members?.full_name || a.guest_name || a.notes?.replace(/^1-Day Walk-in: /, '').split(' | ')[0] || 'Walk-in Guest';
                         const displayPhone = a.members?.phone || (a.guest_name ? '1-Day Visit' : null);
                         const photoUrl = normalizeImageSrc(a.members?.photo_url);
@@ -836,7 +871,7 @@ export default function AttendancePage() {
                             <td className="p-4">
                               <div className="flex items-center gap-2 font-mono text-xs">
                                 <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                                {new Date(a.check_in).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
+                                {new Date(a.check_in).toLocaleTimeString('en-PK', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Karachi' })}
                               </div>
                             </td>
                             <td className="p-4">
@@ -886,6 +921,86 @@ export default function AttendancePage() {
                   </tbody>
                 </table>
               </div>
+
+              {/* Pagination Footer */}
+              {filteredAttendance.length > ITEMS_PER_PAGE && (
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 py-3 border-t border-border/50">
+                  <p className="text-xs text-muted-foreground">
+                    Showing <span className="font-semibold text-foreground">{(safeAttPage - 1) * ITEMS_PER_PAGE + 1}</span> to{' '}
+                    <span className="font-semibold text-foreground">{Math.min(safeAttPage * ITEMS_PER_PAGE, filteredAttendance.length)}</span>{' '}
+                    of <span className="font-semibold text-foreground">{filteredAttendance.length}</span> members
+                  </p>
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setCurrentAttPage(1)}
+                      disabled={safeAttPage === 1}
+                      title="First page"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                      <ChevronLeft className="h-4 w-4 -ml-2.5" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setCurrentAttPage((p) => Math.max(1, p - 1))}
+                      disabled={safeAttPage === 1}
+                      title="Previous page"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </Button>
+
+                    {/* Page numbers */}
+                    {Array.from({ length: totalAttPages }, (_, i) => i + 1)
+                      .filter((pg) => pg === 1 || pg === totalAttPages || Math.abs(pg - safeAttPage) <= 1)
+                      .reduce<(number | string)[]>((acc, pg, idx, arr) => {
+                        if (idx > 0 && pg - (arr[idx - 1] as number) > 1) acc.push('...');
+                        acc.push(pg);
+                        return acc;
+                      }, [])
+                      .map((pg, idx) =>
+                        pg === '...' ? (
+                          <span key={`ellipsis-${idx}`} className="px-1 text-muted-foreground text-sm select-none">…</span>
+                        ) : (
+                          <Button
+                            key={pg}
+                            variant={pg === safeAttPage ? 'default' : 'outline'}
+                            size="icon"
+                            className="h-8 w-8 text-xs font-semibold"
+                            onClick={() => setCurrentAttPage(pg as number)}
+                          >
+                            {pg}
+                          </Button>
+                        )
+                      )}
+
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setCurrentAttPage((p) => Math.min(totalAttPages, p + 1))}
+                      disabled={safeAttPage === totalAttPages}
+                      title="Next page"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setCurrentAttPage(totalAttPages)}
+                      disabled={safeAttPage === totalAttPages}
+                      title="Last page"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                      <ChevronRight className="h-4 w-4 -ml-2.5" />
+                    </Button>
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

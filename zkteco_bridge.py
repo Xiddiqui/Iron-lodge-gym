@@ -291,6 +291,13 @@ def main():
 
                     conn = zk.connect()
                     print(f"[Bridge] [OK] Connected via {mode_name}! Listening for fingerprint punches...")
+                    # Synchronize device internal RTC clock with local PC time
+                    try:
+                        conn.set_time(datetime.now())
+                        print(f"[Bridge] [OK] Synced device hardware clock to PC time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    except Exception as time_err:
+                        print(f"[Bridge] [WARN] Could not set device time: {time_err}")
+
                     connected = True
                     break
                 except Exception as conn_err:
@@ -335,7 +342,14 @@ def main():
                         if attendance is None:
                             continue
                         user_id = str(attendance.user_id)
-                        timestamp_str = attendance.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                        # Safeguard live capture timestamps: if device RTC is desynced, use exact current PC time
+                        curr_now = datetime.now()
+                        device_ts = attendance.timestamp
+                        drift_seconds = abs((curr_now - device_ts).total_seconds()) if device_ts else 9999
+                        if drift_seconds > 900:  # > 15 minutes drift
+                            timestamp_str = curr_now.strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            timestamp_str = device_ts.strftime("%Y-%m-%d %H:%M:%S")
                         key = (user_id, timestamp_str)
                         if key not in seen_records:
                             seen_records.add(key)

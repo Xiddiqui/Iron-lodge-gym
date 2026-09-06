@@ -72,6 +72,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase/client';
+import { compressImageFile } from '@/lib/image-utils';
 
 const COLOR_PRESETS = [
   '#a3e635', // Lime / Cyber
@@ -157,30 +158,24 @@ export default function OnePagerCustomizer() {
 
       const { error: uploadError } = await supabase.storage
         .from('gym-assets')
-        .upload(path, file, { upsert: true });
+        .upload(path, file, { upsert: true, cacheControl: '31536000' });
 
       if (!uploadError) {
         const { data: urlData } = supabase.storage.from('gym-assets').getPublicUrl(path);
         callback(urlData.publicUrl);
         toast.success('Image uploaded successfully!');
       } else {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          if (e.target?.result) {
-            callback(e.target.result as string);
-            toast.success('Image loaded locally!');
-          }
-        };
-        reader.readAsDataURL(file);
+        const compressed = await compressImageFile(file, 1200, 1200, 0.75);
+        callback(compressed);
+        toast.success('Image loaded & compressed locally!');
       }
     } catch {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        if (e.target?.result) {
-          callback(e.target.result as string);
-        }
-      };
-      reader.readAsDataURL(file);
+      try {
+        const compressed = await compressImageFile(file, 1200, 1200, 0.75);
+        callback(compressed);
+      } catch (e) {
+        console.error('Failed to load image:', e);
+      }
     } finally {
       setUploadingImage(false);
     }

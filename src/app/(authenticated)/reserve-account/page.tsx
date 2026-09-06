@@ -160,10 +160,11 @@ export default function ReserveAccountPage() {
   const { data: monthReserveExpenses = [], isLoading: reserveExpLoading } = useQuery({
     queryKey: ['reserve-expenses', monthStart, monthEnd],
     enabled: role === 'admin',
+    staleTime: 300_000,
     queryFn: async () => {
       const { data, error } = await supabase
         .from('expenses')
-        .select('*')
+        .select('id, name, amount, expense_date, category, notes, logged_by, created_at')
         .gte('expense_date', monthStart)
         .lt('expense_date', monthEnd)
         .eq('is_reserve', true)
@@ -177,10 +178,11 @@ export default function ReserveAccountPage() {
   const { data: monthDeposits = [], isLoading: depositsLoading } = useQuery<DepositRecord[]>({
     queryKey: ['reserve-deposits', monthStart, monthEnd],
     enabled: role === 'admin',
+    staleTime: 300_000,
     queryFn: async () => {
       const { data, error } = await supabase
         .from('reserve_deposits')
-        .select('*')
+        .select('id, title, amount, source, custom_source, deposit_date, notes, created_by, created_at')
         .gte('deposit_date', monthStart)
         .lt('deposit_date', monthEnd)
         .order('deposit_date', { ascending: false });
@@ -196,6 +198,8 @@ export default function ReserveAccountPage() {
   const { data: totalBalanceData } = useQuery({
     queryKey: ['reserve-balance', reservePercent],
     enabled: role === 'admin',
+    staleTime: 10 * 60 * 1000,
+    gcTime: 30 * 60 * 1000,
     queryFn: async () => {
       const [feesRes, expRes, depRes] = await Promise.all([
         supabase

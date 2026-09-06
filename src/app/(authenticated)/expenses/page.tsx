@@ -38,7 +38,13 @@ export default function ExpensesPage() {
     queryKey: ['expenses', monthStart, monthEnd],
     enabled: role === 'admin',
     queryFn: async () => {
-      const { data, error } = await supabase.from('expenses').select('*').gte('expense_date', monthStart).lt('expense_date', monthEnd).eq('is_reserve', false).order('expense_date', { ascending: false });
+      const { data, error } = await supabase
+        .from('expenses')
+        .select('id, name, category, amount, expense_date, notes, logged_by, created_at')
+        .gte('expense_date', monthStart)
+        .lt('expense_date', monthEnd)
+        .eq('is_reserve', false)
+        .order('expense_date', { ascending: false });
       if (error) throw error;
       return data;
     },
