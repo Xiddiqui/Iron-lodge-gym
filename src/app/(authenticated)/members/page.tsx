@@ -14,7 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Fingerprint } from 'lucide-react';
+import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, CalendarPlus, CalendarCheck, Zap, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Fingerprint } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { normalizeImageSrc, compressImageFile, compressDataUrl } from '@/lib/image-utils';
 import { toast } from 'sonner';
@@ -65,6 +65,7 @@ interface Member {
   tenure_months?: number | null;
   monthly_fee: number;
   training_fees: number;
+  admission_fee?: number | null;
   trainer_id: string | null;
   amount_paid: number;
   active: boolean;
@@ -146,13 +147,49 @@ function getPageNumbers(currentPage: number, totalPages: number): (number | stri
   return pages;
 }
 
+// Helper: extract admission fee from member (checks direct column or fallback notes tag)
+function getMemberAdmissionFee(member?: Partial<Member> | null): number {
+  if (!member) return 0;
+  if (member.admission_fee != null && !isNaN(Number(member.admission_fee))) {
+    return Number(member.admission_fee);
+  }
+  if (member.notes && member.notes.includes('[ADMISSION_FEE:')) {
+    const match = member.notes.match(/\[ADMISSION_FEE:([0-9.]+)\]/);
+    if (match && match[1]) {
+      const parsed = Number(match[1]);
+      if (!isNaN(parsed)) return parsed;
+    }
+  }
+  return 0;
+}
+
+// Helper: embed admission fee in notes tag for database fallback compatibility
+function embedAdmissionFeeInNotes(notes: string | null | undefined, fee: number): string {
+  const clean = stripAdmissionFeeFromNotes(notes);
+  if (!fee || fee <= 0) return clean;
+  const tag = `[ADMISSION_FEE:${fee}]`;
+  return clean ? `${clean}\n${tag}` : tag;
+}
+
+// Helper: strip admission fee tag from notes
+function stripAdmissionFeeFromNotes(notes: string | null | undefined): string {
+  if (!notes) return '';
+  return notes.replace(/\[ADMISSION_FEE:[^\]]*\]/g, '').trim();
+}
+
+// Helper: clean notes of both staff assignment and admission fee internal tags
+function cleanNotes(notes: string | null | undefined): string {
+  return stripAdmissionFeeFromNotes(stripStaffIdsFromNotes(notes));
+}
+
 // Helper: synchronize fee records for a member across their tenure periods
 async function syncMemberFeeRecords(
   memberId: string,
   joinDateStr: string,
   tenureMonths: number,
   totalPayableForTenure: number,
-  paidAmount: number
+  paidAmount: number,
+  admissionFee: number = 0
 ) {
   const safeJoinDate = joinDateStr || new Date().toISOString().slice(0, 10);
   const [jYear, jMonth, jDay] = safeJoinDate.split('-').map(Number);
@@ -170,9 +207,12 @@ async function syncMemberFeeRecords(
     const lastDay = new Date(pYear, pMonth, 0).getDate();
     const periodEnd = `${pYear}-${String(pMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
-    const recordAmount = (i === tenure - 1)
+    const baseAmount = (i === tenure - 1)
       ? (totalPayableForTenure - (Math.floor(totalPayableForTenure / tenure) * (tenure - 1)))
       : Math.floor(totalPayableForTenure / tenure);
+
+    // Admission fee is a ONE-TIME charge added only to the first period (i === 0)
+    const recordAmount = i === 0 ? (baseAmount + (admissionFee || 0)) : baseAmount;
 
     const recordPaid = Math.min(remainingPaid, recordAmount);
     remainingPaid = Math.max(0, remainingPaid - recordPaid);
@@ -284,7 +324,8 @@ async function syncMemberFeeRecords(
       .delete()
       .eq('member_id', memberId)
       .not('period_month', 'in', `(${allValidMonths.join(',')})`)
-      .eq('paid', false);
+      .eq('paid', false)
+      .eq('amount_paid', 0);
   }
 }
 
@@ -343,6 +384,95 @@ function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
   return formatDate(nextDueDateStr);
 }
 
+export interface AdvancePeriod {
+  period_month: string;
+  period_end: string;
+  amount: number;
+  formattedRange: string;
+  dueDate: string;
+  nextDueDateAfter: string;
+}
+
+// Helper: compute the next N upcoming billing periods for advance payment
+function getNextAdvancePeriods(
+  m: Member,
+  allFeeRecords: FeeRecord[],
+  count: number = 1
+): AdvancePeriod[] {
+  if (!m || count <= 0) return [];
+
+  const now = new Date();
+  const [jYear, jMonth, jDay] = (m.join_date || '').split('-').map(Number);
+  const joinDay = jDay || 1;
+  const totalMonthlyFee = (Number(m.monthly_fee) || 0) + (Number(m.training_fees) || 0);
+
+  // Find all fee records for this member
+  const memberRecords = allFeeRecords.filter(fr => fr.member_id === m.id);
+  const paidRecords = memberRecords.filter(fr => fr.paid || (Number(fr.amount_paid) >= Number(fr.amount) && Number(fr.amount) > 0));
+
+  let startYear: number;
+  let startMonth: number; // 1-indexed
+
+  if (paidRecords.length > 0) {
+    // Start from 1 month after the latest paid period
+    const sorted = [...paidRecords].sort((a, b) => (a.period_month || '').localeCompare(b.period_month || ''));
+    const latestPaid = sorted[sorted.length - 1];
+    const [lY, lM] = (latestPaid.period_month || '').split('-').map(Number);
+    const nextDate = new Date(lY || now.getFullYear(), (lM || (now.getMonth() + 1)), 1);
+    startYear = nextDate.getFullYear();
+    startMonth = nextDate.getMonth() + 1;
+  } else if (memberRecords.length > 0) {
+    // If there are unpaid records, start 1 month after the latest record
+    const sorted = [...memberRecords].sort((a, b) => (a.period_month || '').localeCompare(b.period_month || ''));
+    const latestRec = sorted[sorted.length - 1];
+    const [lY, lM] = (latestRec.period_month || '').split('-').map(Number);
+    const nextDate = new Date(lY || now.getFullYear(), (lM || (now.getMonth() + 1)), 1);
+    startYear = nextDate.getFullYear();
+    startMonth = nextDate.getMonth() + 1;
+  } else if (m.join_date && jYear && jMonth) {
+    startYear = jYear;
+    startMonth = jMonth;
+  } else {
+    startYear = now.getFullYear();
+    startMonth = now.getMonth() + 1;
+  }
+
+  const periods: AdvancePeriod[] = [];
+  for (let i = 0; i < count; i++) {
+    const cycleDate = new Date(startYear, startMonth - 1 + i, 1);
+    const cYear = cycleDate.getFullYear();
+    const cMonth = cycleDate.getMonth() + 1;
+    const periodMonth = `${cYear}-${String(cMonth).padStart(2, '0')}-01`;
+    const lastDay = new Date(cYear, cMonth, 0).getDate();
+    const periodEnd = `${cYear}-${String(cMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+    const formattedRange = formatPeriodMonth(periodMonth, m.join_date);
+
+    // Due date for this period
+    const billingDay = Math.min(joinDay, lastDay);
+    const dueDate = `${cYear}-${String(cMonth).padStart(2, '0')}-${String(billingDay).padStart(2, '0')}`;
+
+    // Due date after paying this period (1 month later)
+    const nextCycleDate = new Date(cYear, cMonth, 1);
+    const nYear = nextCycleDate.getFullYear();
+    const nMonth = nextCycleDate.getMonth() + 1;
+    const nLastDay = new Date(nYear, nMonth, 0).getDate();
+    const nBillingDay = Math.min(joinDay, nLastDay);
+    const nextDueDateAfter = `${nYear}-${String(nMonth).padStart(2, '0')}-${String(nBillingDay).padStart(2, '0')}`;
+
+    periods.push({
+      period_month: periodMonth,
+      period_end: periodEnd,
+      amount: totalMonthlyFee,
+      formattedRange,
+      dueDate,
+      nextDueDateAfter,
+    });
+  }
+
+  return periods;
+}
+
 function getTodayLocalDateString(): string {
   const d = new Date();
   const year = d.getFullYear();
@@ -366,11 +496,22 @@ export default function MembersPage() {
   const { data: profiles = [] } = useQuery({
     queryKey: ['profiles'],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id, full_name, email, role, section_access, auto_assign_male, auto_assign_female');
-      if (error) return [];
-      return data as Profile[];
+      let { data, error } = await supabase.from('profiles').select('*');
+      if (error) {
+        console.warn('Error fetching profiles with select(*), trying fallback:', error.message);
+        const fb = await supabase
+          .from('profiles')
+          .select('id, full_name, email, role, section_access');
+        if (!fb.error && fb.data) {
+          data = fb.data as any;
+          error = null;
+        }
+      }
+      if (error) {
+        console.error('Failed to fetch profiles:', error);
+        return [];
+      }
+      return (data || []) as Profile[];
     },
   });
 
@@ -447,6 +588,7 @@ export default function MembersPage() {
     tenure_months: 1,
     monthly_fee: '',
     training_fees: '0',
+    admission_fee: '0',
     trainer_id: null as string | null,
     amount_paid: '',
     notes: '',
@@ -465,6 +607,8 @@ export default function MembersPage() {
   // Payment Modal State
   const [payModalOpen, setPayModalOpen] = useState(false);
   const [payModalMember, setPayModalMember] = useState<Member | null>(null);
+  const [payModalIsAdvance, setPayModalIsAdvance] = useState(false);
+  const [payModalAdvanceMonths, setPayModalAdvanceMonths] = useState(0);
   const [payDiscount, setPayDiscount] = useState('0');
   const [payAmountReceived, setPayAmountReceived] = useState('');
   const [payMethod, setPayMethod] = useState('cash');
@@ -857,7 +1001,8 @@ export default function MembersPage() {
   const currentEnteredFee = Number(form.monthly_fee) || 0;
   const currentMonthlyFee = currentTenureMonths > 0 ? (currentEnteredFee / currentTenureMonths) : currentEnteredFee;
   const currentTrainingFee = Number(form.training_fees) || 0;
-  const totalPayable = currentEnteredFee + currentTrainingFee;
+  const currentAdmissionFee = Number(form.admission_fee) || 0;
+  const totalPayable = currentEnteredFee + currentTrainingFee + currentAdmissionFee;
   const currentAmountPaid = form.amount_paid === '' ? totalPayable : (isNaN(Number(form.amount_paid)) ? 0 : Number(form.amount_paid));
   const remainingFees = Math.max(0, totalPayable - currentAmountPaid);
 
@@ -930,9 +1075,11 @@ export default function MembersPage() {
       const enteredFee = Number(data.monthly_fee) || 0;
       const calcMonthly = tenureMonths > 0 ? (enteredFee / tenureMonths) : enteredFee;
       const calcTraining = Number(data.training_fees) || 0;
+      const calcAdmission = Number(data.admission_fee) || 0;
       const totalPayableForTenure = enteredFee + calcTraining;
-      const rawPaid = data.amount_paid === '' ? totalPayableForTenure : Number(data.amount_paid);
-      const paidAmount = isNaN(rawPaid) ? totalPayableForTenure : rawPaid;
+      const totalInitialPayable = totalPayableForTenure + calcAdmission;
+      const rawPaid = data.amount_paid === '' ? totalInitialPayable : Number(data.amount_paid);
+      const paidAmount = isNaN(rawPaid) ? totalInitialPayable : rawPaid;
 
       const payload: Record<string, any> = {
         member_number: data.member_number,
@@ -945,12 +1092,17 @@ export default function MembersPage() {
         tenure_months: tenureMonths,
         monthly_fee: Math.round(calcMonthly * 100) / 100,
         training_fees: calcTraining,
+        admission_fee: calcAdmission,
         trainer_id: data.trainer_id || null,
         amount_paid: paidAmount,
         notes: data.notes || null,
         photo_url: data.photo_url || null,
         active: data.active,
       };
+
+      if (calcAdmission > 0) {
+        payload.notes = embedAdmissionFeeInNotes(payload.notes, calcAdmission);
+      }
 
       if (editing) {
         const existingStaffIds = getAssignedStaffIds(editing);
@@ -977,29 +1129,48 @@ export default function MembersPage() {
         }
 
         // Auto-assign staff based on gender auto-assignment rules if not manually specified
-        if (!payload.assigned_staff_id && (!payload.assigned_staff_ids || payload.assigned_staff_ids.length === 0) && profiles.length > 0) {
-          const memberGender = (payload.gender || 'male').toLowerCase();
-          const matchingStaffIds = profiles
-            .filter((p: any) => {
-              // Check native columns first
-              if (memberGender === 'male' && p.auto_assign_male) return true;
-              if (memberGender === 'female' && p.auto_assign_female) return true;
-              // Fall back to section_access JSON
-              if (typeof p.section_access === 'string' && p.section_access.startsWith('auto_assign:')) {
-                try {
-                  const flags = JSON.parse(p.section_access.replace('auto_assign:', ''));
-                  if (memberGender === 'male' && flags.auto_assign_male) return true;
-                  if (memberGender === 'female' && flags.auto_assign_female) return true;
-                } catch { /* ignore */ }
+        if (!payload.assigned_staff_id && (!payload.assigned_staff_ids || payload.assigned_staff_ids.length === 0)) {
+          let staffProfiles = profiles;
+          if (!staffProfiles || staffProfiles.length === 0) {
+            try {
+              const { data: freshProfiles } = await supabase.from('profiles').select('*');
+              if (freshProfiles && freshProfiles.length > 0) {
+                staffProfiles = freshProfiles as any;
               }
-              return false;
-            })
-            .map((p: any) => p.id);
+            } catch { /* ignore */ }
+          }
 
-          if (matchingStaffIds.length > 0) {
-            payload.assigned_staff_ids = matchingStaffIds;
-            payload.assigned_staff_id = matchingStaffIds[0];
-            payload.notes = embedStaffIdsInNotes(payload.notes, matchingStaffIds);
+          if (staffProfiles && staffProfiles.length > 0) {
+            const memberGender = (payload.gender || 'male').toLowerCase();
+            const matchingStaffIds = staffProfiles
+              .filter((p: any) => {
+                // Check native columns first (support boolean or string 'true')
+                if (memberGender === 'male' && (p.auto_assign_male === true || p.auto_assign_male === 'true')) return true;
+                if (memberGender === 'female' && (p.auto_assign_female === true || p.auto_assign_female === 'true')) return true;
+                // Fall back to section_access JSON
+                if (typeof p.section_access === 'string') {
+                  try {
+                    let flags: any = null;
+                    if (p.section_access.startsWith('auto_assign:')) {
+                      flags = JSON.parse(p.section_access.replace('auto_assign:', ''));
+                    } else if (p.section_access.startsWith('{')) {
+                      flags = JSON.parse(p.section_access);
+                    }
+                    if (flags) {
+                      if (memberGender === 'male' && (flags.auto_assign_male === true || flags.auto_assign_male === 'true')) return true;
+                      if (memberGender === 'female' && (flags.auto_assign_female === true || flags.auto_assign_female === 'true')) return true;
+                    }
+                  } catch { /* ignore */ }
+                }
+                return false;
+              })
+              .map((p: any) => p.id);
+
+            if (matchingStaffIds.length > 0) {
+              payload.assigned_staff_ids = matchingStaffIds;
+              payload.assigned_staff_id = matchingStaffIds[0];
+              payload.notes = embedStaffIdsInNotes(payload.notes, matchingStaffIds);
+            }
           }
         }
       }
@@ -1009,7 +1180,7 @@ export default function MembersPage() {
 
       console.log('[saveMember] Starting save. editing:', editing?.id, 'payload:', currentPayload);
 
-      for (let attempt = 0; attempt < 5; attempt++) {
+      for (let attempt = 0; attempt < 6; attempt++) {
         if (editing) {
           console.log(`[saveMember] Attempt ${attempt + 1} — update payload:`, JSON.stringify(currentPayload));
           const { data, error } = await supabase.from('members').update(currentPayload).eq('id', editing.id).select().single();
@@ -1021,8 +1192,10 @@ export default function MembersPage() {
           console.error('[saveMember] Update error:', error.message, error.details, error.hint);
           const missingCol = (
             error.message?.match(/Could not find the '([^']+)' column/i)?.[1] ||
-            error.message?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1] ||
-            error.details?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1]
+            error.message?.match(/column\s+["']?([^"'\s\.]+)["']?\s+(?:of\s+relation\s+["']?[^"'\s]+["']?\s+)?does not exist/i)?.[1] ||
+            error.message?.match(/column\s+[^"'\s\.]+\.["']?([^"'\s]+)["']?\s+does not exist/i)?.[1] ||
+            error.details?.match(/column\s+["']?([^"'\s\.]+)["']?\s+(?:of\s+relation\s+["']?[^"'\s]+["']?\s+)?does not exist/i)?.[1] ||
+            error.details?.match(/column\s+[^"'\s\.]+\.["']?([^"'\s]+)["']?\s+does not exist/i)?.[1]
           );
           if (missingCol && missingCol in currentPayload) {
             console.warn(`[saveMember] Stripping missing column: ${missingCol}`);
@@ -1030,7 +1203,7 @@ export default function MembersPage() {
             continue;
           }
           let removed = false;
-          for (const col of ['tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'age', 'created_by']) {
+          for (const col of ['admission_fee', 'assigned_staff_ids', 'assigned_staff_id', 'tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'age', 'created_by']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
               console.warn(`[saveMember] Fallback stripping column: ${col}`);
               delete currentPayload[col];
@@ -1047,16 +1220,19 @@ export default function MembersPage() {
           }
           const missingCol = (
             error.message?.match(/Could not find the '([^']+)' column/i)?.[1] ||
-            error.message?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1] ||
-            error.details?.match(/column [^\s\.]+\.([^\s]+) does not exist/i)?.[1]
+            error.message?.match(/column\s+["']?([^"'\s\.]+)["']?\s+(?:of\s+relation\s+["']?[^"'\s]+["']?\s+)?does not exist/i)?.[1] ||
+            error.message?.match(/column\s+[^"'\s\.]+\.["']?([^"'\s]+)["']?\s+does not exist/i)?.[1] ||
+            error.details?.match(/column\s+["']?([^"'\s\.]+)["']?\s+(?:of\s+relation\s+["']?[^"'\s]+["']?\s+)?does not exist/i)?.[1] ||
+            error.details?.match(/column\s+[^"'\s\.]+\.["']?([^"'\s]+)["']?\s+does not exist/i)?.[1]
           );
           if (missingCol && missingCol in currentPayload) {
             delete currentPayload[missingCol];
             continue;
           }
           let removed = false;
-          for (const col of ['tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'age', 'created_by']) {
+          for (const col of ['admission_fee', 'assigned_staff_ids', 'assigned_staff_id', 'tenure_months', 'member_number', 'amount_paid', 'training_fees', 'trainer_id', 'gender', 'age', 'created_by']) {
             if (col in currentPayload && (error.message?.includes(col) || error.details?.includes(col))) {
+              console.warn(`[saveMember] Fallback stripping column: ${col}`);
               delete currentPayload[col];
               removed = true;
             }
@@ -1073,7 +1249,8 @@ export default function MembersPage() {
           payload.join_date || editing.join_date,
           tenureMonths,
           totalPayableForTenure,
-          paidAmount
+          paidAmount,
+          calcAdmission
         );
       }
 
@@ -1084,7 +1261,8 @@ export default function MembersPage() {
           payload.join_date || new Date().toISOString().slice(0, 10),
           tenureMonths,
           totalPayableForTenure,
-          paidAmount
+          paidAmount,
+          calcAdmission
         );
       }
 
@@ -1153,7 +1331,7 @@ export default function MembersPage() {
           }
           // Fallback: strip known optional columns that might not exist
           let removed = false;
-          for (const col of ['age', 'gender', 'cnic', 'member_number', 'training_fees', 'trainer_id', 'amount_paid', 'created_by']) {
+          for (const col of ['admission_fee', 'age', 'gender', 'cnic', 'member_number', 'training_fees', 'trainer_id', 'amount_paid', 'created_by']) {
             if (col in applyPayload && (error.message?.includes(col) || error.details?.includes(col))) {
               delete applyPayload[col];
               removed = true;
@@ -1166,25 +1344,27 @@ export default function MembersPage() {
 
         // Sync fee records so tenure/fee changes take effect (e.g. 1 month → 3 months)
         const changes = pendingEdit.changes || {};
-        if (changes.join_date || changes.tenure_months || changes.amount_paid || changes.monthly_fee || changes.training_fees) {
+        if (changes.join_date || changes.tenure_months || changes.amount_paid || changes.monthly_fee || changes.training_fees || changes.admission_fee !== undefined) {
           // Fetch the latest member data after the update so we have accurate values
           const { data: updatedMember } = await supabase
             .from('members')
-            .select('join_date, tenure_months, monthly_fee, training_fees, amount_paid')
+            .select('join_date, tenure_months, monthly_fee, training_fees, admission_fee, amount_paid, notes')
             .eq('id', pendingEdit.member_id)
             .single();
           if (updatedMember) {
             const syncTenure = Number(updatedMember.tenure_months) || 1;
             const syncMonthly = Number(updatedMember.monthly_fee) || 0;
             const syncTraining = Number(updatedMember.training_fees) || 0;
+            const syncAdmission = getMemberAdmissionFee(updatedMember);
             const syncTotal = syncMonthly * syncTenure + syncTraining;
-            const syncPaid = updatedMember.amount_paid !== undefined && updatedMember.amount_paid !== null ? Number(updatedMember.amount_paid) : syncTotal;
+            const syncPaid = updatedMember.amount_paid !== undefined && updatedMember.amount_paid !== null ? Number(updatedMember.amount_paid) : (syncTotal + syncAdmission);
             await syncMemberFeeRecords(
               pendingEdit.member_id,
               updatedMember.join_date,
               syncTenure,
               syncTotal,
-              syncPaid
+              syncPaid,
+              syncAdmission
             );
           }
         }
@@ -1304,12 +1484,19 @@ export default function MembersPage() {
   const bulkPayMutation = useMutation({
     mutationFn: async ({
       feeIds,
+      advanceRecords,
       amountPaid,
       discount,
       paymentMethod,
       paidAt,
     }: {
       feeIds: string[];
+      advanceRecords?: Array<{
+        member_id: string;
+        period_month: string;
+        period_end: string;
+        amount: number;
+      }>;
       amountPaid: number;
       discount: number;
       paymentMethod: string;
@@ -1318,7 +1505,7 @@ export default function MembersPage() {
       const res = await fetch('/api/fees/collect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ feeIds, amountPaid, discount, paymentMethod, paidAt }),
+        body: JSON.stringify({ feeIds, advanceRecords, amountPaid, discount, paymentMethod, paidAt }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -1334,6 +1521,8 @@ export default function MembersPage() {
       toast.success(`Payment processed! ${data.summary?.remaining > 0 ? `Remaining: ${formatCurrency(data.summary.remaining)}` : 'Fully paid!'}`);
       setPayModalOpen(false);
       setPayModalMember(null);
+      setPayModalIsAdvance(false);
+      setPayModalAdvanceMonths(0);
     },
     onError: (e) => toast.error(e.message),
   });
@@ -1524,6 +1713,7 @@ export default function MembersPage() {
       tenure_months: 1,
       monthly_fee: '',
       training_fees: '',
+      admission_fee: '',
       trainer_id: null,
       amount_paid: '',
       notes: '',
@@ -1538,6 +1728,7 @@ export default function MembersPage() {
     stopCamera();
     const tenure = m.tenure_months || 1;
     const totalFee = (m.monthly_fee || 0) * tenure;
+    const admFee = getMemberAdmissionFee(m);
     setForm({
       member_number: m.member_number || '',
       full_name: m.full_name,
@@ -1549,9 +1740,10 @@ export default function MembersPage() {
       tenure_months: tenure,
       monthly_fee: String(totalFee),
       training_fees: String(m.training_fees || 0),
+      admission_fee: String(admFee),
       trainer_id: m.trainer_id || null,
-      amount_paid: String(m.amount_paid ?? (totalFee + (m.training_fees || 0))),
-      notes: stripStaffIdsFromNotes(m.notes),
+      amount_paid: String(m.amount_paid ?? (totalFee + (m.training_fees || 0) + admFee)),
+      notes: cleanNotes(m.notes),
       photo_url: m.photo_url || null,
       active: m.active,
     });
@@ -1561,6 +1753,20 @@ export default function MembersPage() {
   // Open Payment Modal
   function openPayModal(m: Member) {
     setPayModalMember(m);
+    setPayModalIsAdvance(false);
+    setPayModalAdvanceMonths(0);
+    setPayDiscount('0');
+    setPayAmountReceived('');
+    setPayMethod('cash');
+    setPayDate(getTodayLocalDateString());
+    setPayModalOpen(true);
+  }
+
+  // Open Advance Payment Modal
+  function openAdvancePayModal(m: Member) {
+    setPayModalMember(m);
+    setPayModalIsAdvance(true);
+    setPayModalAdvanceMonths(1);
     setPayDiscount('0');
     setPayAmountReceived('');
     setPayMethod('cash');
@@ -1570,16 +1776,41 @@ export default function MembersPage() {
 
   // Payment modal calculations
   const payModalUnpaidFees = payModalMember ? (memberUnpaidFees[payModalMember.id] || []) : [];
-  const payModalTotalDue = payModalUnpaidFees.reduce((sum, fr) => {
-    const remaining = (Number(fr.amount) || 0) - (Number(fr.amount_paid) || 0);
-    return sum + Math.max(0, remaining);
-  }, 0);
+
+  // Advance records computed for the modal if payModalAdvanceMonths > 0
+  const payModalAdvancePeriods = useMemo(() => {
+    if (!payModalMember || payModalAdvanceMonths <= 0) return [];
+    return getNextAdvancePeriods(payModalMember, allFeeRecords, payModalAdvanceMonths);
+  }, [payModalMember, payModalAdvanceMonths, allFeeRecords]);
+
+  const payModalAdvanceTotal = useMemo(() => {
+    return payModalAdvancePeriods.reduce((sum, p) => sum + p.amount, 0);
+  }, [payModalAdvancePeriods]);
+
+  const payModalTotalDue = useMemo(() => {
+    const unpaidSum = payModalUnpaidFees.reduce((sum, fr) => {
+      const remaining = (Number(fr.amount) || 0) - (Number(fr.amount_paid) || 0);
+      return sum + Math.max(0, remaining);
+    }, 0);
+    return unpaidSum + payModalAdvanceTotal;
+  }, [payModalUnpaidFees, payModalAdvanceTotal]);
+
   const payModalDiscountNum = Math.max(0, Number(payDiscount) || 0);
   const payModalReceivedNum = Number(payAmountReceived) || 0;
   const payModalNetRemaining = Math.max(0, payModalTotalDue - payModalDiscountNum - payModalReceivedNum);
+  const payModalTotalItemsCount = payModalUnpaidFees.length + payModalAdvancePeriods.length;
+
+  const computedNextDueDateAfterPayment = useMemo(() => {
+    if (!payModalMember) return null;
+    if (payModalAdvancePeriods.length > 0) {
+      const lastAdv = payModalAdvancePeriods[payModalAdvancePeriods.length - 1];
+      return formatDate(lastAdv.nextDueDateAfter);
+    }
+    return getMemberNextDueDate(payModalMember, allFeeRecords);
+  }, [payModalMember, payModalAdvancePeriods, allFeeRecords]);
 
   function handlePaySubmit() {
-    if (!payModalMember || payModalUnpaidFees.length === 0) return;
+    if (!payModalMember || payModalTotalItemsCount === 0) return;
     if (payModalReceivedNum <= 0 && payModalDiscountNum <= 0) {
       toast.error('Please enter amount received or discount');
       return;
@@ -1597,6 +1828,12 @@ export default function MembersPage() {
 
     bulkPayMutation.mutate({
       feeIds: payModalUnpaidFees.map(f => f.id),
+      advanceRecords: payModalAdvancePeriods.map(p => ({
+        member_id: payModalMember.id,
+        period_month: p.period_month,
+        period_end: p.period_end,
+        amount: p.amount,
+      })),
       amountPaid: payModalReceivedNum,
       discount: payModalDiscountNum,
       paymentMethod: payMethod,
@@ -1628,19 +1865,22 @@ export default function MembersPage() {
     let unpaidFees = memberUnpaidFees[m.id] || [];
 
     if (feeNotDueYet) {
-      // Fee for current month is not due yet — use previous month's record as "current"
-      const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}-01`;
-      currentFee = allFeeRecords.find(fr => fr.member_id === m.id && fr.period_month === prevMonthKey);
+      // If current month fee is already paid in advance, use it!
+      // Otherwise, fee for current month is not due yet — use previous month's record as "current"
+      if (!memberCurrentFee[m.id]?.paid) {
+        const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}-01`;
+        currentFee = allFeeRecords.find(fr => fr.member_id === m.id && fr.period_month === prevMonthKey);
 
-      // Exclude current month's fee record from unpaid list since it's not due yet
-      unpaidFees = unpaidFees.filter(fr => fr.period_month !== currentMonthKey);
+        // Exclude current month's fee record from unpaid list since it's not due yet
+        unpaidFees = unpaidFees.filter(fr => fr.period_month !== currentMonthKey);
+      }
     }
 
     // Check if member's initial registration tenure has already expired
     // E.g. joined July 10 (1 month tenure), today is August 20 (> 30 days) -> tenure expired.
     const tenureMonths = Math.max(1, Number(m.tenure_months) || 1);
-    const targetPeriodMonth = feeNotDueYet
+    const targetPeriodMonth = feeNotDueYet && !memberCurrentFee[m.id]?.paid
       ? (() => {
           const pm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
           return `${pm.getFullYear()}-${String(pm.getMonth() + 1).padStart(2, '0')}-01`;
@@ -1957,6 +2197,9 @@ export default function MembersPage() {
                   if (changes.training_fees !== undefined && Number(changes.training_fees) !== Number(targetMember.training_fees)) {
                     diffs.push({ field: 'Training Fee', oldVal: formatCurrency(targetMember.training_fees), newVal: formatCurrency(Number(changes.training_fees)) });
                   }
+                  if (changes.admission_fee !== undefined && Number(changes.admission_fee) !== getMemberAdmissionFee(targetMember)) {
+                    diffs.push({ field: 'Admission Fee', oldVal: formatCurrency(getMemberAdmissionFee(targetMember)), newVal: formatCurrency(Number(changes.admission_fee) || 0) });
+                  }
                   if (changes.trainer_id !== undefined && changes.trainer_id !== targetMember.trainer_id) {
                     const oldTr = trainers.find((t) => t.id === targetMember.trainer_id)?.name || 'None';
                     const newTr = trainers.find((t) => t.id === changes.trainer_id)?.name || 'None';
@@ -1966,8 +2209,8 @@ export default function MembersPage() {
                     diffs.push({ field: 'Status', oldVal: targetMember.active ? 'Active' : 'Inactive', newVal: changes.active ? 'Active' : 'Inactive' });
                   }
                   if (changes.notes !== undefined) {
-                    const oldNotes = stripStaffIdsFromNotes(targetMember.notes);
-                    const newNotes = stripStaffIdsFromNotes(changes.notes);
+                    const oldNotes = cleanNotes(targetMember.notes);
+                    const newNotes = cleanNotes(changes.notes);
                     if (oldNotes !== newNotes) {
                       diffs.push({ field: 'Notes', oldVal: oldNotes || '—', newVal: newNotes || '—' });
                     }
@@ -2242,24 +2485,52 @@ export default function MembersPage() {
                         <td className="p-4" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center gap-2">
                             {payStatus.status === 'paid' ? (
-                              <Badge variant="success" className="font-semibold px-2.5 py-0.5">✅ Paid</Badge>
+                              <div className="flex items-center gap-2">
+                                <div className="flex flex-col">
+                                  <Badge variant="success" className="font-semibold px-2.5 py-0.5">
+                                    {payStatus.label === 'Not Due Yet' ? '✅ Not Due' : '✅ Paid'}
+                                  </Badge>
+                                  <span className="text-[10px] text-muted-foreground font-medium mt-0.5 whitespace-nowrap">
+                                    Due {getMemberNextDueDate(m, allFeeRecords)}
+                                  </span>
+                                </div>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 text-xs px-2 border-primary/40 text-primary hover:bg-primary/10 font-semibold"
+                                  onClick={() => openAdvancePayModal(m)}
+                                  title="Pay Advance Fee"
+                                >
+                                  <CalendarPlus className="h-3 w-3 mr-1" /> Advance
+                                </Button>
+                              </div>
                             ) : payStatus.status === 'partial' ? (
                               <div className="flex items-center gap-2">
-                                <Badge variant="outline" className="border-2 border-amber-500 text-amber-600 bg-amber-500/10 font-bold px-2.5 py-0.5">
-                                  ⚠️ {payStatus.percentage}% Paid
-                                </Badge>
+                                <div className="flex flex-col">
+                                  <Badge variant="outline" className="border-2 border-amber-500 text-amber-600 bg-amber-500/10 font-bold px-2.5 py-0.5">
+                                    ⚠️ {payStatus.percentage}% Paid
+                                  </Badge>
+                                  <span className="text-[10px] text-muted-foreground font-medium mt-0.5 whitespace-nowrap">
+                                    Due {getMemberNextDueDate(m, allFeeRecords)}
+                                  </span>
+                                </div>
                                 <Button size="sm" variant="default" className="h-7 text-xs px-2 bg-primary hover:bg-primary/90" onClick={() => openPayModal(m)}>
                                   <Wallet className="h-3 w-3 mr-1" /> Pay
                                 </Button>
                               </div>
                             ) : (
                               <div className="flex items-center gap-2">
-                                <Badge variant="destructive" className="font-bold px-2.5 py-0.5">
-                                  ❌ Unpaid
-                                  {payStatus.unpaidMonths > 1 && (
-                                    <span className="ml-1 text-[10px] opacity-80">({payStatus.unpaidMonths} mo)</span>
-                                  )}
-                                </Badge>
+                                <div className="flex flex-col">
+                                  <Badge variant="destructive" className="font-bold px-2.5 py-0.5">
+                                    ❌ Unpaid
+                                    {payStatus.unpaidMonths > 1 && (
+                                      <span className="ml-1 text-[10px] opacity-80">({payStatus.unpaidMonths} mo)</span>
+                                    )}
+                                  </Badge>
+                                  <span className="text-[10px] text-muted-foreground font-medium mt-0.5 whitespace-nowrap">
+                                    Due {getMemberNextDueDate(m, allFeeRecords)}
+                                  </span>
+                                </div>
                                 <Button size="sm" variant="default" className="h-7 text-xs px-2 bg-primary hover:bg-primary/90" onClick={() => openPayModal(m)}>
                                   <Wallet className="h-3 w-3 mr-1" /> Pay
                                 </Button>
@@ -2513,11 +2784,12 @@ export default function MembersPage() {
                     const oldTenure = Number(form.tenure_months) || 1;
                     const currentTotalFee = Number(form.monthly_fee) || 0;
                     const tFee = Number(form.training_fees) || 0;
+                    const admFee = Number(form.admission_fee) || 0;
                     
                     if (form.monthly_fee !== '' && !isNaN(currentTotalFee)) {
                       const monthlyRate = currentTotalFee / oldTenure;
                       const newTotalFee = Math.round(monthlyRate * newTenure);
-                      const newTotalPayable = newTotalFee + tFee;
+                      const newTotalPayable = newTotalFee + tFee + admFee;
                       setForm({ ...form, tenure_months: newTenure, monthly_fee: String(newTotalFee), amount_paid: String(newTotalPayable) });
                     } else {
                       setForm({ ...form, tenure_months: newTenure });
@@ -2557,7 +2829,8 @@ export default function MembersPage() {
                     const feeVal = e.target.value;
                     const enteredFee = Number(feeVal) || 0;
                     const tFee = Number(form.training_fees) || 0;
-                    const newTotal = enteredFee + tFee;
+                    const admFee = Number(form.admission_fee) || 0;
+                    const newTotal = enteredFee + tFee + admFee;
                     setForm({ ...form, monthly_fee: feeVal, amount_paid: String(newTotal) });
                   }} 
                   placeholder={currentTenureMonths > 1 ? `e.g. ${4000 * currentTenureMonths}` : 'e.g. 4000'} 
@@ -2582,17 +2855,45 @@ export default function MembersPage() {
                   type="number" 
                   value={form.training_fees} 
                   onChange={(e) => {
-                    const tFee = Number(e.target.value) || 0;
+                    const tVal = e.target.value;
+                    const tFee = Number(tVal) || 0;
                     const enteredFee = Number(form.monthly_fee) || 0;
-                    const newTotal = enteredFee + tFee;
-                    setForm({ ...form, training_fees: e.target.value, amount_paid: String(newTotal) });
+                    const admFee = Number(form.admission_fee) || 0;
+                    const newTotal = enteredFee + tFee + admFee;
+                    setForm({ ...form, training_fees: tVal, amount_paid: String(newTotal) });
                   }} 
                   placeholder="e.g. 10000" 
                 />
               </div>
 
+              {/* Admission Fee */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>Admission Fee (PKR)</Label>
+                  <span className="text-[11px] font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded border border-border/50">
+                    One-time charge
+                  </span>
+                </div>
+                <Input 
+                  type="number" 
+                  value={form.admission_fee} 
+                  onChange={(e) => {
+                    const admVal = e.target.value;
+                    const admFee = Number(admVal) || 0;
+                    const enteredFee = Number(form.monthly_fee) || 0;
+                    const tFee = Number(form.training_fees) || 0;
+                    const newTotal = enteredFee + tFee + admFee;
+                    setForm({ ...form, admission_fee: admVal, amount_paid: String(newTotal) });
+                  }} 
+                  placeholder="e.g. 2000" 
+                />
+                <p className="text-[12px] text-muted-foreground">
+                  Charged only once upon admission; not added to recurring monthly dues.
+                </p>
+              </div>
+
               {/* Trainer Selection Dropdown */}
-              <div className="space-y-2 sm:col-span-2">
+              <div className="space-y-2">
                 <Label>Assign Trainer</Label>
                 <Select 
                   value={form.trainer_id || 'none'} 
@@ -2634,9 +2935,9 @@ export default function MembersPage() {
                   <div className="text-base font-bold text-primary">{formatCurrency(totalPayable)}</div>
                   <div className="text-[11px] text-muted-foreground">
                     {currentTenureMonths > 1 ? (
-                      <>{formatCurrency(Math.round(currentMonthlyFee))}/mo × {currentTenureMonths} mos ({formatCurrency(currentEnteredFee)}){currentTrainingFee > 0 ? ` + ${formatCurrency(currentTrainingFee)} training` : ''}</>
+                      <>{formatCurrency(Math.round(currentMonthlyFee))}/mo × {currentTenureMonths} mos ({formatCurrency(currentEnteredFee)}){currentTrainingFee > 0 ? ` + ${formatCurrency(currentTrainingFee)} training` : ''}{currentAdmissionFee > 0 ? ` + ${formatCurrency(currentAdmissionFee)} admission` : ''}</>
                     ) : (
-                      <>Monthly ({formatCurrency(currentMonthlyFee)}){currentTrainingFee > 0 ? ` + Training (${formatCurrency(currentTrainingFee)})` : ''}</>
+                      <>Monthly ({formatCurrency(currentMonthlyFee)}){currentTrainingFee > 0 ? ` + Training (${formatCurrency(currentTrainingFee)})` : ''}{currentAdmissionFee > 0 ? ` + Admission (${formatCurrency(currentAdmissionFee)})` : ''}</>
                     )}
                   </div>
                 </div>
@@ -2755,6 +3056,25 @@ export default function MembersPage() {
                   </div>
                 </div>
                 <div>
+                  <div className="text-muted-foreground mb-1">Assigned Staff</div>
+                  <div className="font-medium">
+                    {(() => {
+                      if (!selectedMember) return '—';
+                      const assignedIds = getAssignedStaffIds(selectedMember);
+                      if (assignedIds.length === 0) return <span className="text-muted-foreground">None</span>;
+                      const staffNames = assignedIds
+                        .map((id) => profiles.find((p) => p.id === id)?.full_name || 'Staff')
+                        .join(', ');
+                      return (
+                        <Badge variant="outline" className="font-medium gap-1 text-xs border-primary/30 bg-primary/5 text-primary">
+                          <User className="h-3 w-3" />
+                          {staffNames}
+                        </Badge>
+                      );
+                    })()}
+                  </div>
+                </div>
+                <div>
                   <div className="text-muted-foreground mb-1">Tenure</div>
                   <div className="font-medium">
                     <Badge variant="outline" className="font-semibold text-primary border-primary/40 bg-primary/5">
@@ -2784,6 +3104,17 @@ export default function MembersPage() {
                   <div className="font-medium">{selectedMember ? formatCurrency(selectedMember.training_fees || 0) : '—'}</div>
                 </div>
                 <div>
+                  <div className="text-muted-foreground mb-1">Admission Fee</div>
+                  <div className="font-medium">
+                    {selectedMember ? (
+                      <>
+                        {formatCurrency(getMemberAdmissionFee(selectedMember))}
+                        <span className="text-[11px] text-muted-foreground ml-1.5">(One-time)</span>
+                      </>
+                    ) : '—'}
+                  </div>
+                </div>
+                <div>
                   <div className="text-muted-foreground mb-1">Status</div>
                   <div>
                     <Badge variant={selectedMember?.active ? 'success' : 'destructive'}>
@@ -2793,7 +3124,7 @@ export default function MembersPage() {
                 </div>
                 <div className="sm:col-span-2">
                   <div className="text-muted-foreground mb-1">Notes</div>
-                  <div className="font-medium whitespace-pre-wrap">{stripStaffIdsFromNotes(selectedMember?.notes) || '—'}</div>
+                  <div className="font-medium whitespace-pre-wrap">{cleanNotes(selectedMember?.notes) || '—'}</div>
                 </div>
               </div>
             </TabsContent>
@@ -2818,9 +3149,17 @@ export default function MembersPage() {
                           <Button size="sm" className="h-7 text-xs" onClick={() => { setDetailOpen(false); openPayModal(selectedMember); }}>
                             <Wallet className="h-3 w-3 mr-1" /> Collect
                           </Button>
+                          <Button size="sm" variant="outline" className="h-7 text-xs border-primary/40 text-primary hover:bg-primary/10" onClick={() => { setDetailOpen(false); openAdvancePayModal(selectedMember); }}>
+                            <CalendarPlus className="h-3 w-3 mr-1" /> Pay in Advance
+                          </Button>
                         </div>
                       ) : (
-                        <Badge variant="success" className="text-xs">All paid ✓</Badge>
+                        <div className="flex items-center gap-2">
+                          <Badge variant="success" className="text-xs">All paid ✓</Badge>
+                          <Button size="sm" variant="outline" className="h-7 text-xs border-primary/40 text-primary hover:bg-primary/10" onClick={() => { setDetailOpen(false); openAdvancePayModal(selectedMember); }}>
+                            <CalendarPlus className="h-3 w-3 mr-1" /> Pay in Advance
+                          </Button>
+                        </div>
                       );
                     })()}
                   </div>
@@ -3042,13 +3381,13 @@ export default function MembersPage() {
       </Dialog>
 
       {/* Payment Collection Modal */}
-      <Dialog open={payModalOpen} onOpenChange={(open) => { setPayModalOpen(open); if (!open) setPayModalMember(null); }}>
+      <Dialog open={payModalOpen} onOpenChange={(open) => { setPayModalOpen(open); if (!open) { setPayModalMember(null); setPayModalIsAdvance(false); setPayModalAdvanceMonths(0); } }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <div className="flex items-center justify-between pr-6">
               <DialogTitle className="text-xl font-bold flex items-center gap-2">
                 <CreditCard className="h-5 w-5 text-primary" />
-                Collect Payment
+                {payModalIsAdvance ? 'Pay Advance Fee' : 'Collect Payment'}
               </DialogTitle>
               {payModalMember?.member_number && (
                 <Badge variant="outline" className="font-mono text-xs border-primary/40 text-primary bg-primary/10 font-bold px-2 py-0.5">
@@ -3060,6 +3399,14 @@ export default function MembersPage() {
 
           {payModalMember && (
             <div className="space-y-5 pt-2">
+              {/* Advance Mode Notice */}
+              {payModalIsAdvance && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-500/10 border border-blue-500/30 text-blue-700 dark:text-blue-300 text-xs font-medium">
+                  <Zap className="h-4 w-4 shrink-0 text-blue-500" />
+                  <span>Paying advance fee for upcoming billing cycle(s).</span>
+                </div>
+              )}
+
               {/* Member Info */}
               <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/40 border border-border">
                 {(() => {
@@ -3102,53 +3449,126 @@ export default function MembersPage() {
                 </div>
               </div>
 
-
-              {/* Unpaid Months Breakdown */}
+              {/* Billing Periods Breakdown */}
               <div className="space-y-2">
-                <Label className="text-sm font-semibold flex items-center gap-2">
-                  <Receipt className="h-4 w-4" />
-                  Unpaid Months Breakdown
-                </Label>
-                <div className="rounded-md border border-border max-h-40 overflow-y-auto">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm font-semibold flex items-center gap-2">
+                    <Receipt className="h-4 w-4" />
+                    Billing Periods Breakdown
+                  </Label>
+                  <span className="text-xs text-muted-foreground">
+                    {payModalTotalItemsCount} cycle{payModalTotalItemsCount !== 1 ? 's' : ''}
+                  </span>
+                </div>
+                <div className="rounded-md border border-border max-h-48 overflow-y-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-border bg-muted/50">
                         <th className="text-left p-2 font-medium text-muted-foreground">Period</th>
+                        <th className="text-center p-2 font-medium text-muted-foreground">Type</th>
                         <th className="text-right p-2 font-medium text-muted-foreground">Fee</th>
                         <th className="text-right p-2 font-medium text-muted-foreground">Already Paid</th>
                         <th className="text-right p-2 font-medium text-muted-foreground">Remaining</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {payModalUnpaidFees.length === 0 ? (
-                        <tr><td colSpan={4} className="text-center py-4 text-muted-foreground">No unpaid fees</td></tr>
-                      ) : payModalUnpaidFees.map(fr => {
-                        const amt = Number(fr.amount) || 0;
-                        const paid = Number(fr.amount_paid) || 0;
-                        const rem = Math.max(0, amt - paid);
-                        return (
-                          <tr key={fr.id} className="border-b border-border/50 last:border-0">
-                            <td className="p-2 font-medium whitespace-nowrap">{formatPeriodMonth(fr.period_month, payModalMember?.join_date)}</td>
-                            <td className="p-2 text-right">{formatCurrency(amt)}</td>
-                            <td className="p-2 text-right text-green-600">{paid > 0 ? formatCurrency(paid) : '—'}</td>
-                            <td className="p-2 text-right font-semibold text-red-500">{formatCurrency(rem)}</td>
-                          </tr>
-                        );
-                      })}
+                      {payModalTotalItemsCount === 0 ? (
+                        <tr><td colSpan={5} className="text-center py-4 text-muted-foreground">No fee cycles selected</td></tr>
+                      ) : (
+                        <>
+                          {payModalUnpaidFees.map(fr => {
+                            const amt = Number(fr.amount) || 0;
+                            const paid = Number(fr.amount_paid) || 0;
+                            const rem = Math.max(0, amt - paid);
+                            return (
+                              <tr key={fr.id} className="border-b border-border/50 last:border-0">
+                                <td className="p-2 font-medium whitespace-nowrap">{formatPeriodMonth(fr.period_month, payModalMember?.join_date)}</td>
+                                <td className="p-2 text-center">
+                                  <Badge variant="destructive" className="text-[10px] px-1.5 py-0">Due</Badge>
+                                </td>
+                                <td className="p-2 text-right">{formatCurrency(amt)}</td>
+                                <td className="p-2 text-right text-green-600">{paid > 0 ? formatCurrency(paid) : '—'}</td>
+                                <td className="p-2 text-right font-semibold text-red-500">{formatCurrency(rem)}</td>
+                              </tr>
+                            );
+                          })}
+                          {payModalAdvancePeriods.map(adv => (
+                            <tr key={adv.period_month} className="border-b border-border/50 last:border-0 bg-primary/5">
+                              <td className="p-2 font-medium whitespace-nowrap text-primary">{adv.formattedRange}</td>
+                              <td className="p-2 text-center">
+                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-primary/40 text-primary bg-primary/10 font-bold">
+                                  Advance
+                                </Badge>
+                              </td>
+                              <td className="p-2 text-right">{formatCurrency(adv.amount)}</td>
+                              <td className="p-2 text-right text-muted-foreground">—</td>
+                              <td className="p-2 text-right font-semibold text-primary">{formatCurrency(adv.amount)}</td>
+                            </tr>
+                          ))}
+                        </>
+                      )}
                     </tbody>
                   </table>
                 </div>
               </div>
 
+              {/* Advance Months Selector Controls */}
+              <div className="flex items-center justify-between p-3 rounded-lg bg-muted/40 border border-border">
+                <div className="flex items-center gap-2.5">
+                  <CalendarPlus className="h-4 w-4 text-primary" />
+                  <div>
+                    <div className="text-xs font-semibold text-foreground">Pay in Advance</div>
+                    <div className="text-[11px] text-muted-foreground">Add upcoming monthly billing cycle(s)</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 w-7 p-0"
+                    disabled={payModalAdvanceMonths <= (payModalIsAdvance ? 1 : 0)}
+                    onClick={() => setPayModalAdvanceMonths(prev => Math.max(payModalIsAdvance ? 1 : 0, prev - 1))}
+                  >
+                    -
+                  </Button>
+                  <span className="text-xs font-bold font-mono px-2 min-w-[3.5rem] text-center">
+                    {payModalAdvanceMonths} {payModalAdvanceMonths === 1 ? 'month' : 'months'}
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 w-7 p-0"
+                    disabled={payModalAdvanceMonths >= 12}
+                    onClick={() => setPayModalAdvanceMonths(prev => Math.min(12, prev + 1))}
+                  >
+                    +
+                  </Button>
+                </div>
+              </div>
+
+              {/* Next Fee Due Date Banner */}
+              {computedNextDueDateAfterPayment && (
+                <div className="flex items-center justify-between p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs">
+                  <span className="text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5 font-medium">
+                    <CalendarCheck className="h-4 w-4 shrink-0 text-emerald-600" />
+                    Next Fee Due Date after payment:
+                  </span>
+                  <span className="font-bold text-emerald-700 dark:text-emerald-300 text-sm">
+                    {computedNextDueDateAfterPayment}
+                  </span>
+                </div>
+              )}
+
               {/* Total Due */}
               <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
                 <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-red-600">Total Due</span>
+                  <span className="text-sm font-semibold text-red-600">Total Payable</span>
                   <span className="text-xl font-bold text-red-600">{formatCurrency(payModalTotalDue)}</span>
                 </div>
                 <div className="text-xs text-red-500/70 mt-1">
-                  {payModalUnpaidFees.length} unpaid month{payModalUnpaidFees.length !== 1 ? 's' : ''}
-                  {payModalUnpaidFees.length > 0 && ` × ${formatCurrency((payModalMember.monthly_fee || 0) + (payModalMember.training_fees || 0))}/mo`}
+                  {payModalTotalItemsCount} cycle{payModalTotalItemsCount !== 1 ? 's' : ''} ({payModalUnpaidFees.length} due, {payModalAdvancePeriods.length} advance)
                 </div>
               </div>
 
@@ -3169,7 +3589,7 @@ export default function MembersPage() {
                   onChange={(e) => setPayDate(e.target.value)} 
                 />
                 <p className="text-[11px] text-muted-foreground">
-                  ℹ️ Next 30 days of membership is counted from joining date. This payment date is for collection reference.
+                  ℹ️ Payment recorded on {formatDate(payDate)}. Billing cycle due date will be {computedNextDueDateAfterPayment || 'as calculated'}.
                 </p>
               </div>
 
@@ -3246,13 +3666,13 @@ export default function MembersPage() {
           )}
 
           <DialogFooter className="mt-2 gap-2">
-            <Button type="button" variant="outline" onClick={() => { setPayModalOpen(false); setPayModalMember(null); }}>
+            <Button type="button" variant="outline" onClick={() => { setPayModalOpen(false); setPayModalMember(null); setPayModalIsAdvance(false); setPayModalAdvanceMonths(0); }}>
               Cancel
             </Button>
             <Button 
               type="button" 
               onClick={handlePaySubmit}
-              disabled={bulkPayMutation.isPending || payModalUnpaidFees.length === 0}
+              disabled={bulkPayMutation.isPending || payModalTotalItemsCount === 0}
               className="bg-primary"
             >
               {bulkPayMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}

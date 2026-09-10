@@ -270,11 +270,16 @@ export default function SettingsPage() {
     // Read auto-assign flags: first try native columns, then section_access fallback
     let autoMale = Boolean(staff.auto_assign_male);
     let autoFemale = Boolean(staff.auto_assign_female);
-    if (!autoMale && !autoFemale && typeof staff.section_access === 'string' && staff.section_access.startsWith('auto_assign:')) {
+    if (!autoMale && !autoFemale && typeof staff.section_access === 'string') {
       try {
-        const parsed = JSON.parse(staff.section_access.replace('auto_assign:', ''));
-        autoMale = Boolean(parsed.auto_assign_male);
-        autoFemale = Boolean(parsed.auto_assign_female);
+        const jsonStr = staff.section_access.startsWith('auto_assign:')
+          ? staff.section_access.replace('auto_assign:', '')
+          : staff.section_access.startsWith('{') ? staff.section_access : null;
+        if (jsonStr) {
+          const parsed = JSON.parse(jsonStr);
+          autoMale = Boolean(parsed.auto_assign_male);
+          autoFemale = Boolean(parsed.auto_assign_female);
+        }
       } catch { /* ignore */ }
     }
     setAutoAssignMale(autoMale);
@@ -584,16 +589,36 @@ export default function SettingsPage() {
                               {assignedCount} Member{assignedCount !== 1 ? 's' : ''}
                             </Badge>
                             <div className="flex flex-wrap gap-1 mt-0.5">
-                              {p.auto_assign_male && (
-                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-blue-500/40 text-blue-600 dark:text-blue-400 bg-blue-500/10">
-                                  Auto: Male
-                                </Badge>
-                              )}
-                              {p.auto_assign_female && (
-                                <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-pink-500/40 text-pink-600 dark:text-pink-400 bg-pink-500/10">
-                                  Auto: Female
-                                </Badge>
-                              )}
+                              {(() => {
+                                let autoMale = Boolean(p.auto_assign_male);
+                                let autoFemale = Boolean(p.auto_assign_female);
+                                if (!autoMale && !autoFemale && typeof p.section_access === 'string') {
+                                  try {
+                                    const jsonStr = p.section_access.startsWith('auto_assign:')
+                                      ? p.section_access.replace('auto_assign:', '')
+                                      : p.section_access.startsWith('{') ? p.section_access : null;
+                                    if (jsonStr) {
+                                      const parsed = JSON.parse(jsonStr);
+                                      autoMale = Boolean(parsed.auto_assign_male);
+                                      autoFemale = Boolean(parsed.auto_assign_female);
+                                    }
+                                  } catch { /* ignore */ }
+                                }
+                                return (
+                                  <>
+                                    {autoMale && (
+                                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-blue-500/40 text-blue-600 dark:text-blue-400 bg-blue-500/10">
+                                        Auto: Male
+                                      </Badge>
+                                    )}
+                                    {autoFemale && (
+                                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-pink-500/40 text-pink-600 dark:text-pink-400 bg-pink-500/10">
+                                        Auto: Female
+                                      </Badge>
+                                    )}
+                                  </>
+                                );
+                              })()}
                             </div>
                           </div>
                         </td>

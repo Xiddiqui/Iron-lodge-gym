@@ -98,6 +98,13 @@ export async function POST(request: Request) {
         // Fallback if auto_assign columns don't exist yet
         delete profileData.auto_assign_male;
         delete profileData.auto_assign_female;
+        try {
+          const flagsJson = JSON.stringify({
+            auto_assign_male: Boolean(auto_assign_male),
+            auto_assign_female: Boolean(auto_assign_female),
+          });
+          profileData.section_access = `auto_assign:${flagsJson}`;
+        } catch { /* ignore */ }
         await supabase.from('profiles').upsert(profileData);
       }
 

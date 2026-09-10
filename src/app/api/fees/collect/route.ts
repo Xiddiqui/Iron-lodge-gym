@@ -10,7 +10,7 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { feeIds, amountPaid, discount, paymentMethod, paidAt, paid_at } = body;
+  const { feeIds, advanceRecords, amountPaid, discount, paymentMethod, paidAt, paid_at } = body;
 
   const rawPaidAt = paidAt || paid_at;
   let paymentTimestamp: string;
@@ -37,8 +37,60 @@ export async function POST(request: Request) {
   // Support legacy single feeId for backward compatibility
   const legacyFeeId = body.feeId;
 
-  if (!feeIds && !legacyFeeId) {
-    return NextResponse.json({ error: 'feeIds (array) or feeId (string) is required' }, { status: 400 });
+  // Process advance records if provided
+  let allFeeIds: string[] = Array.isArray(feeIds) ? [...feeIds] : [];
+
+  if (Array.isArray(advanceRecords) && advanceRecords.length > 0) {
+    for (const adv of advanceRecords) {
+      if (!adv.member_id || !adv.period_month) continue;
+
+      // Check if fee record already exists for this member & period_month
+      const { data: existing } = await supabase
+        .from('fee_records')
+        .select('id')
+        .eq('member_id', adv.member_id)
+        .eq('period_month', adv.period_month)
+        .maybeSingle();
+
+      if (existing) {
+        if (!allFeeIds.includes(existing.id)) {
+          allFeeIds.push(existing.id);
+        }
+      } else {
+        // Calculate period_end if not supplied
+        let periodEnd = adv.period_end;
+        if (!periodEnd) {
+          const [y, m] = adv.period_month.split('-').map(Number);
+          const lastDay = new Date(y, m, 0).getDate();
+          periodEnd = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+        }
+
+        const { data: created, error: createErr } = await supabase
+          .from('fee_records')
+          .insert({
+            member_id: adv.member_id,
+            period_month: adv.period_month,
+            period_end: periodEnd,
+            amount: Number(adv.amount) || 0,
+            paid: false,
+            amount_paid: 0,
+            discount: 0,
+          })
+          .select('id')
+          .single();
+
+        if (createErr) {
+          return NextResponse.json({ error: `Failed to create advance fee record: ${createErr.message}` }, { status: 500 });
+        }
+        if (created && !allFeeIds.includes(created.id)) {
+          allFeeIds.push(created.id);
+        }
+      }
+    }
+  }
+
+  if (allFeeIds.length === 0 && !legacyFeeId) {
+    return NextResponse.json({ error: 'feeIds, feeId, or advanceRecords is required' }, { status: 400 });
   }
 
   const validMethods = ['cash', 'online', 'card', 'other'];
@@ -49,7 +101,7 @@ export async function POST(request: Request) {
   const method = paymentMethod || 'cash';
 
   // Legacy single fee collection (backward compat)
-  if (legacyFeeId && !feeIds) {
+  if (legacyFeeId && allFeeIds.length === 0) {
     const { data: feeRecord, error: fetchErr } = await supabase
       .from('fee_records')
       .select('*')
@@ -82,8 +134,8 @@ export async function POST(request: Request) {
   }
 
   // Bulk payment: distribute amount across multiple fee records (oldest first)
-  if (!Array.isArray(feeIds) || feeIds.length === 0) {
-    return NextResponse.json({ error: 'feeIds must be a non-empty array' }, { status: 400 });
+  if (allFeeIds.length === 0) {
+    return NextResponse.json({ error: 'No fee records to process' }, { status: 400 });
   }
 
   const totalPaid = Number(amountPaid) || 0;
@@ -97,7 +149,7 @@ export async function POST(request: Request) {
   const { data: feeRecords, error: fetchError } = await supabase
     .from('fee_records')
     .select('*')
-    .in('id', feeIds)
+    .in('id', allFeeIds)
     .order('period_month', { ascending: true });
 
   if (fetchError) {
