@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard, Users, CalendarCheck, MessageSquare,
   Receipt, Settings, LogOut, Dumbbell, Menu, X, Landmark,
-  Coffee, Lock
+  Coffee, Lock, UserX
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useRole } from '@/hooks/use-role';
@@ -25,6 +25,7 @@ const NAV_ITEMS = [
   { to: '/members', label: 'Members', icon: Users, adminOnly: false },
   { to: '/trainers', label: 'Trainers', icon: Dumbbell, adminOnly: false },
   { to: '/attendance', label: 'Attendance', icon: CalendarCheck, adminOnly: false },
+  { to: '/inactive-members', label: 'Inactive Members', icon: UserX, adminOnly: true },
   { to: '/enquiries', label: 'Enquiries', icon: MessageSquare, adminOnly: true },
   { to: '/expenses', label: 'Expenses', icon: Receipt, adminOnly: true },
   { to: '/reserve-account', label: 'Reserve', icon: Landmark, adminOnly: true },
@@ -63,12 +64,57 @@ export function Sidebar() {
     staleTime: 5 * 60 * 1000,
   });
 
+  // Fetch reactivated inactive member notifications count for admin badge
+  const { data: reactivatedCount = 0 } = useQuery({
+    queryKey: ['inactive-reactivations-badge'],
+    queryFn: async () => {
+      if (role !== 'admin') return 0;
+      try {
+        const res = await fetch('/api/inactive-members/notifications');
+        if (!res.ok) return 0;
+        const json = await res.json();
+        return json.unclearedCount ?? 0;
+      } catch {
+        return 0;
+      }
+    },
+    enabled: role === 'admin',
+    refetchInterval: 15000,
+  });
+
+  // Listen to realtime notifications for instant badge updates
+  useEffect(() => {
+    if (role !== 'admin') return;
+    const channel = supabase
+      .channel('inactive-notifs-badge')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'inactive_member_notifications' },
+        () => {
+          queryClient.invalidateQueries({ queryKey: ['inactive-reactivations-badge'] });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [role, queryClient]);
+
   useEffect(() => setMobileOpen(false), [pathname]);
 
   // Redirect staff from admin-only pages
   useEffect(() => {
     if (roleLoading || !role) return;
-    if (role !== 'admin' && (pathname === '/dashboard' || pathname === '/expenses' || pathname === '/settings' || pathname === '/enquiries' || pathname === '/reserve-account')) {
+    if (
+      role !== 'admin' &&
+      (pathname === '/dashboard' ||
+        pathname === '/expenses' ||
+        pathname === '/settings' ||
+        pathname === '/enquiries' ||
+        pathname === '/reserve-account' ||
+        pathname === '/inactive-members')
+    ) {
       router.replace('/members');
     }
   }, [role, roleLoading, pathname, router]);
@@ -132,6 +178,11 @@ export function Sidebar() {
                 {item.to === '/enquiries' && unreadCount > 0 && (
                   <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-red-600 px-1.5 text-[11px] font-bold text-white shadow-sm animate-pulse">
                     {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                )}
+                {item.to === '/inactive-members' && reactivatedCount > 0 && (
+                  <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-amber-600 px-1.5 text-[11px] font-bold text-white shadow-sm animate-pulse">
+                    {reactivatedCount > 99 ? '99+' : reactivatedCount}
                   </span>
                 )}
               </Link>

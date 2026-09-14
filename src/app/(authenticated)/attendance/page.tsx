@@ -251,13 +251,12 @@ export default function AttendancePage() {
   }, []);
 
   // ─────────────────────────────────────────────────────────────────
-  // Fetch active members list
+  // Fetch members list (active & inactive)
   // ─────────────────────────────────────────────────────────────────
   const loadMembers = useCallback(async () => {
     const { data } = await supabase
       .from('members')
-      .select('id, full_name, phone, member_number, photo_url')
-      .eq('active', true)
+      .select('id, full_name, phone, member_number, photo_url, active, join_date, tenure_months, monthly_fee, training_fees, amount_paid')
       .order('full_name');
     setMembers(data ?? []);
   }, []);
@@ -362,18 +361,78 @@ export default function AttendancePage() {
   // ─────────────────────────────────────────────────────────────────
   const markAttendance = useMutation({
     mutationFn: async (memberId: string) => {
+      const punchTime = new Date();
+      const memberObj = members.find((m: any) => m.id === memberId);
+      const wasInactive = memberObj && memberObj.active === false;
+
       const { error } = await supabase.from('attendance').insert({
         member_id: memberId,
         marked_by: currentUser?.id,
+        check_in: punchTime.toISOString(),
+        source: 'manual',
       });
       if (error) {
         if (error.code === '23505') throw new Error('Already marked for today');
         throw error;
       }
 
+      // If member was inactive, reactivate them and log notification
+      if (wasInactive) {
+        const { data: prevAtt } = await supabase
+          .from('attendance')
+          .select('check_in')
+          .eq('member_id', memberId)
+          .lt('check_in', punchTime.toISOString())
+          .order('check_in', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const lastCheckInBefore = prevAtt?.check_in || null;
+        const baseDate = lastCheckInBefore ? new Date(lastCheckInBefore) : new Date(memberObj?.join_date || punchTime);
+        const daysInactive = Math.max(0, Math.floor((punchTime.getTime() - baseDate.getTime()) / (1000 * 60 * 60 * 24)));
+
+        const { error: updateErr } = await supabase
+          .from('members')
+          .update({
+            active: true,
+            inactive_reason: null,
+            updated_at: punchTime.toISOString(),
+          })
+          .eq('id', memberId);
+
+        if (updateErr) {
+          await supabase
+            .from('members')
+            .update({
+              active: true,
+              updated_at: punchTime.toISOString(),
+            })
+            .eq('id', memberId);
+        }
+
+        const feeInfo = memberFeeStatuses[memberId];
+        const isPaid = feeInfo ? feeInfo.status === 'paid' : true;
+
+        try {
+          await supabase.from('inactive_member_notifications').insert({
+            member_id: memberId,
+            member_name: memberObj?.full_name || 'Member',
+            member_number: memberObj?.member_number || null,
+            member_photo_url: memberObj?.photo_url && memberObj.photo_url.length < 2048 ? memberObj.photo_url : null,
+            check_in_time: punchTime.toISOString(),
+            last_check_in_before: lastCheckInBefore,
+            days_inactive: daysInactive,
+            fee_status: isPaid ? 'paid' : 'unpaid',
+            fee_amount_due: feeInfo?.amountDue || 0,
+            is_cleared: false,
+          });
+        } catch (e) {
+          console.warn('[Attendance] Could not log inactive notification:', e);
+        }
+      }
+
       // If fee is due or overdue, send notification for red popup alert
       const feeInfo = memberFeeStatuses[memberId];
-      const memberObj = members.find((m: any) => m.id === memberId);
       if (feeInfo && (feeInfo.status === 'due' || feeInfo.status === 'overdue')) {
         await supabase.from('biometric_notifications').insert({
           type: 'checkin',
@@ -383,18 +442,22 @@ export default function AttendancePage() {
           member_number: memberObj?.member_number || null,
           fee_status: feeInfo.status,
           fee_amount_due: feeInfo.amountDue || null,
-          check_in_time: new Date().toISOString(),
+          check_in_time: punchTime.toISOString(),
         });
       }
-      return { memberId, feeInfo };
+      return { memberId, feeInfo, wasInactive, memberName: memberObj?.full_name };
     },
     onSuccess: (res) => {
-      if (res?.feeInfo && (res.feeInfo.status === 'due' || res.feeInfo.status === 'overdue')) {
+      if (res?.wasInactive) {
+        toast.success(`${res.memberName} reactivated to Active & attendance marked!`);
+        queryClient.invalidateQueries({ queryKey: ['inactive-reactivations-badge'] });
+      } else if (res?.feeInfo && (res.feeInfo.status === 'due' || res.feeInfo.status === 'overdue')) {
         toast.warning(`Attendance marked — Fee is ${res.feeInfo.status.toUpperCase()} (PKR ${res.feeInfo.amountDue?.toLocaleString() || 0})`);
       } else {
         toast.success('Attendance marked');
       }
       setDialogOpen(false);
+      loadMembers();
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -1308,7 +1371,14 @@ export default function AttendancePage() {
                       </div>
                     )}
                     <div>
-                      <p className="text-sm font-medium">{m.full_name}</p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-sm font-medium">{m.full_name}</p>
+                        {!m.active && (
+                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 text-red-400 border-red-400/30">
+                            Inactive
+                          </Badge>
+                        )}
+                      </div>
                       <p className="text-xs text-muted-foreground">{m.phone}</p>
                       {m.member_number && (
                         <p className="text-xs font-mono text-muted-foreground/70"># {m.member_number}</p>
@@ -1324,8 +1394,9 @@ export default function AttendancePage() {
                       size="sm"
                       onClick={() => markAttendance.mutate(m.id)}
                       disabled={markAttendance.isPending}
+                      className={!m.active ? 'bg-amber-600 hover:bg-amber-700 text-white' : ''}
                     >
-                      Check In
+                      {!m.active ? 'Check In & Reactivate' : 'Check In'}
                     </Button>
                   )}
                 </div>

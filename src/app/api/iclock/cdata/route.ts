@@ -191,33 +191,31 @@ async function processPunch({
     punchTime = now;
   }
 
-  // Look up active member by member_number (pin)
+  // Look up member by member_number (pin) — including inactive members so they can auto-reactivate
   // Try exact match first
   let { data: member } = await adminClient
     .from('members')
-    .select('id, full_name, photo_url, member_number, join_date, tenure_months, monthly_fee, training_fees, amount_paid')
+    .select('id, full_name, photo_url, member_number, join_date, tenure_months, monthly_fee, training_fees, amount_paid, active')
     .eq('member_number', pin)
-    .eq('active', true)
     .maybeSingle();
 
   // Fallback 1: Try integer equivalence (e.g. pin '1' matches member_number '0001' or '001')
   if (!member && !isNaN(Number(pin))) {
     const numPin = Number(pin).toString();
-    const { data: allActiveMembers } = await adminClient
+    const { data: allMembers } = await adminClient
       .from('members')
-      .select('id, full_name, photo_url, member_number, join_date, tenure_months, monthly_fee, training_fees, amount_paid')
-      .eq('active', true);
+      .select('id, full_name, photo_url, member_number, join_date, tenure_months, monthly_fee, training_fees, amount_paid, active');
 
-    if (allActiveMembers) {
-      member = allActiveMembers.find(
+    if (allMembers) {
+      member = allMembers.find(
         (m: any) => m.member_number && Number(m.member_number) === Number(pin)
       ) || null;
     }
   }
 
   if (!member) {
-    console.warn(`[Biometric] No active member found matching pin/member_number="${pin}"`);
-    return { success: false, reason: `No active member with member_number="${pin}" found in database` };
+    console.warn(`[Biometric] No member found matching pin/member_number="${pin}"`);
+    return { success: false, reason: `No member with member_number="${pin}" found in database` };
   }
 
   // Avoid broadcasting heavy base64 strings over Supabase Realtime WebSockets
@@ -264,6 +262,24 @@ async function processPunch({
     // ── NEW CHECK-IN ────────────────────────────────────────────────────────
     console.log(`[Biometric] New check-in for ${member.full_name} at ${punchTime.toISOString()}`);
 
+    const wasInactive = !member.active;
+    let lastCheckInBefore: string | null = null;
+    let daysInactive = 0;
+
+    if (wasInactive) {
+      const { data: prevAtt } = await adminClient
+        .from('attendance')
+        .select('check_in')
+        .eq('member_id', member.id)
+        .order('check_in', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      lastCheckInBefore = prevAtt?.check_in || null;
+      const baseDate = lastCheckInBefore ? new Date(lastCheckInBefore) : new Date(member.join_date || punchTime);
+      daysInactive = Math.max(0, Math.floor((punchTime.getTime() - baseDate.getTime()) / (1000 * 60 * 60 * 24)));
+    }
+
     // Insert attendance record
     const { error: attErr } = await adminClient.from('attendance').insert({
       member_id: member.id,
@@ -291,6 +307,46 @@ async function processPunch({
         throw attErr;
       }
       return;
+    }
+
+    // Reactivate member if they were inactive, or update last_check_in
+    if (wasInactive) {
+      console.log(`[Biometric] Inactive member ${member.full_name} reactivated via punch!`);
+      const { error: mUpErr } = await adminClient
+        .from('members')
+        .update({
+          active: true,
+          inactive_reason: null,
+          updated_at: punchTime.toISOString(),
+        })
+        .eq('id', member.id);
+
+      if (mUpErr) {
+        await adminClient
+          .from('members')
+          .update({
+            active: true,
+            updated_at: punchTime.toISOString(),
+          })
+          .eq('id', member.id);
+      }
+
+      try {
+        await adminClient.from('inactive_member_notifications').insert({
+          member_id: member.id,
+          member_name: member.full_name,
+          member_number: member.member_number,
+          member_photo_url: safePhotoUrl,
+          check_in_time: punchTime.toISOString(),
+          last_check_in_before: lastCheckInBefore,
+          days_inactive: daysInactive,
+          fee_status: feeStatus.status === 'paid' ? 'paid' : 'unpaid',
+          fee_amount_due: feeStatus.amountDue,
+          is_cleared: false,
+        });
+      } catch (e) {
+        console.warn('[Biometric] Could not insert inactive_member_notifications alert:', e);
+      }
     }
 
     // Send check-in notification for real-time popup on all clients
