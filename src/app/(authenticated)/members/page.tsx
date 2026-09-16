@@ -189,7 +189,8 @@ async function syncMemberFeeRecords(
   tenureMonths: number,
   totalPayableForTenure: number,
   paidAmount: number,
-  admissionFee: number = 0
+  admissionFee: number = 0,
+  collectedBy?: string | null
 ) {
   const safeJoinDate = joinDateStr || new Date().toISOString().slice(0, 10);
   const [jYear, jMonth, jDay] = safeJoinDate.split('-').map(Number);
@@ -232,6 +233,7 @@ async function syncMemberFeeRecords(
       paid: isRecordPaid,
       paid_at: recordPaid > 0 ? paidAtIso : null,
       payment_method: 'cash',
+      collected_by: isRecordPaid ? (collectedBy || null) : null,
     });
   }
 
@@ -1250,7 +1252,8 @@ export default function MembersPage() {
           tenureMonths,
           totalPayableForTenure,
           paidAmount,
-          calcAdmission
+          calcAdmission,
+          currentUser?.id || null
         );
       }
 
@@ -1262,7 +1265,8 @@ export default function MembersPage() {
           tenureMonths,
           totalPayableForTenure,
           paidAmount,
-          calcAdmission
+          calcAdmission,
+          currentUser?.id || null
         );
       }
 
@@ -3522,6 +3526,25 @@ export default function MembersPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  {/* Quick-select buttons */}
+                  {[1, 3, 6].map(n => (
+                    <Button
+                      key={n}
+                      type="button"
+                      size="sm"
+                      variant={payModalAdvanceMonths === n ? 'default' : 'outline'}
+                      className="h-7 px-2.5 text-xs font-bold"
+                      onClick={() => {
+                        setPayModalAdvanceMonths(n);
+                        const monthlyFee = (Number(payModalMember?.monthly_fee) || 0) + (Number(payModalMember?.training_fees) || 0);
+                        const unpaidSum = payModalUnpaidFees.reduce((s, fr) => s + Math.max(0, (Number(fr.amount) || 0) - (Number(fr.amount_paid) || 0)), 0);
+                        setPayAmountReceived(String(unpaidSum + monthlyFee * n));
+                      }}
+                    >
+                      {n}M
+                    </Button>
+                  ))}
+                  <div className="w-px h-5 bg-border mx-1" />
                   <Button
                     type="button"
                     size="sm"

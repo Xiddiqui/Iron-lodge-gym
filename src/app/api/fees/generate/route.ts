@@ -29,7 +29,7 @@ export async function POST(request: Request) {
     // Get the member
     const { data: member, error: memberError } = await supabase
       .from('members')
-      .select('id, monthly_fee, training_fees, join_date, amount_paid, active')
+      .select('id, monthly_fee, training_fees, join_date, tenure_months, amount_paid, active')
       .eq('id', memberId)
       .single();
 
@@ -57,7 +57,7 @@ export async function POST(request: Request) {
       .eq('member_id', member.id)
       .lt('period_month', joinPeriodMonth);
 
-    // 2. Generate fee records only up to the cycle that has actually started
+    // 2. Determine cycle boundaries considering tenure package
     const now = new Date();
     const currentDay = now.getDate();
     const latestDueMonth = currentDay >= joinDay
@@ -65,54 +65,96 @@ export async function POST(request: Request) {
       : new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const latestDueMonthKey = `${latestDueMonth.getFullYear()}-${String(latestDueMonth.getMonth() + 1).padStart(2, '0')}-01`;
 
-    // Delete any future unpaid fee records beyond the latest active cycle
+    const tenure = Math.max(1, Number(member.tenure_months) || 1);
+    const lastTenureDate = new Date(jYear, jMonth - 1 + tenure - 1, 1);
+    const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+    const maxGenerationDate = lastTenureDate > latestDueMonth ? lastTenureDate : latestDueMonth;
+    const maxAllowedPeriod = lastTenurePeriod > latestDueMonthKey ? lastTenurePeriod : latestDueMonthKey;
+
+    // Delete any future unpaid fee records beyond both tenure package and latest active cycle
     await supabase
       .from('fee_records')
       .delete()
       .eq('member_id', member.id)
-      .gt('period_month', latestDueMonthKey)
+      .gt('period_month', maxAllowedPeriod)
       .eq('paid', false);
 
-    const records = [];
-    let cursor = new Date(jYear, jMonth - 1, 1);
+    // Fetch existing records for this member
+    const { data: existingRecords } = await supabase
+      .from('fee_records')
+      .select('id, period_month, paid, amount, amount_paid')
+      .eq('member_id', member.id);
 
-    while (cursor <= latestDueMonth) {
+    const existingMap = new Map((existingRecords || []).map((r: any) => [r.period_month, r]));
+
+    const monthlyRate = Number(member.monthly_fee) || 0;
+    const trainingFee = Number(member.training_fees) || 0;
+    const totalFee = monthlyRate + trainingFee;
+    const totalTenureFee = monthlyRate * tenure + trainingFee;
+    const memberPaid = Number(member.amount_paid) || 0;
+    const paidAtTimestamp = member.join_date ? `${member.join_date}T12:00:00.000Z` : now.toISOString();
+
+    const recordsToInsert = [];
+    const idsToMarkPaid: string[] = [];
+
+    let cursor = new Date(jYear, jMonth - 1, 1);
+    while (cursor <= maxGenerationDate) {
       const y = cursor.getFullYear();
       const m = cursor.getMonth() + 1;
       const periodMonth = `${y}-${String(m).padStart(2, '0')}-01`;
       const lastDay = new Date(y, m, 0).getDate();
       const periodEnd = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-      const totalFee = (Number(member.monthly_fee) || 0) + (Number(member.training_fees) || 0);
 
-      records.push({
-        member_id: member.id,
-        amount: totalFee,
-        period_month: periodMonth,
-        period_end: periodEnd,
-        paid: false,
-        amount_paid: 0,
-        discount: 0,
-      });
+      const isWithinTenure = periodMonth <= lastTenurePeriod;
+      const isTenurePaid = isWithinTenure && (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+
+      const existing = existingMap.get(periodMonth);
+      if (!existing) {
+        recordsToInsert.push({
+          member_id: member.id,
+          amount: totalFee,
+          period_month: periodMonth,
+          period_end: periodEnd,
+          paid: isTenurePaid,
+          amount_paid: isTenurePaid ? totalFee : 0,
+          paid_at: isTenurePaid ? paidAtTimestamp : null,
+          payment_method: 'cash',
+          discount: 0,
+        });
+      } else if (isTenurePaid && (!existing.paid || Number(existing.amount_paid || 0) < totalFee)) {
+        idsToMarkPaid.push(existing.id);
+      }
 
       cursor.setMonth(cursor.getMonth() + 1);
     }
 
-    if (records.length === 0) {
-      return NextResponse.json({ message: 'No records to generate', generated: 0 });
+    if (idsToMarkPaid.length > 0) {
+      await supabase
+        .from('fee_records')
+        .update({
+          paid: true,
+          amount_paid: totalFee,
+          paid_at: paidAtTimestamp,
+        })
+        .in('id', idsToMarkPaid);
     }
 
-    const { data: inserted, error: insertError } = await supabase
-      .from('fee_records')
-      .upsert(records, { onConflict: 'member_id,period_month', ignoreDuplicates: true })
-      .select();
+    let insertedCount = 0;
+    if (recordsToInsert.length > 0) {
+      const { data: inserted, error: insertError } = await supabase
+        .from('fee_records')
+        .insert(recordsToInsert)
+        .select();
 
-    if (insertError) {
-      return NextResponse.json({ error: insertError.message }, { status: 500 });
+      if (insertError) {
+        return NextResponse.json({ error: insertError.message }, { status: 500 });
+      }
+      insertedCount = inserted?.length ?? 0;
     }
 
     return NextResponse.json({
-      message: `Generated fee records for member`,
-      generated: inserted?.length ?? 0,
+      message: `Generated and reconciled fee records for member`,
+      generated: insertedCount + idsToMarkPaid.length,
     });
   }
 
@@ -128,7 +170,7 @@ export async function POST(request: Request) {
   // Get all active members
   const { data: members, error: membersError } = await supabase
     .from('members')
-    .select('id, monthly_fee, training_fees, join_date')
+    .select('id, monthly_fee, training_fees, join_date, tenure_months, amount_paid')
     .eq('active', true);
 
   if (membersError) {
@@ -162,15 +204,35 @@ export async function POST(request: Request) {
 
   // Build fee records
   const bulkRecords = eligibleMembers.map((m) => {
-    const totalFee = (Number(m.monthly_fee) || 0) + (Number(m.training_fees) || 0);
+    const monthlyRate = Number(m.monthly_fee) || 0;
+    const trainingFee = Number(m.training_fees) || 0;
+    const totalFee = monthlyRate + trainingFee;
+    const tenure = Math.max(1, Number(m.tenure_months) || 1);
+    const memberPaid = Number(m.amount_paid) || 0;
+    const totalTenureFee = monthlyRate * tenure + trainingFee;
+
+    let isTenurePaid = false;
+    if (m.join_date) {
+      const [jYear, jMonth] = m.join_date.split('-').map(Number);
+      if (jYear && jMonth) {
+        const lastTenureDate = new Date(jYear, jMonth - 1 + tenure - 1, 1);
+        const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+        if (periodMonth <= lastTenurePeriod && (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0) {
+          isTenurePaid = true;
+        }
+      }
+    }
+
     return {
       member_id: m.id,
       amount: totalFee,
       period_month: periodMonth,
       period_end: periodEnd,
-      paid: false,
-      amount_paid: 0,
+      paid: isTenurePaid,
+      amount_paid: isTenurePaid ? totalFee : 0,
+      paid_at: isTenurePaid ? (m.join_date ? `${m.join_date}T12:00:00.000Z` : now.toISOString()) : null,
       discount: 0,
+      payment_method: 'cash',
     };
   });
 

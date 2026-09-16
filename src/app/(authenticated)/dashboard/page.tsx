@@ -264,6 +264,17 @@ export default function DashboardPage() {
             const tenure = Math.max(1, Number(m.tenure_months) || 1);
             const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
             const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+            const memberPaid = Number(m.amount_paid) || 0;
+            const totalFee = (Number(m.monthly_fee) || 0) + (Number(m.training_fees) || 0);
+            const totalTenureFee = (Number(m.monthly_fee) || 0) * tenure + (Number(m.training_fees) || 0);
+
+            // If this period is within tenure AND member paid the tenure fee, mark as paid
+            if (f.period_month <= lastTenurePeriod && totalFee > 0 && (memberPaid >= totalTenureFee || memberPaid >= totalFee)) {
+              if (!f.paid || Number(f.amount_paid) < totalFee) {
+                return { ...f, paid: true, amount_paid: totalFee, paid_at: f.paid_at || `${m.join_date}T12:00:00.000Z` };
+              }
+              return f;
+            }
 
             // If this month is after the registration tenure and not collected manually, it is unpaid
             if (f.period_month > lastTenurePeriod && f.collected_by == null && (f.paid || Number(f.amount_paid) > 0)) {
@@ -288,6 +299,7 @@ export default function DashboardPage() {
         const existingMemberIds = new Set(feeList.map((f: any) => f.member_id));
         const now = new Date();
         const isCurrentCalendarMonth = monthStart === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+        const isFutureMonth = monthStart > `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 
         const missingMembers = activeMembers.filter((m: any) => {
           if (existingMemberIds.has(m.id)) return false;
@@ -301,6 +313,13 @@ export default function DashboardPage() {
           if (isCurrentCalendarMonth && now.getDate() < (jD || 1)) {
             return false;
           }
+          // For future months: include if within their paid tenure
+          if (isFutureMonth) {
+            const tenure = Math.max(1, Number(m.tenure_months) || 1);
+            const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
+            const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+            return monthStart <= lastTenurePeriod;
+          }
           return true;
         });
 
@@ -309,11 +328,22 @@ export default function DashboardPage() {
           const periodEndStr = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
           const newRecords = missingMembers.map((m: any) => {
-            const totalFee = (Number(m.monthly_fee) || 0) + (Number(m.training_fees) || 0);
-            const paidAmount = Number(m.amount_paid) || 0;
+            const monthlyRate = Number(m.monthly_fee) || 0;
+            const trainingFee = Number(m.training_fees) || 0;
+            const totalFee = monthlyRate + trainingFee;
+            const memberPaid = Number(m.amount_paid) || 0;
+            const [jY, jM] = m.join_date.split('-').map(Number);
+            const tenure = Math.max(1, Number(m.tenure_months) || 1);
+            const totalTenureFee = monthlyRate * tenure + trainingFee;
+            const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
+            const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+
+            const isWithinTenure = monthStart <= lastTenurePeriod;
+            const isTenurePaid = isWithinTenure && totalFee > 0 && (memberPaid >= totalTenureFee || memberPaid >= totalFee);
             const isJoinedInThisMonth = m.join_date >= monthStart && m.join_date < monthEnd;
-            const actualPaid = isJoinedInThisMonth ? paidAmount : 0;
-            const isPaid = isJoinedInThisMonth ? actualPaid >= totalFee && totalFee > 0 : false;
+
+            const actualPaid = isTenurePaid ? totalFee : (isJoinedInThisMonth ? memberPaid : 0);
+            const isPaid = isTenurePaid || (isJoinedInThisMonth && actualPaid >= totalFee && totalFee > 0);
 
             return {
               member_id: m.id,
@@ -331,7 +361,7 @@ export default function DashboardPage() {
           // Non-blocking background persistence
           supabase
             .from('fee_records')
-            .upsert(newRecords.map(({ members, ...r }) => r), { onConflict: 'member_id,period_month', ignoreDuplicates: true })
+            .upsert(newRecords.map(({ members, ...r }: any) => r), { onConflict: 'member_id,period_month', ignoreDuplicates: true })
             .then();
 
           feeList = [...feeList, ...newRecords];
@@ -517,12 +547,15 @@ export default function DashboardPage() {
     amount: expenseByCategory[cat] || 0
   }));
 
-  // Month options (safely anchored to day 1 to prevent day-of-month rollover duplicates)
-  const monthOptions = Array.from({ length: 12 }, (_, i) => {
+  // Month options: 6 future months + current + 11 past months (total 18)
+  const monthOptions = Array.from({ length: 18 }, (_, i) => {
     const now = new Date();
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    // i=0 → 6 months ahead, i=6 → current, i=7..17 → past
+    const offset = 6 - i;
+    const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
     const val = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    return { value: val, label: formatMonthYear(d) };
+    const isFuture = offset > 0;
+    return { value: val, label: `${formatMonthYear(d)}${isFuture ? ' →' : ''}` };
   });
 
   const memberGrowth = activeMembers ? ((activeMembers.current - activeMembers.previous) / Math.max(activeMembers.previous, 1)) * 100 : 0;

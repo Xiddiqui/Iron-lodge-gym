@@ -213,6 +213,83 @@ export async function POST(request: Request) {
     results.push(data);
   }
 
+  // If extra payment remains, automatically create and pay subsequent advance cycle(s)
+  if (remainingPayment > 0 && feeRecords.length > 0) {
+    const memberId = feeRecords[0].member_id;
+    const { data: memberData } = await supabase
+      .from('members')
+      .select('id, monthly_fee, training_fees')
+      .eq('id', memberId)
+      .single();
+
+    const monthlyRate = (Number(memberData?.monthly_fee) || 0) + (Number(memberData?.training_fees) || 0);
+    const standardAmount = monthlyRate > 0 ? monthlyRate : (Number(feeRecords[feeRecords.length - 1]?.amount) || 0);
+
+    let cursorPeriodMonth = feeRecords[feeRecords.length - 1].period_month;
+    let safeguard = 0;
+
+    while (remainingPayment > 0 && safeguard < 24) {
+      safeguard++;
+      const [lastY, lastM] = cursorPeriodMonth.split('-').map(Number);
+      const nextDate = new Date(lastY, lastM, 1);
+      const nY = nextDate.getFullYear();
+      const nM = nextDate.getMonth() + 1;
+      const nextPeriodMonth = `${nY}-${String(nM).padStart(2, '0')}-01`;
+      const lastDay = new Date(nY, nM, 0).getDate();
+      const nextPeriodEnd = `${nY}-${String(nM).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+      const cycleAmount = standardAmount > 0 ? standardAmount : remainingPayment;
+      const paymentForAdv = Math.min(remainingPayment, cycleAmount);
+      remainingPayment -= paymentForAdv;
+      const isAdvPaid = paymentForAdv >= cycleAmount && cycleAmount > 0;
+
+      const { data: existingAdv } = await supabase
+        .from('fee_records')
+        .select('id, amount, amount_paid')
+        .eq('member_id', memberId)
+        .eq('period_month', nextPeriodMonth)
+        .maybeSingle();
+
+      if (existingAdv) {
+        const currentPaid = Number(existingAdv.amount_paid) || 0;
+        const newPaid = currentPaid + paymentForAdv;
+        const targetAmount = Number(existingAdv.amount) || cycleAmount;
+        const { data: updatedAdv } = await supabase
+          .from('fee_records')
+          .update({
+            paid: newPaid >= targetAmount,
+            amount_paid: newPaid,
+            paid_at: paymentTimestamp,
+            payment_method: method,
+            collected_by: user.id,
+          })
+          .eq('id', existingAdv.id)
+          .select()
+          .single();
+        if (updatedAdv) results.push(updatedAdv);
+      } else {
+        const { data: createdAdv } = await supabase
+          .from('fee_records')
+          .insert({
+            member_id: memberId,
+            period_month: nextPeriodMonth,
+            period_end: nextPeriodEnd,
+            amount: cycleAmount,
+            paid: isAdvPaid,
+            amount_paid: paymentForAdv,
+            discount: 0,
+            paid_at: paymentTimestamp,
+            payment_method: method,
+            collected_by: user.id,
+          })
+          .select()
+          .single();
+        if (createdAdv) results.push(createdAdv);
+      }
+      cursorPeriodMonth = nextPeriodMonth;
+    }
+  }
+
   const totalActuallyPaid = effectivePayment;
   const netRemaining = Math.max(0, totalDue - totalDiscount - totalActuallyPaid);
 
