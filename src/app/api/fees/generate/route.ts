@@ -236,18 +236,52 @@ export async function POST(request: Request) {
     };
   });
 
-  const { data: inserted, error: insertError } = await supabase
+  // Fetch existing records for this month to reconcile tenure payments
+  const { data: existingRecords } = await supabase
     .from('fee_records')
-    .upsert(bulkRecords, { onConflict: 'member_id,period_month', ignoreDuplicates: true })
-    .select();
+    .select('id, member_id, paid, amount_paid')
+    .eq('period_month', periodMonth);
 
-  if (insertError) {
-    return NextResponse.json({ error: insertError.message }, { status: 500 });
+  const existingMap = new Map((existingRecords || []).map((r: any) => [r.member_id, r]));
+  const recordsToInsert: any[] = [];
+  const updatesToMarkPaid: Array<{ id: string; amount_paid: number; paid_at: string | null }> = [];
+
+  for (const rec of bulkRecords) {
+    const existing = existingMap.get(rec.member_id);
+    if (!existing) {
+      recordsToInsert.push(rec);
+    } else if (rec.paid && (!existing.paid || Number(existing.amount_paid || 0) < rec.amount)) {
+      updatesToMarkPaid.push({
+        id: existing.id,
+        amount_paid: rec.amount_paid,
+        paid_at: rec.paid_at,
+      });
+    }
+  }
+
+  let insertedCount = 0;
+  if (recordsToInsert.length > 0) {
+    const { data: inserted, error: insertError } = await supabase
+      .from('fee_records')
+      .insert(recordsToInsert)
+      .select();
+
+    if (insertError) {
+      return NextResponse.json({ error: insertError.message }, { status: 500 });
+    }
+    insertedCount = inserted?.length ?? 0;
+  }
+
+  for (const u of updatesToMarkPaid) {
+    await supabase
+      .from('fee_records')
+      .update({ paid: true, amount_paid: u.amount_paid, paid_at: u.paid_at })
+      .eq('id', u.id);
   }
 
   return NextResponse.json({
     message: `Generated fee records for ${periodMonth}`,
-    generated: inserted?.length ?? 0,
+    generated: insertedCount + updatesToMarkPaid.length,
     total_members: eligibleMembers.length,
   });
 }

@@ -129,7 +129,7 @@ export default function TrainersPage() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('members')
-        .select('id, member_number, full_name, phone, cnic, email, join_date, monthly_fee, training_fees, trainer_id, active')
+        .select('id, member_number, full_name, phone, cnic, email, join_date, monthly_fee, training_fees, trainer_id, active, photo_url')
         .order('full_name', { ascending: true });
       if (error) throw error;
       return data as Member[];
@@ -765,7 +765,7 @@ export default function TrainersPage() {
                         <th className="text-left p-3 font-medium text-muted-foreground">Name</th>
                         <th className="text-left p-3 font-medium text-muted-foreground">Phone</th>
                         <th className="text-left p-3 font-medium text-muted-foreground">Join Date</th>
-                        <th className="text-left p-3 font-medium text-muted-foreground">Monthly Fee</th>
+                        <th className="text-left p-3 font-medium text-muted-foreground">Training Fee</th>
                         <th className="text-right p-3 font-medium text-muted-foreground">Status</th>
                       </tr>
                     </thead>
@@ -822,7 +822,7 @@ export default function TrainersPage() {
                             </td>
                             <td className="p-3 text-muted-foreground font-mono text-xs">{m.phone || '—'}</td>
                             <td className="p-3 text-muted-foreground text-xs">{formatDate(m.join_date)}</td>
-                            <td className="p-3 font-medium">{formatCurrency(m.monthly_fee)}</td>
+                            <td className="p-3 font-medium">{formatCurrency(m.training_fees || 0)}</td>
                             <td className="p-3 text-right">
                               <Badge variant={m.active ? 'success' : 'destructive'} className="text-[11px]">
                                 {m.active ? 'Active' : 'Inactive'}

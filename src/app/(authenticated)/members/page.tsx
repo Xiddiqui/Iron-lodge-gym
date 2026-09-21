@@ -366,16 +366,34 @@ function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
   const records = (feeRecords || []).filter(fr => fr.member_id === m.id);
   const paidRecords = records.filter(fr => fr.paid || (Number(fr.amount_paid) >= Number(fr.amount) && Number(fr.amount) > 0));
 
-  if (paidRecords.length === 0) {
+  const tenure = Math.max(1, Number(m.tenure_months) || 1);
+  const monthlyRate = Number(m.monthly_fee) || 0;
+  const trainingFee = Number(m.training_fees) || 0;
+  const totalFee = monthlyRate + trainingFee;
+  const totalTenureFee = monthlyRate * tenure + trainingFee;
+  const memberPaid = Number(m.amount_paid) || 0;
+  const isTenurePaid = tenure > 1 && (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+
+  let latestPeriod: string | null = null;
+
+  if (paidRecords.length > 0) {
+    const sorted = [...paidRecords].sort((a, b) => (a.period_month || '').localeCompare(b.period_month || ''));
+    latestPeriod = sorted[sorted.length - 1]?.period_month || null;
+  }
+
+  if (isTenurePaid && jYear && jMonth) {
+    const lastTenureDate = new Date(jYear, jMonth - 1 + tenure - 1, 1);
+    const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+    if (!latestPeriod || lastTenurePeriod > latestPeriod) {
+      latestPeriod = lastTenurePeriod;
+    }
+  }
+
+  if (!latestPeriod) {
     return formatDate(m.join_date);
   }
 
-  // Sort paid records by period_month ascending to find the latest
-  const sorted = [...paidRecords].sort((a, b) => (a.period_month || '').localeCompare(b.period_month || ''));
-  const latestPaid = sorted[sorted.length - 1];
-  if (!latestPaid?.period_month) return formatDate(m.join_date);
-
-  const [lYear, lMonth] = latestPaid.period_month.split('-').map(Number);
+  const [lYear, lMonth] = latestPeriod.split('-').map(Number);
   // Month following latest paid period
   const nextMonthDate = new Date(lYear, lMonth, 1); // lMonth is 1-indexed, so Date(lYear, lMonth, 1) is month + 1
   const nextYear = nextMonthDate.getFullYear();
@@ -412,14 +430,33 @@ function getNextAdvancePeriods(
   const memberRecords = allFeeRecords.filter(fr => fr.member_id === m.id);
   const paidRecords = memberRecords.filter(fr => fr.paid || (Number(fr.amount_paid) >= Number(fr.amount) && Number(fr.amount) > 0));
 
+  const tenure = Math.max(1, Number(m.tenure_months) || 1);
+  const monthlyRate = Number(m.monthly_fee) || 0;
+  const trainingFee = Number(m.training_fees) || 0;
+  const totalFee = monthlyRate + trainingFee;
+  const totalTenureFee = monthlyRate * tenure + trainingFee;
+  const memberPaid = Number(m.amount_paid) || 0;
+  const isTenurePaid = tenure > 1 && (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+
+  let latestPaidPeriodStr: string | null = null;
+  if (paidRecords.length > 0) {
+    const sorted = [...paidRecords].sort((a, b) => (a.period_month || '').localeCompare(b.period_month || ''));
+    latestPaidPeriodStr = sorted[sorted.length - 1]?.period_month || null;
+  }
+  if (isTenurePaid && jYear && jMonth) {
+    const lastTenureDate = new Date(jYear, jMonth - 1 + tenure - 1, 1);
+    const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+    if (!latestPaidPeriodStr || lastTenurePeriod > latestPaidPeriodStr) {
+      latestPaidPeriodStr = lastTenurePeriod;
+    }
+  }
+
   let startYear: number;
   let startMonth: number; // 1-indexed
 
-  if (paidRecords.length > 0) {
+  if (latestPaidPeriodStr) {
     // Start from 1 month after the latest paid period
-    const sorted = [...paidRecords].sort((a, b) => (a.period_month || '').localeCompare(b.period_month || ''));
-    const latestPaid = sorted[sorted.length - 1];
-    const [lY, lM] = (latestPaid.period_month || '').split('-').map(Number);
+    const [lY, lM] = latestPaidPeriodStr.split('-').map(Number);
     const nextDate = new Date(lY || now.getFullYear(), (lM || (now.getMonth() + 1)), 1);
     startYear = nextDate.getFullYear();
     startMonth = nextDate.getMonth() + 1;
@@ -718,7 +755,8 @@ export default function MembersPage() {
     queryFn: async () => {
       const { data: feeData, error: feeErr } = await supabase.from('fee_records')
         .select('id, member_id, amount, amount_paid, discount, period_month, period_end, paid, paid_at, payment_method, collected_by')
-        .order('period_month', { ascending: false });
+        .order('period_month', { ascending: false })
+        .limit(10000);
       if (feeErr) throw feeErr;
 
       let memberData: any[] | undefined = queryClient.getQueryData<any[]>(['members']);
@@ -733,8 +771,9 @@ export default function MembersPage() {
       const memberMap = new Map(memberData.map((m: any) => [m.id, m]));
       const staleRecordIds: string[] = [];
       const priorRecordIds: string[] = [];
+      const tenureRecordIdsToMarkPaid: string[] = [];
 
-      const reconciledFees = (feeData || []).filter((fr: any) => {
+      const reconciledFees: any[] = (feeData || []).filter((fr: any) => {
         const m = memberMap.get(fr.member_id);
         if (!m || !m.join_date) return true;
 
@@ -769,7 +808,22 @@ export default function MembersPage() {
           return false;
         }
 
-        if (fr.period_month > lastTenurePeriod) {
+        const monthlyRate = Number(m.monthly_fee) || 0;
+        const trainingFee = Number(m.training_fees) || 0;
+        const totalFee = monthlyRate + trainingFee;
+        const totalTenureFee = monthlyRate * tenure + trainingFee;
+        const memberPaid = Number(m.amount_paid) || 0;
+        const isTenurePaid = (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+
+        if (fr.period_month <= lastTenurePeriod) {
+          // If within tenure and member paid their tenure fee, ensure marked as paid
+          if (isTenurePaid && (!fr.paid || Number(fr.amount_paid || 0) < totalFee)) {
+            tenureRecordIdsToMarkPaid.push(fr.id);
+            fr.paid = true;
+            fr.amount_paid = totalFee;
+            fr.paid_at = fr.paid_at || (m.join_date ? `${m.join_date}T12:00:00.000Z` : now.toISOString());
+          }
+        } else {
           // If after tenure and not collected manually via collect modal, it must be unpaid
           if (fr.collected_by == null && (fr.paid || Number(fr.amount_paid) > 0)) {
             staleRecordIds.push(fr.id);
@@ -782,12 +836,88 @@ export default function MembersPage() {
         return true;
       });
 
-      // Background cleanup of stale records in database
+      // Ensure every month within a paid tenure has a record in reconciledFees
+      const missingTenureRecordsToInsert: any[] = [];
+      const existingKeySet = new Set(reconciledFees.map((fr: any) => `${fr.member_id}_${fr.period_month}`));
+
+      for (const m of memberData) {
+        if (!m.join_date) continue;
+        const [jY, jM] = m.join_date.split('-').map(Number);
+        if (!jY || !jM) continue;
+
+        const tenure = Math.max(1, Number(m.tenure_months) || 1);
+        const monthlyRate = Number(m.monthly_fee) || 0;
+        const trainingFee = Number(m.training_fees) || 0;
+        const totalFee = monthlyRate + trainingFee;
+        const totalTenureFee = monthlyRate * tenure + trainingFee;
+        const memberPaid = Number(m.amount_paid) || 0;
+        const isTenurePaid = (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+
+        if (!isTenurePaid) continue;
+
+        const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
+        let cursor = new Date(jY, jM - 1, 1);
+
+        while (cursor <= lastTenureDate) {
+          const y = cursor.getFullYear();
+          const mon = cursor.getMonth() + 1;
+          const pMonth = `${y}-${String(mon).padStart(2, '0')}-01`;
+          const key = `${m.id}_${pMonth}`;
+
+          if (!existingKeySet.has(key)) {
+            const lastDay = new Date(y, mon, 0).getDate();
+            const pEnd = `${y}-${String(mon).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+            const paidAtStr = m.join_date ? `${m.join_date}T12:00:00.000Z` : new Date().toISOString();
+
+            const newRec: FeeRecord = {
+              id: `v_${m.id}_${pMonth}`,
+              member_id: m.id,
+              amount: totalFee,
+              amount_paid: totalFee,
+              discount: 0,
+              period_month: pMonth,
+              period_end: pEnd,
+              paid: true,
+              paid_at: paidAtStr,
+              payment_method: 'cash',
+              collected_by: null,
+            };
+            reconciledFees.push(newRec);
+            existingKeySet.add(key);
+
+            missingTenureRecordsToInsert.push({
+              member_id: m.id,
+              amount: totalFee,
+              amount_paid: totalFee,
+              discount: 0,
+              period_month: pMonth,
+              period_end: pEnd,
+              paid: true,
+              paid_at: paidAtStr,
+              payment_method: 'cash',
+            });
+          }
+          cursor.setMonth(cursor.getMonth() + 1);
+        }
+      }
+
+      // Background cleanup & sync of records in database
       if (staleRecordIds.length > 0) {
         supabase.from('fee_records').update({ paid: false, amount_paid: 0, paid_at: null }).in('id', staleRecordIds).then();
       }
       if (priorRecordIds.length > 0) {
         supabase.from('fee_records').delete().in('id', priorRecordIds).then();
+      }
+      if (tenureRecordIdsToMarkPaid.length > 0) {
+        for (const tid of tenureRecordIdsToMarkPaid) {
+          const rec = (feeData || []).find((f: any) => f.id === tid);
+          const m = rec ? memberMap.get(rec.member_id) : null;
+          const fee = m ? (Number(m.monthly_fee) || 0) + (Number(m.training_fees) || 0) : (rec?.amount || 0);
+          supabase.from('fee_records').update({ paid: true, amount_paid: fee }).eq('id', tid).then();
+        }
+      }
+      if (missingTenureRecordsToInsert.length > 0) {
+        supabase.from('fee_records').upsert(missingTenureRecordsToInsert, { onConflict: 'member_id,period_month', ignoreDuplicates: true }).then();
       }
 
       return reconciledFees as FeeRecord[];
@@ -809,8 +939,28 @@ export default function MembersPage() {
   // Map: memberId -> all unpaid fee records
   const memberUnpaidFees = useMemo(() => {
     const map: Record<string, FeeRecord[]> = {};
+    const memberMap = new Map(members.map(m => [m.id, m]));
+
     allFeeRecords.forEach(fr => {
       if (!fr.paid) {
+        const m = memberMap.get(fr.member_id);
+        if (m && m.join_date) {
+          const [jY, jM] = m.join_date.split('-').map(Number);
+          if (jY && jM) {
+            const tenure = Math.max(1, Number(m.tenure_months) || 1);
+            const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
+            const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+            const monthlyRate = Number(m.monthly_fee) || 0;
+            const trainingFee = Number(m.training_fees) || 0;
+            const totalFee = monthlyRate + trainingFee;
+            const totalTenureFee = monthlyRate * tenure + trainingFee;
+            const memberPaid = Number(m.amount_paid) || 0;
+            const isTenurePaid = (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+            if (fr.period_month <= lastTenurePeriod && isTenurePaid) {
+              return;
+            }
+          }
+        }
         if (!map[fr.member_id]) map[fr.member_id] = [];
         map[fr.member_id].push(fr);
       }
@@ -818,7 +968,7 @@ export default function MembersPage() {
     // Sort each member's unpaid records oldest first
     Object.values(map).forEach(arr => arr.sort((a, b) => a.period_month.localeCompare(b.period_month)));
     return map;
-  }, [allFeeRecords]);
+  }, [allFeeRecords, members]);
 
   // Map assigned active clients count per trainer
   const trainerClientCounts = useMemo(() => {
@@ -1895,12 +2045,34 @@ export default function MembersPage() {
     const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
     const isPastTenure = targetPeriodMonth > lastTenurePeriod;
 
+    const monthlyRate = Number(m.monthly_fee) || 0;
+    const trainingFee = Number(m.training_fees) || 0;
+    const totalFee = monthlyRate + trainingFee;
+    const totalTenureFee = monthlyRate * tenureMonths + trainingFee;
+    const memberPaid = Number(m.amount_paid) || 0;
+    const isTenurePaid = !isPastTenure && (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+
+    // Exclude any unpaid records that are covered by the tenure package
+    if (isTenurePaid) {
+      unpaidFees = unpaidFees.filter(fr => fr.period_month > lastTenurePeriod);
+    }
+
+    const unpaidMonths = unpaidFees.length;
+
+    // If within tenure and member paid the tenure package, they are 100% PAID!
+    if (isTenurePaid) {
+      return {
+        status: 'paid' as const,
+        percentage: 100,
+        label: feeNotDueYet && !memberCurrentFee[m.id]?.paid ? 'Not Due Yet' : '100% Paid',
+        unpaidMonths,
+        totalDue: unpaidFees.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0),
+      };
+    }
+
     // If target period is past tenure and has no separate manual fee collection, it is unpaid
     const isSeparatelyCollected = currentFee && (currentFee.collected_by != null || currentFee.payment_method === 'manual');
     const isCurrentPaid = currentFee && (isPastTenure ? (isSeparatelyCollected && currentFee.paid) : currentFee.paid);
-
-    const unpaidMonths = unpaidFees.length;
-    const totalFee = (m.monthly_fee || 0) + (m.training_fees || 0);
 
     if (!currentFee) {
       // No fee record for the relevant month — treated as unpaid
