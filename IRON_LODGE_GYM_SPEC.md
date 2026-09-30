@@ -1022,7 +1022,7 @@ After setting up Supabase, create these users via Supabase Auth dashboard or a s
 // seed.ts (run once)
 import { createClient } from '@supabase/supabase-js';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Create admin user
 const { data: admin } = await supabase.auth.admin.createUser({
@@ -1055,8 +1055,8 @@ if (staff.user) {
 
 ```env
 # .env.local
-SUPABASE_URL=your_supabase_project_url
-SUPABASE_ANON_KEY=your_supabase_anon_key
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_NEXT_PUBLIC_SUPABASE_ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key  # server-side only
 ```
 

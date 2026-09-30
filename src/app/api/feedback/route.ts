@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
 function getAdminClient() {
-  const url = process.env.SUPABASE_URL!;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
   if (key && key !== 'your_service_role_key') {
     return createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
@@ -36,8 +36,8 @@ export async function POST(request: Request) {
     // Initialize clients
     const adminClient = getAdminClient();
     const anonClient = createClient(
-      process.env.SUPABASE_URL!,
-      process.env.SUPABASE_ANON_KEY!
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
     );
     const dbClient = adminClient || anonClient;
 
