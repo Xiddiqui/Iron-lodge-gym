@@ -10,6 +10,8 @@
  *
  * The device identifies members by their "Pin" (User ID), which is mapped
  * to the member's member_number field in the database.
+ * 
+ * just
  */
 
 import { NextResponse } from 'next/server';
