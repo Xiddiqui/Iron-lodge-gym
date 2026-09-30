@@ -10,7 +10,8 @@
  *   ✅ Check-In Alert  — shows member name, time, fee status
  *   ⚠️ Duplicate Alert — warns staff that member already checked in today
  *
- * Popups auto-dismiss: check-in after 6s, duplicate after 10s.
+ * Popups stay up for 30s once this gym tab is visible. If the tab is in the
+ * background, the card waits and a system notification is shown instead.
  * Multiple popups stack gracefully with framer-motion.
  *
  * 🔊 Voice Notifications:
@@ -20,6 +21,7 @@
  */
 
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { supabase } from '@/lib/supabase/client';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Fingerprint, AlertTriangle, X, CheckCircle, DollarSign, Clock, Volume2, VolumeX } from 'lucide-react';
@@ -476,6 +478,44 @@ function DuplicateAlert({
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider
 // ─────────────────────────────────────────────────────────────────────────────
+const ALERT_VISIBLE_MS = 30000;
+const RECENT_WINDOW_MS = 90_000;
+
+function gymTabIsInBackground(): boolean {
+  if (typeof document === 'undefined') return false;
+  return document.hidden || !document.hasFocus();
+}
+
+/** OS notification so staff see the alert while another browser tab is focused. */
+function showSystemNotification(notification: BiometricNotification) {
+  if (typeof window === 'undefined' || !('Notification' in window)) return;
+  if (Notification.permission !== 'granted') return;
+  if (!gymTabIsInBackground()) return;
+
+  const title =
+    notification.type === 'duplicate'
+      ? `Duplicate scan — ${notification.member_name}`
+      : `Check-in — ${notification.member_name}`;
+  const body =
+    notification.type === 'duplicate'
+      ? `${notification.member_name} is already checked in today.`
+      : `${notification.member_name} has checked in.`;
+
+  try {
+    const note = new Notification(title, {
+      body,
+      tag: notification.id,
+      requireInteraction: notification.type === 'duplicate',
+    });
+    note.onclick = () => {
+      window.focus();
+      note.close();
+    };
+  } catch {
+    // Some browsers block Notification outside a user gesture
+  }
+}
+
 export function BiometricAlertsProvider({
   children,
 }: {
@@ -483,13 +523,27 @@ export function BiometricAlertsProvider({
 }) {
   const [alerts, setAlerts] = useState<BiometricNotification[]>([]);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [mounted, setMounted] = useState(false);
   const voiceEnabledRef = useRef(true);
   const seenIdsRef = useRef<Set<string>>(new Set());
+  const announcedIdsRef = useRef<Set<string>>(new Set());
+  const waitingToDismissRef = useRef<Set<string>>(new Set());
+  const dismissTimersRef = useRef<Map<string, number>>(new Map());
+  const baseTitleRef = useRef<string | null>(null);
+  const alertsRef = useRef<BiometricNotification[]>([]);
+
+  useEffect(() => {
+    alertsRef.current = alerts;
+  }, [alerts]);
 
   // Keep ref in sync so the realtime callback always reads the latest value
   useEffect(() => {
     voiceEnabledRef.current = voiceEnabled;
   }, [voiceEnabled]);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Preload speech synthesis voices
   useEffect(() => {
@@ -501,41 +555,110 @@ export function BiometricAlertsProvider({
     }
   }, []);
 
+  // Browser notifications need a click once. After that they work from a background tab.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    const ask = () => {
+      if (Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+      window.removeEventListener('pointerdown', ask);
+    };
+    window.addEventListener('pointerdown', ask);
+    return () => window.removeEventListener('pointerdown', ask);
+  }, []);
+
   const dismissAlert = useCallback((id: string) => {
+    waitingToDismissRef.current.delete(id);
+    const timer = dismissTimersRef.current.get(id);
+    if (timer) {
+      window.clearTimeout(timer);
+      dismissTimersRef.current.delete(id);
+    }
     setAlerts((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
+  const announce = useCallback((notification: BiometricNotification) => {
+    if (announcedIdsRef.current.has(notification.id)) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    if (!voiceEnabledRef.current) {
+      announcedIdsRef.current.add(notification.id);
+      return;
+    }
+    announcedIdsRef.current.add(notification.id);
+
+    if (notification.type === 'checkin') {
+      if (notification.fee_status === 'overdue' || notification.fee_status === 'due') {
+        playWarningTone();
+      } else {
+        playCheckinChime();
+      }
+    } else {
+      playWarningTone();
+    }
+    speakNotification(notification);
+  }, []);
+
+  const scheduleDismiss = useCallback((id: string) => {
+    if (dismissTimersRef.current.has(id)) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    waitingToDismissRef.current.delete(id);
+    const timer = window.setTimeout(() => {
+      dismissTimersRef.current.delete(id);
+      setAlerts((prev) => prev.filter((a) => a.id !== id));
+    }, ALERT_VISIBLE_MS);
+    dismissTimersRef.current.set(id, timer);
+  }, []);
+
   const handleNewNotification = useCallback((notification: BiometricNotification) => {
-    if (seenIdsRef.current.has(notification.id)) return;
+    if (!notification?.id || seenIdsRef.current.has(notification.id)) return;
     seenIdsRef.current.add(notification.id);
+
+    waitingToDismissRef.current.add(notification.id);
 
     setAlerts((prev) => {
       const updated = [...prev, notification];
       return updated.slice(-5);
     });
 
-    // Audio & Voice
-    if (voiceEnabledRef.current) {
-      if (notification.type === 'checkin') {
-        if (notification.fee_status === 'overdue' || notification.fee_status === 'due') {
-          playWarningTone();
-        } else {
-          playCheckinChime();
-        }
-      } else {
-        playWarningTone();
-      }
-      speakNotification(notification);
+    showSystemNotification(notification);
+
+    if (typeof document !== 'undefined' && gymTabIsInBackground()) {
+      if (baseTitleRef.current == null) baseTitleRef.current = document.title;
+      document.title =
+        notification.type === 'duplicate'
+          ? `⚠ Duplicate — ${notification.member_name}`
+          : `✓ Check-in — ${notification.member_name}`;
     }
 
-    // Auto-dismiss after 30 seconds
-    setTimeout(() => {
-      dismissAlert(notification.id);
-    }, 30000);
-  }, [dismissAlert]);
+    announce(notification);
+
+    // Hold the card until this gym tab is actually on screen, then keep it for 30s
+    scheduleDismiss(notification.id);
+  }, [announce, scheduleDismiss]);
+
+  const handleNewNotificationRef = useRef(handleNewNotification);
+  useEffect(() => {
+    handleNewNotificationRef.current = handleNewNotification;
+  }, [handleNewNotification]);
+
+  const pollRecent = useCallback(async () => {
+    const since = new Date(Date.now() - RECENT_WINDOW_MS).toISOString();
+    const { data, error } = await supabase
+      .from('biometric_notifications')
+      .select('id, type, member_id, member_name, member_photo_url, member_number, fee_status, fee_amount_due, check_in_time, existing_check_in, created_at')
+      .gte('created_at', since)
+      .order('created_at', { ascending: true })
+      .limit(20);
+
+    if (error || !data) return;
+    for (const row of data) {
+      handleNewNotificationRef.current(row as BiometricNotification);
+    }
+  }, []);
 
   useEffect(() => {
-    // Supabase Realtime WebSocket subscription — pushes new check-in/duplicate events instantly
+    // Instant delivery while the socket is connected
     const channel = supabase
       .channel('biometric-notifications-alerts')
       .on(
@@ -546,24 +669,54 @@ export function BiometricAlertsProvider({
           table: 'biometric_notifications',
         },
         (payload) => {
-          handleNewNotification(payload.new as BiometricNotification);
+          handleNewNotificationRef.current(payload.new as BiometricNotification);
         }
       )
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
+    // Backup if Realtime misses the insert (other page, background tab, dropped socket)
+    void pollRecent();
+    const pollTimer = window.setInterval(() => {
+      void pollRecent();
+    }, 4000);
+
+    const onVisible = () => {
+      if (document.hidden) return;
+      if (baseTitleRef.current != null) {
+        document.title = baseTitleRef.current;
+        baseTitleRef.current = null;
+      }
+      for (const id of waitingToDismissRef.current) {
+        scheduleDismiss(id);
+      }
+      for (const alert of alertsRef.current) {
+        announce(alert);
+        scheduleDismiss(alert.id);
+      }
+      void pollRecent();
     };
-  }, [handleNewNotification]);
 
-  return (
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+
+    return () => {
+      window.clearInterval(pollTimer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+      supabase.removeChannel(channel);
+      for (const timer of dismissTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      dismissTimersRef.current.clear();
+    };
+  }, [announce, pollRecent, scheduleDismiss]);
+
+  const overlay = (
     <>
-      {children}
-
       {/* Voice toggle button — bottom-right corner */}
       <button
         onClick={() => setVoiceEnabled((v) => !v)}
-        className={`fixed bottom-4 right-4 z-[201] h-11 w-11 rounded-full grid place-items-center shadow-2xl transition-all duration-200 border ${
+        className={`fixed bottom-4 right-4 z-[10001] h-11 w-11 rounded-full grid place-items-center shadow-2xl transition-all duration-200 border ${
           voiceEnabled
             ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/30'
             : 'bg-red-500/20 border-red-500/40 text-red-400 hover:bg-red-500/30'
@@ -573,9 +726,9 @@ export function BiometricAlertsProvider({
         {voiceEnabled ? <Volume2 className="h-5 w-5" /> : <VolumeX className="h-5 w-5" />}
       </button>
 
-      {/* Fixed alert portal — renders on top of all page content */}
+      {/* Fixed alert portal — any authenticated page, above dialogs */}
       <div
-        className="fixed top-5 right-5 z-[200] flex flex-col gap-3 pointer-events-none"
+        className="fixed top-5 right-5 z-[10000] flex flex-col gap-3 pointer-events-none"
         style={{ maxWidth: '380px', width: 'calc(100vw - 2.5rem)' }}
       >
         <AnimatePresence mode="sync">
@@ -603,6 +756,13 @@ export function BiometricAlertsProvider({
           ))}
         </AnimatePresence>
       </div>
+    </>
+  );
+
+  return (
+    <>
+      {children}
+      {mounted ? createPortal(overlay, document.body) : null}
     </>
   );
 }

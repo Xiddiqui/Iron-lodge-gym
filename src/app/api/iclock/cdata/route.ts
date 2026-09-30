@@ -223,10 +223,15 @@ async function processPunch({
     ? member.photo_url
     : null;
 
-  // Determine the UTC date for this punch (used for "same day" dedup check)
-  const punchDateUTC = punchTime.toISOString().slice(0, 10); // "YYYY-MM-DD"
-  const dayStart = `${punchDateUTC}T00:00:00.000Z`;
-  const dayEnd = `${punchDateUTC}T23:59:59.999Z`;
+  // Same calendar day in Pakistan (UTC+5), not UTC midnight
+  const pktDate = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Karachi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(punchTime);
+  const dayStart = new Date(`${pktDate}T00:00:00+05:00`).toISOString();
+  const dayEnd = new Date(`${pktDate}T23:59:59.999+05:00`).toISOString();
 
   // Check for existing attendance on this UTC date
   const { data: existing } = await adminClient
@@ -247,7 +252,7 @@ async function processPunch({
     // Member already has attendance today — send warning notification
     console.log(`[Biometric] Duplicate scan for ${member.full_name} (already in at ${existing.check_in})`);
 
-    await adminClient.from('biometric_notifications').insert({
+    const { error: dupNotifErr } = await adminClient.from('biometric_notifications').insert({
       type: 'duplicate',
       member_id: member.id,
       member_name: member.full_name,
@@ -258,6 +263,9 @@ async function processPunch({
       check_in_time: punchTime.toISOString(),
       existing_check_in: existing.check_in,
     });
+    if (dupNotifErr) {
+      console.error('[Biometric] Duplicate notification insert failed:', dupNotifErr.message);
+    }
   } else {
     // ── NEW CHECK-IN ────────────────────────────────────────────────────────
     console.log(`[Biometric] New check-in for ${member.full_name} at ${punchTime.toISOString()}`);
@@ -292,7 +300,7 @@ async function processPunch({
       if (attErr.code === '23505') {
         // Unique constraint — race condition duplicate, treat as duplicate notification
         console.warn(`[Biometric] Race condition duplicate for member ${member.id}`);
-        await adminClient.from('biometric_notifications').insert({
+        const { error: raceNotifErr } = await adminClient.from('biometric_notifications').insert({
           type: 'duplicate',
           member_id: member.id,
           member_name: member.full_name,
@@ -303,6 +311,9 @@ async function processPunch({
           check_in_time: punchTime.toISOString(),
           existing_check_in: null,
         });
+        if (raceNotifErr) {
+          console.error('[Biometric] Duplicate notification insert failed:', raceNotifErr.message);
+        }
       } else {
         throw attErr;
       }
@@ -350,7 +361,7 @@ async function processPunch({
     }
 
     // Send check-in notification for real-time popup on all clients
-    await adminClient.from('biometric_notifications').insert({
+    const { error: checkinNotifErr } = await adminClient.from('biometric_notifications').insert({
       type: 'checkin',
       member_id: member.id,
       member_name: member.full_name,
@@ -360,6 +371,9 @@ async function processPunch({
       fee_amount_due: feeStatus.amountDue,
       check_in_time: punchTime.toISOString(),
     });
+    if (checkinNotifErr) {
+      console.error('[Biometric] Check-in notification insert failed:', checkinNotifErr.message);
+    }
   }
 }
 
