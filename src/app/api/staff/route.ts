@@ -40,7 +40,7 @@ export async function POST(request: Request) {
       if (isServiceKeyValid) {
         // Use admin client to create user with email_confirm: true (no email verification required)
         const supabaseAdmin = createClient(
-          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.SUPABASE_URL!,
           serviceRoleKey,
           { auth: { autoRefreshToken: false, persistSession: false } }
         );
@@ -257,7 +257,7 @@ export async function POST(request: Request) {
       }
 
       const supabaseAdmin = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_URL!,
         serviceRoleKey,
         { auth: { autoRefreshToken: false, persistSession: false } }
       );

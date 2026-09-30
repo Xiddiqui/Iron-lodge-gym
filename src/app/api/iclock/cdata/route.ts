@@ -19,7 +19,7 @@ import { createClient } from '@supabase/supabase-js';
 // Supabase admin client (bypasses RLS — only used server-side)
 // ─────────────────────────────────────────────────────────────────────────────
 function getAdminClient() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const url = process.env.SUPABASE_URL!;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
   if (!key || key === 'your_service_role_key') {
     throw new Error('SUPABASE_SERVICE_ROLE_KEY is not configured. Add the real key to .env.local');
