@@ -479,7 +479,7 @@ function DuplicateAlert({
 // Provider
 // ─────────────────────────────────────────────────────────────────────────────
 const ALERT_VISIBLE_MS = 30000;
-const RECENT_WINDOW_MS = 90_000;
+const MEMBER_BURST_MS = 90_000;
 
 function gymTabIsInBackground(): boolean {
   if (typeof document === 'undefined') return false;
@@ -504,8 +504,7 @@ function showSystemNotification(notification: BiometricNotification) {
   try {
     const note = new Notification(title, {
       body,
-      tag: notification.id,
-      requireInteraction: notification.type === 'duplicate',
+      tag: notification.member_id || notification.id,
     });
     note.onclick = () => {
       window.focus();
@@ -526,6 +525,7 @@ export function BiometricAlertsProvider({
   const [mounted, setMounted] = useState(false);
   const voiceEnabledRef = useRef(true);
   const seenIdsRef = useRef<Set<string>>(new Set());
+  const memberBurstRef = useRef<Map<string, number>>(new Map());
   const announcedIdsRef = useRef<Set<string>>(new Set());
   const waitingToDismissRef = useRef<Set<string>>(new Set());
   const dismissTimersRef = useRef<Map<string, number>>(new Map());
@@ -614,6 +614,13 @@ export function BiometricAlertsProvider({
     if (!notification?.id || seenIdsRef.current.has(notification.id)) return;
     seenIdsRef.current.add(notification.id);
 
+    // The device/bridge can emit the same finger many times. Show one card.
+    const memberKey = notification.member_id || notification.member_name;
+    const now = Date.now();
+    const lastShown = memberBurstRef.current.get(memberKey);
+    if (lastShown && now - lastShown < MEMBER_BURST_MS) return;
+    memberBurstRef.current.set(memberKey, now);
+
     waitingToDismissRef.current.add(notification.id);
 
     setAlerts((prev) => {
@@ -642,16 +649,20 @@ export function BiometricAlertsProvider({
     handleNewNotificationRef.current = handleNewNotification;
   }, [handleNewNotification]);
 
-  const pollRecent = useCallback(async () => {
-    const since = new Date(Date.now() - RECENT_WINDOW_MS).toISOString();
+  const cursorRef = useRef(new Date(Date.now() - 5000).toISOString());
+
+  const catchUp = useCallback(async () => {
+    const since = cursorRef.current;
     const { data, error } = await supabase
       .from('biometric_notifications')
       .select('id, type, member_id, member_name, member_photo_url, member_number, fee_status, fee_amount_due, check_in_time, existing_check_in, created_at')
-      .gte('created_at', since)
+      .gt('created_at', since)
       .order('created_at', { ascending: true })
-      .limit(20);
+      .limit(5);
 
-    if (error || !data) return;
+    if (error || !data?.length) return;
+    const newest = data[data.length - 1]?.created_at;
+    if (newest && newest > cursorRef.current) cursorRef.current = newest;
     for (const row of data) {
       handleNewNotificationRef.current(row as BiometricNotification);
     }
@@ -669,17 +680,16 @@ export function BiometricAlertsProvider({
           table: 'biometric_notifications',
         },
         (payload) => {
-          handleNewNotificationRef.current(payload.new as BiometricNotification);
+          const row = payload.new as BiometricNotification;
+          if (row.created_at && row.created_at > cursorRef.current) {
+            cursorRef.current = row.created_at;
+          }
+          handleNewNotificationRef.current(row);
         }
       )
       .subscribe();
 
-    // Backup if Realtime misses the insert (other page, background tab, dropped socket)
-    void pollRecent();
-    const pollTimer = window.setInterval(() => {
-      void pollRecent();
-    }, 4000);
-
+    // One catch-up when the gym tab becomes visible again. No repeating poll.
     const onVisible = () => {
       if (document.hidden) return;
       if (baseTitleRef.current != null) {
@@ -693,23 +703,20 @@ export function BiometricAlertsProvider({
         announce(alert);
         scheduleDismiss(alert.id);
       }
-      void pollRecent();
+      void catchUp();
     };
 
     document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onVisible);
 
     return () => {
-      window.clearInterval(pollTimer);
       document.removeEventListener('visibilitychange', onVisible);
-      window.removeEventListener('focus', onVisible);
       supabase.removeChannel(channel);
       for (const timer of dismissTimersRef.current.values()) {
         window.clearTimeout(timer);
       }
       dismissTimersRef.current.clear();
     };
-  }, [announce, pollRecent, scheduleDismiss]);
+  }, [announce, catchUp, scheduleDismiss]);
 
   const overlay = (
     <>

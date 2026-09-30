@@ -72,6 +72,18 @@ LOCK_PORT = 43719            # Dedicated localhost port for single-instance lock
 # In-memory queue for punches that failed to send due to internet outages
 pending_punch_queue = []
 queue_lock = threading.Lock()
+# Same finger is often read many times. Only forward one punch per member per minute.
+last_sent_at = {}
+SEND_COOLDOWN_SECONDS = 60
+
+
+def recently_forwarded(user_id: str) -> bool:
+    last = last_sent_at.get(str(user_id), 0)
+    return (time.time() - last) < SEND_COOLDOWN_SECONDS
+
+
+def mark_forwarded(user_id: str):
+    last_sent_at[str(user_id)] = time.time()
 
 
 def acquire_single_instance_lock():
@@ -143,6 +155,7 @@ def send_punch_to_webapp(server_url: str, user_id: str, timestamp_str: str) -> b
             timeout=10,
         )
         if res.status_code == 200:
+            mark_forwarded(user_id)
             print(f"[Web Sync] [OK] Punch synced for User #{user_id} -> {res.text.strip()}")
             return True
         else:
@@ -325,6 +338,8 @@ def main():
                         key = (str(rec.user_id), rec.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
                         if key not in seen_records:
                             seen_records.add(key)
+                            if recently_forwarded(str(rec.user_id)):
+                                continue
                             success = send_punch_to_webapp(server_url, str(rec.user_id), rec.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
                             if not success:
                                 queue_punch_for_retry(str(rec.user_id), rec.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
@@ -353,6 +368,8 @@ def main():
                         key = (user_id, timestamp_str)
                         if key not in seen_records:
                             seen_records.add(key)
+                            if recently_forwarded(user_id):
+                                continue
                             success = send_punch_to_webapp(server_url, user_id, timestamp_str)
                             if not success:
                                 queue_punch_for_retry(user_id, timestamp_str)
@@ -368,6 +385,8 @@ def main():
                                 key = (user_id, timestamp_str)
                                 if key not in seen_records:
                                     seen_records.add(key)
+                                    if recently_forwarded(user_id):
+                                        continue
                                     success = send_punch_to_webapp(server_url, user_id, timestamp_str)
                                     if not success:
                                         queue_punch_for_retry(user_id, timestamp_str)

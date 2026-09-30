@@ -157,6 +157,44 @@ export async function POST(request: Request) {
   });
 }
 
+// One popup per member per burst. The bridge often posts the same finger
+// many times in a few seconds; each post used to insert another alert.
+const ALERT_COOLDOWN_MS = 90_000;
+
+async function insertAlertOnce(
+  adminClient: ReturnType<typeof getAdminClient>,
+  row: {
+    type: 'checkin' | 'duplicate';
+    member_id: string;
+    member_name: string;
+    member_photo_url: string | null;
+    member_number: string | null;
+    fee_status: 'paid' | 'due' | 'overdue';
+    fee_amount_due: number;
+    check_in_time: string;
+    existing_check_in?: string | null;
+  }
+) {
+  const since = new Date(Date.now() - ALERT_COOLDOWN_MS).toISOString();
+  const { data: recent } = await adminClient
+    .from('biometric_notifications')
+    .select('id')
+    .eq('member_id', row.member_id)
+    .gte('created_at', since)
+    .limit(1)
+    .maybeSingle();
+
+  if (recent) {
+    console.log(`[Biometric] Suppressed repeat ${row.type} alert for ${row.member_name}`);
+    return;
+  }
+
+  const { error } = await adminClient.from('biometric_notifications').insert(row);
+  if (error) {
+    console.error(`[Biometric] ${row.type} notification insert failed:`, error.message);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // processPunch — Core business logic for a single fingerprint punch
 // ─────────────────────────────────────────────────────────────────────────────
@@ -252,7 +290,7 @@ async function processPunch({
     // Member already has attendance today — send warning notification
     console.log(`[Biometric] Duplicate scan for ${member.full_name} (already in at ${existing.check_in})`);
 
-    const { error: dupNotifErr } = await adminClient.from('biometric_notifications').insert({
+    await insertAlertOnce(adminClient, {
       type: 'duplicate',
       member_id: member.id,
       member_name: member.full_name,
@@ -263,9 +301,6 @@ async function processPunch({
       check_in_time: punchTime.toISOString(),
       existing_check_in: existing.check_in,
     });
-    if (dupNotifErr) {
-      console.error('[Biometric] Duplicate notification insert failed:', dupNotifErr.message);
-    }
   } else {
     // ── NEW CHECK-IN ────────────────────────────────────────────────────────
     console.log(`[Biometric] New check-in for ${member.full_name} at ${punchTime.toISOString()}`);
@@ -300,7 +335,7 @@ async function processPunch({
       if (attErr.code === '23505') {
         // Unique constraint — race condition duplicate, treat as duplicate notification
         console.warn(`[Biometric] Race condition duplicate for member ${member.id}`);
-        const { error: raceNotifErr } = await adminClient.from('biometric_notifications').insert({
+        await insertAlertOnce(adminClient, {
           type: 'duplicate',
           member_id: member.id,
           member_name: member.full_name,
@@ -311,9 +346,6 @@ async function processPunch({
           check_in_time: punchTime.toISOString(),
           existing_check_in: null,
         });
-        if (raceNotifErr) {
-          console.error('[Biometric] Duplicate notification insert failed:', raceNotifErr.message);
-        }
       } else {
         throw attErr;
       }
@@ -361,7 +393,7 @@ async function processPunch({
     }
 
     // Send check-in notification for real-time popup on all clients
-    const { error: checkinNotifErr } = await adminClient.from('biometric_notifications').insert({
+    await insertAlertOnce(adminClient, {
       type: 'checkin',
       member_id: member.id,
       member_name: member.full_name,
@@ -371,9 +403,6 @@ async function processPunch({
       fee_amount_due: feeStatus.amountDue,
       check_in_time: punchTime.toISOString(),
     });
-    if (checkinNotifErr) {
-      console.error('[Biometric] Check-in notification insert failed:', checkinNotifErr.message);
-    }
   }
 }
 
