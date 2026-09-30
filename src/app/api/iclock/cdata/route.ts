@@ -159,7 +159,7 @@ export async function POST(request: Request) {
 
 // One popup per member per burst. The bridge often posts the same finger
 // many times in a few seconds; each post used to insert another alert.
-const ALERT_COOLDOWN_MS = 90_000;
+const ALERT_COOLDOWN_MS = 8_000;
 
 async function insertAlertOnce(
   adminClient: ReturnType<typeof getAdminClient>,

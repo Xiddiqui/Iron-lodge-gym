@@ -479,7 +479,7 @@ function DuplicateAlert({
 // Provider
 // ─────────────────────────────────────────────────────────────────────────────
 const ALERT_VISIBLE_MS = 30000;
-const MEMBER_BURST_MS = 90_000;
+const MEMBER_BURST_MS = 8_000;
 
 function gymTabIsInBackground(): boolean {
   if (typeof document === 'undefined') return false;
@@ -689,7 +689,13 @@ export function BiometricAlertsProvider({
       )
       .subscribe();
 
-    // One catch-up when the gym tab becomes visible again. No repeating poll.
+    // Realtime can miss an insert. Poll only rows newer than the last one seen,
+    // so a scan still shows and the old backlog is not replayed.
+    void catchUp();
+    const pollTimer = window.setInterval(() => {
+      void catchUp();
+    }, 2000);
+
     const onVisible = () => {
       if (document.hidden) return;
       if (baseTitleRef.current != null) {
@@ -709,6 +715,7 @@ export function BiometricAlertsProvider({
     document.addEventListener('visibilitychange', onVisible);
 
     return () => {
+      window.clearInterval(pollTimer);
       document.removeEventListener('visibilitychange', onVisible);
       supabase.removeChannel(channel);
       for (const timer of dismissTimersRef.current.values()) {
