@@ -19,6 +19,7 @@ import {
   UserCheck, Shield, Coffee, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, UserX, AlertCircle, Wifi, Fingerprint, CheckCircle, Banknote, X, Trash2
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { formatDate } from '@/lib/format';
 
 // ─────────────────────────────────────────────────────────────────
 // Types
@@ -30,6 +31,68 @@ interface MemberFeeInfo {
   amountPaid?: number;
   totalAmount?: number;
   paidPercent?: number;
+  expiresOn?: string;
+  unpaidCheckIns?: number;
+}
+
+function karachiToday(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Karachi' });
+}
+
+function karachiDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Asia/Karachi' });
+}
+
+function daysBetweenDates(from: string, to: string): number {
+  const [fy, fm, fd] = from.split('-').map(Number);
+  const [ty, tm, td] = to.split('-').map(Number);
+  return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86400000);
+}
+
+function MembershipExpiryDetails({ expiresOn, unpaidCheckIns }: { expiresOn?: string; unpaidCheckIns?: number }) {
+  if (!expiresOn) return null;
+  const diff = daysBetweenDates(karachiToday(), expiresOn);
+
+  if (diff >= 0) {
+    const remainingLabel = diff === 0
+      ? 'Expires today'
+      : diff === 1
+        ? '1 day remaining'
+        : `${diff} days remaining`;
+    return (
+      <>
+        <span className="text-[10px] text-muted-foreground font-medium px-0.5 whitespace-nowrap">
+          Expires on {formatDate(expiresOn)}
+        </span>
+        <span className="text-[10px] text-emerald-400 font-medium px-0.5 whitespace-nowrap">
+          {remainingLabel}
+        </span>
+      </>
+    );
+  }
+
+  const overdue = Math.abs(diff);
+  const visits = unpaidCheckIns ?? 0;
+  const overdueLabel = overdue === 1
+    ? '1 day since membership expired'
+    : `${overdue} days since membership expired`;
+  const visitLabel = visits === 1
+    ? 'Checked in 1 time before paying'
+    : `Checked in ${visits} times before paying`;
+
+  return (
+    <>
+      <span className="text-[10px] text-red-400 font-semibold px-0.5 whitespace-nowrap">
+        Expired on {formatDate(expiresOn)}
+      </span>
+      <span className="text-[10px] text-red-400 font-medium px-0.5 whitespace-nowrap">
+        {overdueLabel}
+      </span>
+      <span className="text-[10px] text-red-300 font-medium px-0.5 whitespace-nowrap">
+        {visitLabel}
+      </span>
+    </>
+  );
 }
 
 export default function AttendancePage() {
@@ -91,6 +154,48 @@ export default function AttendancePage() {
   // ─────────────────────────────────────────────────────────────────
   // Compute fee status from member fee records & member profile
   // ─────────────────────────────────────────────────────────────────
+  const computeMembershipExpiry = (memberFees: any[], memberObj?: any): string | undefined => {
+    if (!memberObj?.join_date) return undefined;
+    const [jYear, jMonth, jDay] = String(memberObj.join_date).split('-').map(Number);
+    const joinDay = jDay || 1;
+
+    const paidRecords = (memberFees || []).filter(
+      (fr) => fr.paid || (Number(fr.amount_paid) >= Number(fr.amount) && Number(fr.amount) > 0)
+    );
+
+    const tenure = Math.max(1, Number(memberObj.tenure_months) || 1);
+    const monthlyRate = Number(memberObj.monthly_fee) || 0;
+    const trainingFee = Number(memberObj.training_fees) || 0;
+    const totalFee = monthlyRate + trainingFee;
+    const totalTenureFee = monthlyRate * tenure + trainingFee;
+    const memberPaid = Number(memberObj.amount_paid) || 0;
+    const isTenurePaid = tenure > 1 && (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+
+    let latestPeriod: string | null = null;
+    if (paidRecords.length > 0) {
+      const sorted = [...paidRecords].sort((a, b) => (a.period_month || '').localeCompare(b.period_month || ''));
+      latestPeriod = sorted[sorted.length - 1]?.period_month || null;
+    }
+
+    if (isTenurePaid && jYear && jMonth) {
+      const lastTenureDate = new Date(jYear, jMonth - 1 + tenure - 1, 1);
+      const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
+      if (!latestPeriod || lastTenurePeriod > latestPeriod) {
+        latestPeriod = lastTenurePeriod;
+      }
+    }
+
+    if (!latestPeriod) return memberObj.join_date;
+
+    const [lYear, lMonth] = latestPeriod.split('-').map(Number);
+    const nextMonthDate = new Date(lYear, lMonth, 1);
+    const nextYear = nextMonthDate.getFullYear();
+    const nextMonth = nextMonthDate.getMonth() + 1;
+    const daysInNextMonth = new Date(nextYear, nextMonth, 0).getDate();
+    const billingDay = Math.min(joinDay, daysInNextMonth);
+    return `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(billingDay).padStart(2, '0')}`;
+  };
+
   const computeMemberFeeStatus = (memberId: string, memberFees: any[], memberObj?: any): MemberFeeInfo => {
     const now = new Date();
     const currentDay = now.getDate();
@@ -98,6 +203,7 @@ export default function AttendancePage() {
     today.setHours(0, 0, 0, 0);
 
     const totalFee = ((memberObj?.monthly_fee || 0) + (memberObj?.training_fees || 0));
+    const expiresOn = computeMembershipExpiry(memberFees, memberObj);
 
     // Parse member join date to determine billing day
     const [jYear, jMonth, jDay] = (memberObj?.join_date || '').split('-').map(Number);
@@ -117,16 +223,16 @@ export default function AttendancePage() {
 
     // If within registration tenure and member paid registration amount
     if (activeCycleKey <= lastTenurePeriod && Number(memberObj?.amount_paid) >= totalFee && totalFee > 0) {
-      return { status: 'paid' };
+      return { status: 'paid', expiresOn };
     }
 
     if (!memberFees || memberFees.length === 0) {
       if (totalFee > 0) {
         // No fee records but fee exists — check if fee is not due yet
-        if (feeNotDueYet) return { status: 'paid' };
-        return { status: 'due', amountDue: totalFee, totalAmount: totalFee };
+        if (feeNotDueYet) return { status: 'paid', expiresOn };
+        return { status: 'due', amountDue: totalFee, totalAmount: totalFee, expiresOn };
       }
-      return { status: 'paid' };
+      return { status: 'paid', expiresOn };
     }
 
     // Find the fee record for the active billing cycle
@@ -134,7 +240,7 @@ export default function AttendancePage() {
 
     // If the active cycle fee record is marked fully paid
     if (activeFee && activeFee.paid) {
-      return { status: 'paid' };
+      return { status: 'paid', expiresOn };
     }
 
     // If active record exists with full payment via amount_paid
@@ -145,7 +251,7 @@ export default function AttendancePage() {
       const netDue = Math.max(0, feeAmount - discount - amountPaid);
 
       if (netDue <= 0) {
-        return { status: 'paid' };
+        return { status: 'paid', expiresOn };
       }
 
       // Partial payment
@@ -158,13 +264,14 @@ export default function AttendancePage() {
           amountPaid,
           totalAmount: feeAmount - discount,
           paidPercent,
+          expiresOn,
         };
       }
     }
 
     // If fee not due yet (before billing day) and no unpaid active cycle record
     if (feeNotDueYet && !activeFee) {
-      return { status: 'paid' };
+      return { status: 'paid', expiresOn };
     }
 
     // Check for overdue: past the period_end or past billing day + grace
@@ -184,6 +291,7 @@ export default function AttendancePage() {
       status: isOverdue ? 'overdue' : 'due',
       amountDue,
       totalAmount: feeAmount - discount,
+      expiresOn,
     };
   };
 
@@ -241,6 +349,44 @@ export default function AttendancePage() {
         memberIds.forEach((mId: string) => {
           feeMap[mId] = computeMemberFeeStatus(mId, feeRecordsByMember[mId] || [], memberMap[mId]);
         });
+
+        const todayStr = karachiToday();
+        const expiredIds = memberIds.filter((mId: string) => {
+          const expiresOn = feeMap[mId]?.expiresOn;
+          return !!expiresOn && expiresOn < todayStr;
+        });
+
+        if (expiredIds.length > 0) {
+          const earliest = expiredIds
+            .map((mId: string) => feeMap[mId].expiresOn as string)
+            .sort()[0];
+          const rangeStart = new Date(`${earliest}T00:00:00+05:00`);
+          rangeStart.setDate(rangeStart.getDate() - 1);
+
+          const { data: visits, error: visitErr } = await supabase
+            .from('attendance')
+            .select('member_id, check_in')
+            .in('member_id', expiredIds)
+            .gte('check_in', rangeStart.toISOString())
+            .limit(5000);
+
+          if (visitErr) {
+            console.error('Error loading unpaid check-ins:', visitErr);
+          }
+
+          const counts: Record<string, number> = {};
+          (visits || []).forEach((visit: any) => {
+            const expiresOn = feeMap[visit.member_id]?.expiresOn;
+            if (!expiresOn || !visit.check_in) return;
+            if (karachiDate(visit.check_in) >= expiresOn) {
+              counts[visit.member_id] = (counts[visit.member_id] || 0) + 1;
+            }
+          });
+
+          expiredIds.forEach((mId: string) => {
+            feeMap[mId].unpaidCheckIns = counts[mId] || 0;
+          });
+        }
 
         setMemberFeeStatuses(feeMap);
       } else {
@@ -627,14 +773,20 @@ export default function AttendancePage() {
       );
     }
 
-    const { status, amountDue, amountPaid, totalAmount, paidPercent } = feeInfo;
+    const { status, amountDue, amountPaid, paidPercent, expiresOn, unpaidCheckIns } = feeInfo;
+    const expiryDetails = (
+      <MembershipExpiryDetails expiresOn={expiresOn} unpaidCheckIns={unpaidCheckIns} />
+    );
 
     if (status === 'paid') {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-          <CheckCircle className="h-3.5 w-3.5" />
-          Fee Paid
-        </span>
+        <div className="flex flex-col gap-1 items-start">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+            <CheckCircle className="h-3.5 w-3.5" />
+            Fee Paid
+          </span>
+          {expiryDetails}
+        </div>
       );
     }
 
@@ -661,25 +813,32 @@ export default function AttendancePage() {
               />
             </div>
           )}
+          {expiryDetails}
         </div>
       );
     }
 
     if (status === 'overdue') {
       return (
-        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-500/15 text-red-400 border border-red-500/30">
-          <AlertCircle className="h-3.5 w-3.5" />
-          Overdue {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
-        </span>
+        <div className="flex flex-col gap-1 items-start">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-500/15 text-red-400 border border-red-500/30">
+            <AlertCircle className="h-3.5 w-3.5" />
+            Overdue {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
+          </span>
+          {expiryDetails}
+        </div>
       );
     }
 
     // due
     return (
-      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
-        <Clock className="h-3.5 w-3.5" />
-        Fee Due {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
-      </span>
+      <div className="flex flex-col gap-1 items-start">
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+          <Clock className="h-3.5 w-3.5" />
+          Fee Due {amountDue ? `(PKR ${amountDue.toLocaleString()})` : ''}
+        </span>
+        {expiryDetails}
+      </div>
     );
   };
   // ─────────────────────────────────────────────────────────────────
