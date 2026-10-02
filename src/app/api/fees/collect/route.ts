@@ -10,7 +10,47 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { feeIds, advanceRecords, amountPaid, discount, paymentMethod, paidAt, paid_at } = body;
+  const { feeIds, advanceRecords, amountPaid, discount, paymentMethod, paidAt, paid_at, membership, feeAmountOverrides } = body;
+
+  if (membership?.memberId) {
+    const tenureMonths = Math.max(1, Number(membership.tenureMonths) || 1);
+    const trainingFees = Math.max(0, Number(membership.trainingFees) || 0);
+
+    // Keep already-collected months collected if the plan length changes.
+    await supabase
+      .from('fee_records')
+      .update({ collected_by: user.id })
+      .eq('member_id', membership.memberId)
+      .eq('paid', true)
+      .is('collected_by', null);
+
+    const { error: memberErr } = await supabase
+      .from('members')
+      .update({
+        tenure_months: tenureMonths,
+        training_fees: trainingFees,
+      })
+      .eq('id', membership.memberId);
+
+    if (memberErr) {
+      return NextResponse.json({ error: `Failed to update membership plan: ${memberErr.message}` }, { status: 500 });
+    }
+  }
+
+  if (Array.isArray(feeAmountOverrides)) {
+    for (const override of feeAmountOverrides) {
+      if (!override?.id || String(override.id).startsWith('v_')) continue;
+      const nextAmount = Number(override.amount);
+      if (!Number.isFinite(nextAmount) || nextAmount < 0) continue;
+      const { error: amountErr } = await supabase
+        .from('fee_records')
+        .update({ amount: nextAmount })
+        .eq('id', override.id);
+      if (amountErr) {
+        return NextResponse.json({ error: `Failed to update fee amount: ${amountErr.message}` }, { status: 500 });
+      }
+    }
+  }
 
   const rawPaidAt = paidAt || paid_at;
   let paymentTimestamp: string;
@@ -53,6 +93,12 @@ export async function POST(request: Request) {
         .maybeSingle();
 
       if (existing) {
+        if (adv.amount != null && Number.isFinite(Number(adv.amount))) {
+          await supabase
+            .from('fee_records')
+            .update({ amount: Number(adv.amount) })
+            .eq('id', existing.id);
+        }
         if (!allFeeIds.includes(existing.id)) {
           allFeeIds.push(existing.id);
         }

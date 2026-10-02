@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Switch } from '@/components/ui/switch';
 import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, CalendarPlus, CalendarCheck, Zap, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Fingerprint } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { normalizeImageSrc, compressImageFile, compressDataUrl } from '@/lib/image-utils';
@@ -512,6 +513,49 @@ function getNextAdvancePeriods(
   return periods;
 }
 
+const PLAN_MONTH_OPTIONS = [1, 3, 6] as const;
+
+function normalizePlanMonths(tenure: number | null | undefined): number {
+  const months = Math.max(1, Number(tenure) || 1);
+  if ((PLAN_MONTH_OPTIONS as readonly number[]).includes(months)) return months;
+  if (months >= 6) return 6;
+  if (months >= 3) return 3;
+  return 1;
+}
+
+// Package price matches member registration: gym fee × months, training added once.
+function quotePaymentCycles(
+  member: Member,
+  unpaidFees: FeeRecord[],
+  advancePeriods: AdvancePeriod[],
+  includeTraining: boolean,
+  trainingAmount: number
+) {
+  const monthly = Number(member.monthly_fee) || 0;
+  const training = includeTraining ? Math.max(0, trainingAmount) : 0;
+  let trainingLeft = training;
+
+  const unpaidPriced = unpaidFees.map((fr) => {
+    const amount = monthly + trainingLeft;
+    trainingLeft = 0;
+    const paid = Number(fr.amount_paid) || 0;
+    const remaining = Math.max(0, amount - paid);
+    return { ...fr, pricedAmount: amount, pricedPaid: paid, pricedRemaining: remaining };
+  });
+
+  const advancePriced = advancePeriods.map((adv) => {
+    const amount = monthly + trainingLeft;
+    trainingLeft = 0;
+    return { ...adv, amount };
+  });
+
+  const total =
+    unpaidPriced.reduce((sum, fr) => sum + fr.pricedRemaining, 0) +
+    advancePriced.reduce((sum, adv) => sum + adv.amount, 0);
+
+  return { monthly, training, unpaidPriced, advancePriced, total };
+}
+
 function getTodayLocalDateString(): string {
   const d = new Date();
   const year = d.getFullYear();
@@ -652,6 +696,10 @@ export default function MembersPage() {
   const [payAmountReceived, setPayAmountReceived] = useState('');
   const [payMethod, setPayMethod] = useState('cash');
   const [payDate, setPayDate] = useState(() => getTodayLocalDateString());
+  const [payPlanMonths, setPayPlanMonths] = useState(1);
+  const [payIncludeTraining, setPayIncludeTraining] = useState(false);
+  const [payTrainingAmount, setPayTrainingAmount] = useState('0');
+  const [payPlanTouched, setPayPlanTouched] = useState(false);
 
   // Announcements State
   const [announcementOpen, setAnnouncementOpen] = useState(false);
@@ -1643,6 +1691,8 @@ export default function MembersPage() {
       discount,
       paymentMethod,
       paidAt,
+      membership,
+      feeAmountOverrides,
     }: {
       feeIds: string[];
       advanceRecords?: Array<{
@@ -1655,11 +1705,26 @@ export default function MembersPage() {
       discount: number;
       paymentMethod: string;
       paidAt?: string;
+      membership?: {
+        memberId: string;
+        tenureMonths: number;
+        trainingFees: number;
+      };
+      feeAmountOverrides?: Array<{ id: string; amount: number }>;
     }) => {
       const res = await fetch('/api/fees/collect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ feeIds, advanceRecords, amountPaid, discount, paymentMethod, paidAt }),
+        body: JSON.stringify({
+          feeIds,
+          advanceRecords,
+          amountPaid,
+          discount,
+          paymentMethod,
+          paidAt,
+          membership,
+          feeAmountOverrides,
+        }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -1677,6 +1742,10 @@ export default function MembersPage() {
       setPayModalMember(null);
       setPayModalIsAdvance(false);
       setPayModalAdvanceMonths(0);
+      setPayPlanMonths(1);
+      setPayIncludeTraining(false);
+      setPayTrainingAmount('0');
+      setPayPlanTouched(false);
     },
     onError: (e) => toast.error(e.message),
   });
@@ -1904,11 +1973,22 @@ export default function MembersPage() {
     setDialogOpen(true);
   }
 
+  function resetPayPlan(m: Member) {
+    const plan = normalizePlanMonths(m.tenure_months);
+    const hasTraining = (Number(m.training_fees) || 0) > 0;
+    setPayPlanMonths(plan);
+    setPayIncludeTraining(hasTraining);
+    setPayTrainingAmount(String(Number(m.training_fees) || 0));
+    setPayPlanTouched(false);
+    return { plan, hasTraining, trainingAmount: String(Number(m.training_fees) || 0) };
+  }
+
   // Open Payment Modal
   function openPayModal(m: Member) {
     setPayModalMember(m);
     setPayModalIsAdvance(false);
     setPayModalAdvanceMonths(0);
+    resetPayPlan(m);
     setPayDiscount('0');
     setPayAmountReceived('');
     setPayMethod('cash');
@@ -1918,6 +1998,7 @@ export default function MembersPage() {
 
   // Open Advance Payment Modal
   function openAdvancePayModal(m: Member) {
+    resetPayPlan(m);
     setPayModalMember(m);
     setPayModalIsAdvance(true);
     setPayModalAdvanceMonths(1);
@@ -1937,17 +2018,30 @@ export default function MembersPage() {
     return getNextAdvancePeriods(payModalMember, allFeeRecords, payModalAdvanceMonths);
   }, [payModalMember, payModalAdvanceMonths, allFeeRecords]);
 
-  const payModalAdvanceTotal = useMemo(() => {
-    return payModalAdvancePeriods.reduce((sum, p) => sum + p.amount, 0);
-  }, [payModalAdvancePeriods]);
+  const payTrainingAmountNum = Math.max(0, Number(payTrainingAmount) || 0);
 
-  const payModalTotalDue = useMemo(() => {
+  const payQuote = useMemo(() => {
+    if (!payModalMember) return null;
+    return quotePaymentCycles(
+      payModalMember,
+      payModalUnpaidFees,
+      payModalAdvancePeriods,
+      payIncludeTraining,
+      payTrainingAmountNum
+    );
+  }, [payModalMember, payModalUnpaidFees, payModalAdvancePeriods, payIncludeTraining, payTrainingAmountNum]);
+
+  const payModalOriginalDue = useMemo(() => {
     const unpaidSum = payModalUnpaidFees.reduce((sum, fr) => {
       const remaining = (Number(fr.amount) || 0) - (Number(fr.amount_paid) || 0);
       return sum + Math.max(0, remaining);
     }, 0);
-    return unpaidSum + payModalAdvanceTotal;
-  }, [payModalUnpaidFees, payModalAdvanceTotal]);
+    const advanceSum = payModalAdvancePeriods.reduce((sum, p) => sum + p.amount, 0);
+    return unpaidSum + advanceSum;
+  }, [payModalUnpaidFees, payModalAdvancePeriods]);
+
+  const payModalTotalDue = payPlanTouched ? (payQuote?.total || 0) : payModalOriginalDue;
+  const payModalCycleCount = (payQuote?.unpaidPriced.length || 0) + (payQuote?.advancePriced.length || 0);
 
   const payModalDiscountNum = Math.max(0, Number(payDiscount) || 0);
   const payModalReceivedNum = Number(payAmountReceived) || 0;
@@ -1963,10 +2057,63 @@ export default function MembersPage() {
     return getMemberNextDueDate(payModalMember, allFeeRecords);
   }, [payModalMember, payModalAdvancePeriods, allFeeRecords]);
 
+  function advanceMonthsForPlan(member: Member, planMonths: number, isAdvance: boolean) {
+    const unpaidCount = (memberUnpaidFees[member.id] || []).length;
+    return Math.max(isAdvance ? 1 : 0, planMonths - unpaidCount);
+  }
+
+  function fillReceivedFor(member: Member, planMonths: number, includeTraining: boolean, trainingStr: string, advanceMonths: number) {
+    const unpaid = memberUnpaidFees[member.id] || [];
+    const advances = getNextAdvancePeriods(member, allFeeRecords, advanceMonths);
+    const quote = quotePaymentCycles(member, unpaid, advances, includeTraining, Math.max(0, Number(trainingStr) || 0));
+    setPayAmountReceived(quote.total > 0 ? String(quote.total) : '');
+  }
+
+  function applyPayPlan(planMonths: number) {
+    if (!payModalMember) return;
+    const advance = Math.min(12, advanceMonthsForPlan(payModalMember, planMonths, payModalIsAdvance));
+    setPayPlanTouched(true);
+    setPayPlanMonths(planMonths);
+    setPayModalAdvanceMonths(advance);
+    fillReceivedFor(payModalMember, planMonths, payIncludeTraining, payTrainingAmount, advance);
+  }
+
+  function applyTrainingChoice(include: boolean, trainingStr: string = payTrainingAmount) {
+    if (!payModalMember) return;
+    setPayPlanTouched(true);
+    setPayIncludeTraining(include);
+    setPayTrainingAmount(trainingStr);
+    fillReceivedFor(payModalMember, payPlanMonths, include, trainingStr, payModalAdvanceMonths);
+  }
+
+  function applyAdvanceMonths(next: number) {
+    if (!payModalMember) return;
+    const advance = Math.max(payModalIsAdvance ? 1 : 0, Math.min(12, next));
+    setPayModalAdvanceMonths(advance);
+    const unpaidCount = (memberUnpaidFees[payModalMember.id] || []).length;
+    const covered = unpaidCount + advance;
+    if ((PLAN_MONTH_OPTIONS as readonly number[]).includes(covered)) {
+      setPayPlanMonths(covered);
+    }
+    if (payPlanTouched) {
+      fillReceivedFor(payModalMember, payPlanMonths, payIncludeTraining, payTrainingAmount, advance);
+      return;
+    }
+    const unpaid = memberUnpaidFees[payModalMember.id] || [];
+    const advances = getNextAdvancePeriods(payModalMember, allFeeRecords, advance);
+    const unpaidSum = unpaid.reduce((sum, fr) => sum + Math.max(0, (Number(fr.amount) || 0) - (Number(fr.amount_paid) || 0)), 0);
+    const total = unpaidSum + advances.reduce((sum, p) => sum + p.amount, 0);
+    setPayAmountReceived(total > 0 ? String(total) : '');
+  }
+
   function handlePaySubmit() {
-    if (!payModalMember || payModalTotalItemsCount === 0) return;
+    if (!payModalMember || payModalTotalItemsCount === 0 || !payQuote) return;
     if (payModalReceivedNum <= 0 && payModalDiscountNum <= 0) {
       toast.error('Please enter amount received or discount');
+      return;
+    }
+    if (payPlanTouched && payIncludeTraining && payTrainingAmountNum <= 0) {
+      toast.error('Enter a training fee, or discontinue training');
       return;
     }
     const todayStr = getTodayLocalDateString();
@@ -1982,7 +2129,7 @@ export default function MembersPage() {
 
     bulkPayMutation.mutate({
       feeIds: payModalUnpaidFees.map(f => f.id),
-      advanceRecords: payModalAdvancePeriods.map(p => ({
+      advanceRecords: (payPlanTouched ? payQuote.advancePriced : payModalAdvancePeriods).map(p => ({
         member_id: payModalMember.id,
         period_month: p.period_month,
         period_end: p.period_end,
@@ -1992,6 +2139,18 @@ export default function MembersPage() {
       discount: payModalDiscountNum,
       paymentMethod: payMethod,
       paidAt: computedPaidAt,
+      ...(payPlanTouched
+        ? {
+            membership: {
+              memberId: payModalMember.id,
+              tenureMonths: payPlanMonths,
+              trainingFees: payIncludeTraining ? payTrainingAmountNum : 0,
+            },
+            feeAmountOverrides: payQuote.unpaidPriced
+              .filter(f => !String(f.id).startsWith('v_'))
+              .map(f => ({ id: f.id, amount: f.pricedAmount })),
+          }
+        : {}),
     });
   }
 
@@ -3557,7 +3716,7 @@ export default function MembersPage() {
       </Dialog>
 
       {/* Payment Collection Modal */}
-      <Dialog open={payModalOpen} onOpenChange={(open) => { setPayModalOpen(open); if (!open) { setPayModalMember(null); setPayModalIsAdvance(false); setPayModalAdvanceMonths(0); } }}>
+      <Dialog open={payModalOpen} onOpenChange={(open) => { setPayModalOpen(open); if (!open) { setPayModalMember(null); setPayModalIsAdvance(false); setPayModalAdvanceMonths(0); setPayPlanMonths(1); setPayIncludeTraining(false); setPayTrainingAmount('0'); setPayPlanTouched(false); } }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <div className="flex items-center justify-between pr-6">
@@ -3625,6 +3784,92 @@ export default function MembersPage() {
                 </div>
               </div>
 
+              {/* Plan and training for this payment */}
+              <div className="space-y-3 p-3 rounded-lg border border-border bg-muted/30">
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm font-semibold">Plan for this payment</Label>
+                  <span className="text-[11px] text-muted-foreground">
+                    Current: {normalizePlanMonths(payModalMember.tenure_months)} month{normalizePlanMonths(payModalMember.tenure_months) > 1 ? 's' : ''}
+                    {(Number(payModalMember.training_fees) || 0) > 0 ? ` + training` : ''}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {PLAN_MONTH_OPTIONS.map((months) => (
+                    <Button
+                      key={months}
+                      type="button"
+                      size="sm"
+                      variant={payPlanMonths === months ? 'default' : 'outline'}
+                      className="h-9 text-xs font-bold"
+                      onClick={() => applyPayPlan(months)}
+                    >
+                      {months} Month{months > 1 ? 's' : ''}
+                    </Button>
+                  ))}
+                </div>
+                <div className="flex items-center justify-between gap-3 pt-1">
+                  <div>
+                    <div className="text-sm font-medium">Personal training</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {payIncludeTraining ? 'Training fee is added once on this plan' : 'Training discontinued for this payment'}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-medium text-muted-foreground">{payIncludeTraining ? 'Added' : 'Off'}</span>
+                    <Switch
+                      checked={payIncludeTraining}
+                      onCheckedChange={(checked) => applyTrainingChoice(checked)}
+                    />
+                  </div>
+                </div>
+                {payIncludeTraining && (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Training fee (PKR)</Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      value={payTrainingAmount}
+                      onChange={(e) => applyTrainingChoice(true, e.target.value)}
+                      placeholder="e.g. 5000"
+                    />
+                  </div>
+                )}
+                <div className="rounded-md bg-background border border-border px-3 py-2 text-xs space-y-1">
+                  {payPlanTouched ? (
+                    <>
+                      <div className="flex justify-between gap-3">
+                        <span className="text-muted-foreground">Gym fee</span>
+                        <span className="text-right">
+                          {formatCurrency(payQuote?.monthly || 0)} × {payModalCycleCount} month{payModalCycleCount === 1 ? '' : 's'}
+                          {' = '}
+                          {formatCurrency((payQuote?.monthly || 0) * payModalCycleCount)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Training</span>
+                        <span className={payIncludeTraining ? 'font-medium' : 'text-muted-foreground'}>
+                          {payIncludeTraining ? `${formatCurrency(payQuote?.training || 0)} once` : 'Discontinued'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between border-t border-border pt-1 font-semibold">
+                        <span>New total</span>
+                        <span>{formatCurrency(payQuote?.total || 0)}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex justify-between font-semibold">
+                        <span>Total due</span>
+                        <span>{formatCurrency(payModalTotalDue)}</span>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground pt-1">
+                        Choose a plan or turn training on or off to recalculate. Gym fee is the monthly rate times the plan, and training is added once.
+                      </p>
+                    </>
+                  )}
+                </div>
+              </div>
+
               {/* Billing Periods Breakdown */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
@@ -3652,23 +3897,22 @@ export default function MembersPage() {
                         <tr><td colSpan={5} className="text-center py-4 text-muted-foreground">No fee cycles selected</td></tr>
                       ) : (
                         <>
-                          {payModalUnpaidFees.map(fr => {
+                          {(payPlanTouched ? (payQuote?.unpaidPriced || []) : payModalUnpaidFees.map(fr => {
                             const amt = Number(fr.amount) || 0;
                             const paid = Number(fr.amount_paid) || 0;
-                            const rem = Math.max(0, amt - paid);
-                            return (
+                            return { ...fr, pricedAmount: amt, pricedPaid: paid, pricedRemaining: Math.max(0, amt - paid) };
+                          })).map(fr => (
                               <tr key={fr.id} className="border-b border-border/50 last:border-0">
                                 <td className="p-2 font-medium whitespace-nowrap">{formatPeriodMonth(fr.period_month, payModalMember?.join_date)}</td>
                                 <td className="p-2 text-center">
                                   <Badge variant="destructive" className="text-[10px] px-1.5 py-0">Due</Badge>
                                 </td>
-                                <td className="p-2 text-right">{formatCurrency(amt)}</td>
-                                <td className="p-2 text-right text-green-600">{paid > 0 ? formatCurrency(paid) : '—'}</td>
-                                <td className="p-2 text-right font-semibold text-red-500">{formatCurrency(rem)}</td>
+                                <td className="p-2 text-right">{formatCurrency(fr.pricedAmount)}</td>
+                                <td className="p-2 text-right text-green-600">{fr.pricedPaid > 0 ? formatCurrency(fr.pricedPaid) : '—'}</td>
+                                <td className="p-2 text-right font-semibold text-red-500">{formatCurrency(fr.pricedRemaining)}</td>
                               </tr>
-                            );
-                          })}
-                          {payModalAdvancePeriods.map(adv => (
+                          ))}
+                          {(payPlanTouched ? (payQuote?.advancePriced || []) : payModalAdvancePeriods).map(adv => (
                             <tr key={adv.period_month} className="border-b border-border/50 last:border-0 bg-primary/5">
                               <td className="p-2 font-medium whitespace-nowrap text-primary">{adv.formattedRange}</td>
                               <td className="p-2 text-center">
@@ -3699,19 +3943,14 @@ export default function MembersPage() {
                 </div>
                 <div className="flex items-center gap-2">
                   {/* Quick-select buttons */}
-                  {[1, 3, 6].map(n => (
+                  {PLAN_MONTH_OPTIONS.map(n => (
                     <Button
                       key={n}
                       type="button"
                       size="sm"
-                      variant={payModalAdvanceMonths === n ? 'default' : 'outline'}
+                      variant={payPlanMonths === n ? 'default' : 'outline'}
                       className="h-7 px-2.5 text-xs font-bold"
-                      onClick={() => {
-                        setPayModalAdvanceMonths(n);
-                        const monthlyFee = (Number(payModalMember?.monthly_fee) || 0) + (Number(payModalMember?.training_fees) || 0);
-                        const unpaidSum = payModalUnpaidFees.reduce((s, fr) => s + Math.max(0, (Number(fr.amount) || 0) - (Number(fr.amount_paid) || 0)), 0);
-                        setPayAmountReceived(String(unpaidSum + monthlyFee * n));
-                      }}
+                      onClick={() => applyPayPlan(n)}
                     >
                       {n}M
                     </Button>
@@ -3723,7 +3962,7 @@ export default function MembersPage() {
                     variant="outline"
                     className="h-7 w-7 p-0"
                     disabled={payModalAdvanceMonths <= (payModalIsAdvance ? 1 : 0)}
-                    onClick={() => setPayModalAdvanceMonths(prev => Math.max(payModalIsAdvance ? 1 : 0, prev - 1))}
+                    onClick={() => applyAdvanceMonths(payModalAdvanceMonths - 1)}
                   >
                     -
                   </Button>
@@ -3736,7 +3975,7 @@ export default function MembersPage() {
                     variant="outline"
                     className="h-7 w-7 p-0"
                     disabled={payModalAdvanceMonths >= 12}
-                    onClick={() => setPayModalAdvanceMonths(prev => Math.min(12, prev + 1))}
+                    onClick={() => applyAdvanceMonths(payModalAdvanceMonths + 1)}
                   >
                     +
                   </Button>
@@ -3861,7 +4100,7 @@ export default function MembersPage() {
           )}
 
           <DialogFooter className="mt-2 gap-2">
-            <Button type="button" variant="outline" onClick={() => { setPayModalOpen(false); setPayModalMember(null); setPayModalIsAdvance(false); setPayModalAdvanceMonths(0); }}>
+            <Button type="button" variant="outline" onClick={() => { setPayModalOpen(false); setPayModalMember(null); setPayModalIsAdvance(false); setPayModalAdvanceMonths(0); setPayPlanMonths(1); setPayIncludeTraining(false); setPayTrainingAmount('0'); setPayPlanTouched(false); }}>
               Cancel
             </Button>
             <Button 
