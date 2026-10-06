@@ -4,6 +4,7 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { formatCurrency, formatDate, formatDateTime, formatPeriodMonth } from '@/lib/format';
+import { latestDuePeriod, normalizePeriod, shouldHideFromFeeHistory, shouldOmitUnpaidCycle } from '@/lib/fee-periods';
 import { useRole } from '@/hooks/use-role';
 import { useCurrentUser } from '@/hooks/use-session';
 import { Card, CardContent } from '@/components/ui/card';
@@ -19,6 +20,7 @@ import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, CalendarPlu
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { normalizeImageSrc, compressImageFile, compressDataUrl } from '@/lib/image-utils';
 import { toast } from 'sonner';
+import { UpdateRecordedPaymentButton } from '@/components/fees/update-recorded-payment';
 import { isMemberAssignedToStaff, embedStaffIdsInNotes, stripStaffIdsFromNotes, getAssignedStaffIds } from '@/lib/staff-assignments';
 import { PAYMENT_METHODS } from '@/lib/constants';
 
@@ -248,64 +250,8 @@ async function syncMemberFeeRecords(
     }
   }
 
-  // Also ensure fee records exist up to the active cycle for any months AFTER the tenure
-  const now = new Date();
-  const currentDay = now.getDate();
-  const latestDueMonthDate = currentDay >= joinDay
-    ? new Date(now.getFullYear(), now.getMonth(), 1)
-    : new Date(now.getFullYear(), now.getMonth() - 1, 1);
-
   const lastTenureDate = new Date(jYear, jMonth - 1 + tenure - 1, 1);
-  let extraCursor = new Date(lastTenureDate.getFullYear(), lastTenureDate.getMonth() + 1, 1);
-
-  const monthlyFeeRate = tenure > 0 ? Math.round(totalPayableForTenure / tenure) : totalPayableForTenure;
-  const extraRecords = [];
-
-  while (extraCursor <= latestDueMonthDate) {
-    const eYear = extraCursor.getFullYear();
-    const eMonth = extraCursor.getMonth() + 1;
-    const ePeriodMonth = `${eYear}-${String(eMonth).padStart(2, '0')}-01`;
-    const eLastDay = new Date(eYear, eMonth, 0).getDate();
-    const ePeriodEnd = `${eYear}-${String(eMonth).padStart(2, '0')}-${String(eLastDay).padStart(2, '0')}`;
-
-    extraRecords.push({
-      member_id: memberId,
-      amount: monthlyFeeRate,
-      amount_paid: 0,
-      discount: 0,
-      period_month: ePeriodMonth,
-      period_end: ePeriodEnd,
-      paid: false,
-      paid_at: null,
-      payment_method: 'cash',
-    });
-
-    extraCursor.setMonth(extraCursor.getMonth() + 1);
-  }
-
-  if (extraRecords.length > 0) {
-    const extraPeriodMonths = extraRecords.map((r) => r.period_month);
-    const { data: existingExtra } = await supabase
-      .from('fee_records')
-      .select('id, period_month, collected_by')
-      .eq('member_id', memberId)
-      .in('period_month', extraPeriodMonths);
-
-    const collectedMonths = new Set(
-      (existingExtra || []).filter((r: any) => r.collected_by != null).map((r: any) => r.period_month)
-    );
-
-    const recordsToReset = extraRecords.filter((r) => !collectedMonths.has(r.period_month));
-    if (recordsToReset.length > 0) {
-      const { error: extraErr } = await supabase
-        .from('fee_records')
-        .upsert(recordsToReset, { onConflict: 'member_id,period_month' });
-      if (extraErr) {
-        console.error('Failed to sync extra fee records:', extraErr);
-      }
-    }
-  }
-
+  const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
   // Delete records strictly before the member's join date month
   if (tenureRecords.length > 0) {
     const firstPeriodMonth = tenureRecords[0].period_month;
@@ -316,20 +262,21 @@ async function syncMemberFeeRecords(
       .lt('period_month', firstPeriodMonth);
   }
 
-  // Delete any future unpaid records beyond both the tenure window and latest due month
-  const allValidMonths = [
-    ...tenureRecords.map((r) => r.period_month),
-    ...extraRecords.map((r) => r.period_month),
-  ];
-  if (allValidMonths.length > 0) {
+  // A 3-month plan is 3 cycles. Remove the next unpaid cycle (1 Jan – 1 Feb).
+  if (tenure > 1) {
     await supabase
       .from('fee_records')
       .delete()
       .eq('member_id', memberId)
-      .not('period_month', 'in', `(${allValidMonths.join(',')})`)
+      .gt('period_month', lastTenurePeriod)
       .eq('paid', false)
-      .eq('amount_paid', 0);
+      .is('collected_by', null);
   }
+}
+
+function isUnpaidFee(fee: { paid?: boolean | null; status?: string | null; amount_paid?: number | string | null }): boolean {
+  const paid = fee.paid ?? fee.status === 'paid';
+  return !paid && Number(fee.amount_paid || 0) === 0;
 }
 
 // Helper: get current month as YYYY-MM-01
@@ -848,20 +795,30 @@ export default function MembersPage() {
           ? new Date(now.getFullYear(), now.getMonth(), 1)
           : new Date(now.getFullYear(), now.getMonth() - 1, 1);
         const latestDueMonthKey = `${latestDueMonth.getFullYear()}-${String(latestDueMonth.getMonth() + 1).padStart(2, '0')}-01`;
-        const maxAllowedPeriod = lastTenurePeriod > latestDueMonthKey ? lastTenurePeriod : latestDueMonthKey;
-
-        // If unpaid and in future beyond maxAllowedPeriod, delete and filter out
-        if (!fr.paid && Number(fr.amount_paid || 0) === 0 && fr.period_month > maxAllowedPeriod) {
-          priorRecordIds.push(fr.id);
-          return false;
-        }
 
         const monthlyRate = Number(m.monthly_fee) || 0;
         const trainingFee = Number(m.training_fees) || 0;
         const totalFee = monthlyRate + trainingFee;
         const totalTenureFee = monthlyRate * tenure + trainingFee;
         const memberPaid = Number(m.amount_paid) || 0;
-        const isTenurePaid = (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+        const isTenurePaid = totalFee > 0 && (memberPaid >= totalTenureFee || memberPaid >= totalFee);
+
+        // Multi-month plans do not include an unpaid cycle after the package.
+        if (
+          tenure > 1 &&
+          !fr.paid &&
+          Number(fr.amount_paid || 0) === 0 &&
+          fr.collected_by == null &&
+          String(fr.period_month || '').slice(0, 10) > lastTenurePeriod
+        ) {
+          priorRecordIds.push(fr.id);
+          return false;
+        }
+
+        if (!fr.paid && Number(fr.amount_paid || 0) === 0 && fr.period_month > latestDueMonthKey) {
+          priorRecordIds.push(fr.id);
+          return false;
+        }
 
         if (fr.period_month <= lastTenurePeriod) {
           // If within tenure and member paid their tenure fee, ensure marked as paid
@@ -871,14 +828,15 @@ export default function MembersPage() {
             fr.amount_paid = totalFee;
             fr.paid_at = fr.paid_at || (m.join_date ? `${m.join_date}T12:00:00.000Z` : now.toISOString());
           }
-        } else {
+        } else if (tenure > 1 && fr.collected_by == null) {
+          priorRecordIds.push(fr.id);
+          return false;
+        } else if (fr.collected_by == null && (fr.paid || Number(fr.amount_paid) > 0)) {
           // If after tenure and not collected manually via collect modal, it must be unpaid
-          if (fr.collected_by == null && (fr.paid || Number(fr.amount_paid) > 0)) {
-            staleRecordIds.push(fr.id);
-            fr.paid = false;
-            fr.amount_paid = 0;
-            fr.paid_at = null;
-          }
+          staleRecordIds.push(fr.id);
+          fr.paid = false;
+          fr.amount_paid = 0;
+          fr.paid_at = null;
         }
 
         return true;
@@ -989,8 +947,16 @@ export default function MembersPage() {
     const map: Record<string, FeeRecord[]> = {};
     const memberMap = new Map(members.map(m => [m.id, m]));
 
+    const feesByMember = new Map<string, FeeRecord[]>();
+    allFeeRecords.forEach((fr) => {
+      const list = feesByMember.get(fr.member_id) || [];
+      list.push(fr);
+      feesByMember.set(fr.member_id, list);
+    });
+
     allFeeRecords.forEach(fr => {
       if (!fr.paid) {
+        if (shouldHideFromFeeHistory(fr.period_month, feesByMember.get(fr.member_id) || [])) return;
         const m = memberMap.get(fr.member_id);
         if (m && m.join_date) {
           const [jY, jM] = m.join_date.split('-').map(Number);
@@ -1064,17 +1030,30 @@ export default function MembersPage() {
       const tenure = Math.max(1, Number(selectedMember.tenure_months) || 1);
       const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
       const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
-      const maxAllowedPeriod = lastTenurePeriod > latestDueMonthKey ? lastTenurePeriod : latestDueMonthKey;
+      const periodKey = (value: string) => normalizePeriod(value);
+      const dueMonth = latestDuePeriod(selectedMember.join_date);
+      const isExtraUnpaidCycle = (fr: any) => {
+        const unpaid = !fr.paid && Number(fr.amount_paid || 0) === 0;
+        if (!unpaid) return false;
+        if (shouldOmitUnpaidCycle(fr.period_month, data || [], { tenure, dueMonth })) return true;
+        const period = periodKey(fr.period_month);
+        if (tenure > 1 && period > lastTenurePeriod) return true;
+        return period > latestDueMonthKey;
+      };
 
-      const futureUnpaidRecords = (data || []).filter((fr: any) => !fr.paid && Number(fr.amount_paid || 0) === 0 && fr.period_month > maxAllowedPeriod);
+      const futureUnpaidRecords = (data || []).filter(isExtraUnpaidCycle);
       if (futureUnpaidRecords.length > 0) {
-        const futureIds = futureUnpaidRecords.map((fr: any) => fr.id);
-        supabase.from('fee_records').delete().in('id', futureIds).then();
+        const futureIds = futureUnpaidRecords.map((fr: any) => fr.id).filter((id: string) => id && !String(id).startsWith('v_'));
+        if (futureIds.length > 0) {
+          supabase.from('fee_records').delete().in('id', futureIds).then();
+        }
       }
 
-      const validRecords = (data || []).filter((fr: any) => 
-        fr.period_month >= joinPeriodMonth && 
-        (fr.paid || Number(fr.amount_paid || 0) > 0 || fr.period_month <= maxAllowedPeriod)
+      const validRecords = (data || []).filter((fr: any) =>
+        periodKey(fr.period_month) >= joinPeriodMonth &&
+        !isExtraUnpaidCycle(fr) &&
+        !shouldHideFromFeeHistory(fr.period_month, data || []) &&
+        (fr.paid || Number(fr.amount_paid || 0) > 0 || periodKey(fr.period_month) <= latestDueMonthKey)
       );
       return validRecords as FeeRecord[];
     },
@@ -3315,7 +3294,7 @@ export default function MembersPage() {
 
       {/* Member Details Dialog */}
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto overflow-x-hidden">
           <DialogHeader>
             <DialogTitle className="text-xl flex items-center gap-3">
               {(() => {
@@ -3351,7 +3330,7 @@ export default function MembersPage() {
             </DialogTitle>
           </DialogHeader>
 
-          <Tabs defaultValue="info" className="mt-4">
+          <Tabs defaultValue="info" className="mt-4 min-w-0">
             <TabsList className="grid w-full grid-cols-3">
               <TabsTrigger value="info">Info</TabsTrigger>
               <TabsTrigger value="fees">Fee History</TabsTrigger>
@@ -3464,8 +3443,26 @@ export default function MembersPage() {
               </div>
             </TabsContent>
 
-            <TabsContent value="fees" className="pt-4">
-              {/* Fee History Summary */}
+            {/* <TabsContent value="fees" className="pt-4">
+              {(() => {
+                const dueMonth = latestDuePeriod(selectedMember?.join_date);
+                const tenureMonths = Number(selectedMember?.tenure_months) || 1;
+                const historyFees = memberFees.filter((fee) => {
+                  if (shouldHideFromFeeHistory(fee.period_month, memberFees)) return false;
+                  if (shouldOmitUnpaidCycle(fee.period_month, memberFees, { tenure: tenureMonths, dueMonth })) return false;
+                  if (tenureMonths > 1 && selectedMember?.join_date) {
+                    const [y, m] = selectedMember.join_date.split('-').map(Number);
+                    if (y && m) {
+                      const planEnd = new Date(y, m - 1 + tenureMonths - 1, 1);
+                      const planEndKey = `${planEnd.getFullYear()}-${String(planEnd.getMonth() + 1).padStart(2, '0')}-01`;
+                      const unpaid = !fee.paid && Number(fee.amount_paid || 0) === 0;
+                      if (unpaid && normalizePeriod(fee.period_month) > planEndKey) return false;
+                    }
+                  }
+                  return true;
+                });
+                return (
+              <>
               {selectedMember && (
                 <div className="mb-4 p-3 rounded-lg bg-muted/40 border border-border">
                   <div className="flex items-center justify-between text-sm">
@@ -3474,7 +3471,7 @@ export default function MembersPage() {
                       <span className="font-semibold">Fee History</span>
                     </div>
                     {(() => {
-                      const unpaid = memberFees.filter(f => !f.paid);
+                      const unpaid = historyFees.filter(f => isUnpaidFee(f));
                       const totalUnpaid = unpaid.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0);
                       return unpaid.length > 0 ? (
                         <div className="flex items-center gap-2">
@@ -3517,9 +3514,9 @@ export default function MembersPage() {
                   <tbody>
                     {loadingFees || generateMemberFees.isPending ? (
                       <tr><td colSpan={7} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
-                    ) : memberFees.length === 0 ? (
+                    ) : historyFees.length === 0 ? (
                       <tr><td colSpan={7} className="text-center py-8 text-muted-foreground">No fee records found</td></tr>
-                    ) : memberFees.map(fee => {
+                    ) : historyFees.map(fee => {
                       const isPaid = fee.paid ?? (fee.status === 'paid');
                       const feeAmount = Number(fee.amount) || 0;
                       const feePaid = Number(fee.amount_paid) || 0;
@@ -3560,7 +3557,196 @@ export default function MembersPage() {
                   </tbody>
                 </table>
               </div>
-            </TabsContent>
+              </>
+                );
+              })()}
+            </TabsContent> */}
+
+<TabsContent value="fees" className="pt-4 min-w-0">
+  {(() => {
+    const dueMonth = latestDuePeriod(selectedMember?.join_date);
+    const tenureMonths = Number(selectedMember?.tenure_months) || 1;
+
+    // 1. Find all paid fee periods to determine the furthest month covered
+    const paidFees = memberFees.filter(f => (f.paid ?? f.status === 'paid') || Number(f.amount_paid || 0) > 0);
+    const paidPeriods = paidFees.map(f => normalizePeriod(f.period_month)).sort();
+    const latestPaidPeriod = paidPeriods.length > 0 ? paidPeriods[paidPeriods.length - 1] : null;
+
+    // 2. Filter history fees
+    // const historyFees = memberFees.filter((fee) => {
+    //   if (shouldHideFromFeeHistory(fee.period_month, memberFees)) return false;
+    //   if (shouldOmitUnpaidCycle(fee.period_month, memberFees, { tenure: tenureMonths, dueMonth })) return false;
+
+    //   const normPeriod = normalizePeriod(fee.period_month);
+    //   const isUnpaid = !fee.paid && fee.status !== 'paid' && Number(fee.amount_paid || 0) === 0;
+
+    //   // RULE A: Don't show future unpaid months that are beyond the current due month
+    //   if (isUnpaid && dueMonth && normPeriod > dueMonth) {
+    //     return false;
+    //   }
+
+    //   // RULE B: If the member has paid for cycles/advance, don't show unpaid fees for periods already covered or beyond
+    //   if (isUnpaid && latestPaidPeriod && normPeriod <= latestPaidPeriod) {
+    //     return false;
+    //   }
+
+    //   // RULE C: If member has multi-month tenure from join date, omit unpaid fees beyond current plan end
+    //   if (selectedMember?.join_date) {
+    //     const [y, m] = selectedMember.join_date.split('-').map(Number);
+    //     if (y && m) {
+    //       // If paid count is greater than tenure, use paid count to extend plan window
+    //       const effectiveTenure = Math.max(tenureMonths, paidFees.length);
+    //       const planEnd = new Date(y, m - 1 + effectiveTenure - 1, 1);
+    //       const planEndKey = `${planEnd.getFullYear()}-${String(planEnd.getMonth() + 1).padStart(2, '0')}-01`;
+          
+    //       if (isUnpaid && normPeriod > planEndKey && normPeriod > dueMonth) {
+    //         return false;
+    //       }
+    //     }
+    //   }
+
+    //   return true;
+    // });
+
+    const historyFees = memberFees.filter((fee) => {
+      if (shouldHideFromFeeHistory(fee.period_month, memberFees)) return false;
+      if (shouldOmitUnpaidCycle(fee.period_month, memberFees, { tenure: tenureMonths, dueMonth })) return false;
+    
+      const normPeriod = normalizePeriod(fee.period_month);
+      const feeAmount = Number(fee.amount) || 0;
+      const feePaid = Number(fee.amount_paid) || 0;
+      const isFullyPaid = fee.paid || fee.status === 'paid' || (feeAmount > 0 && feePaid >= feeAmount);
+    
+      // If this month is fully paid, always show it
+      if (isFullyPaid) return true;
+    
+      // If the period is in the FUTURE (beyond current dueMonth) and not fully paid:
+      if (dueMonth && normPeriod > dueMonth) {
+        // If it only has negligible rounding spillover (less than 10% paid), hide it
+        const pct = feeAmount > 0 ? (feePaid / feeAmount) * 100 : 0;
+        if (pct < 10) return false;
+      }
+    
+      return true;
+    });
+
+    return (
+      <>
+        {/* Fee History Summary */}
+        {selectedMember && (
+          <div className="mb-4 p-3 rounded-lg bg-muted/40 border border-border">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+              <div className="flex items-center gap-2 shrink-0">
+                <Receipt className="h-4 w-4 text-primary" />
+                <span className="font-semibold">Fee History</span>
+              </div>
+              {(() => {
+                const unpaid = historyFees.filter(f => isUnpaidFee(f));
+                const totalUnpaid = unpaid.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0);
+                return unpaid.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="destructive" className="text-xs">
+                      {unpaid.length} unpaid month{unpaid.length > 1 ? 's' : ''} — {formatCurrency(totalUnpaid)} due
+                    </Badge>
+                    <Button size="sm" className="h-7 text-xs" onClick={() => { setDetailOpen(false); openPayModal(selectedMember); }}>
+                      <Wallet className="h-3 w-3 mr-1" /> Collect
+                    </Button>
+                    <Button size="sm" variant="outline" className="h-7 text-xs border-primary/40 text-primary hover:bg-primary/10" onClick={() => { setDetailOpen(false); openAdvancePayModal(selectedMember); }}>
+                      <CalendarPlus className="h-3 w-3 mr-1" /> Pay in Advance
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="success" className="text-xs">All paid ✓</Badge>
+                    <Button size="sm" variant="outline" className="h-7 text-xs border-primary/40 text-primary hover:bg-primary/10" onClick={() => { setDetailOpen(false); openAdvancePayModal(selectedMember); }}>
+                      <CalendarPlus className="h-3 w-3 mr-1" /> Pay in Advance
+                    </Button>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+
+        <div className="rounded-md border border-border overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
+            <thead>
+              <tr className="border-b border-border bg-muted/50">
+                <th className="text-left p-3 font-medium text-muted-foreground">Period</th>
+                <th className="text-left p-3 font-medium text-muted-foreground">Amount</th>
+                <th className="text-left p-3 font-medium text-muted-foreground">Paid</th>
+                <th className="text-left p-3 font-medium text-muted-foreground">Discount</th>
+                <th className="text-left p-3 font-medium text-muted-foreground">Status</th>
+                <th className="text-left p-3 font-medium text-muted-foreground">Paid At</th>
+                <th className="text-left p-3 font-medium text-muted-foreground">Method</th>
+                {isAdmin && <th className="text-right p-3 font-medium text-muted-foreground">Update</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {loadingFees || generateMemberFees.isPending ? (
+                <tr><td colSpan={isAdmin ? 8 : 7} className="text-center py-8"><Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" /></td></tr>
+              ) : historyFees.length === 0 ? (
+                <tr><td colSpan={isAdmin ? 8 : 7} className="text-center py-8 text-muted-foreground">No fee records found</td></tr>
+              ) : historyFees.map(fee => {
+                const isPaid = fee.paid ?? (fee.status === 'paid');
+                const feeAmount = Number(fee.amount) || 0;
+                const feePaid = Number(fee.amount_paid) || 0;
+                const feeDiscount = Number(fee.discount) || 0;
+                const effectiveDue = Math.max(0, feeAmount - feeDiscount);
+                const remaining = Math.max(0, effectiveDue - feePaid);
+                const pctPaid = effectiveDue > 0 ? Math.min(100, Math.round((feePaid / effectiveDue) * 100)) : (feeAmount === 0 ? 100 : 0);
+                const isPartial = feePaid > 0 && !isPaid;
+
+                return (
+                  <tr key={fee.id} className="border-b border-border/50 last:border-0">
+                    <td className="p-3 font-medium whitespace-nowrap">{formatPeriodMonth(fee.period_month, selectedMember?.join_date)}</td>
+                    <td className="p-3">{formatCurrency(feeAmount)}</td>
+                    <td className="p-3">
+                      <span className={isPaid ? 'text-green-600 font-semibold' : isPartial ? 'text-amber-600 font-semibold' : 'text-muted-foreground'}>
+                        {formatCurrency(feePaid)}
+                      </span>
+                    </td>
+                    <td className="p-3 text-muted-foreground">
+                      {feeDiscount > 0 ? formatCurrency(feeDiscount) : '—'}
+                    </td>
+                    <td className="p-3">
+                      {isPaid ? (
+                        <Badge variant="success" className="text-xs">PAID</Badge>
+                      ) : isPartial ? (
+                        <Badge variant="outline" className="border-amber-500 text-amber-600 bg-amber-500/10 text-xs font-bold">
+                          {pctPaid}% ({formatCurrency(remaining)} due)
+                        </Badge>
+                      ) : (
+                        <Badge variant="destructive" className="text-xs">UNPAID</Badge>
+                      )}
+                    </td>
+                    <td className="p-3 text-muted-foreground text-xs">{fee.paid_at ? formatDateTime(fee.paid_at) : '—'}</td>
+                    <td className="p-3 text-muted-foreground text-xs capitalize">{fee.payment_method || '—'}</td>
+                    {isAdmin && (
+                      <td className="p-3 text-right">
+                        {(feePaid > 0 || isPaid) && (
+                          <UpdateRecordedPaymentButton
+                            record={{
+                              id: fee.id,
+                              amount: feeAmount,
+                              amount_paid: feePaid,
+                              discount: feeDiscount,
+                            }}
+                            title={`${selectedMember?.full_name || 'Member'} · ${formatPeriodMonth(fee.period_month, selectedMember?.join_date)}`}
+                          />
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </>
+    );
+  })()}
+</TabsContent>
 
             <TabsContent value="attendance" className="pt-4 space-y-4">
               {loadingAttendance ? (
@@ -3942,7 +4128,6 @@ export default function MembersPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  {/* Quick-select buttons */}
                   {PLAN_MONTH_OPTIONS.map(n => (
                     <Button
                       key={n}

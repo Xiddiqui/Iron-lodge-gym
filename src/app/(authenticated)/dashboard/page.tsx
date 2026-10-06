@@ -16,6 +16,7 @@ import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, Cart
 import { Wallet, Receipt, Zap, UserCheck, ArrowUpRight, ArrowDownRight, TrendingUp, Target, History, Landmark, Trash2, Calendar, Loader2, User } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { UpdateRecordedPaymentButton } from '@/components/fees/update-recorded-payment';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { normalizeImageSrc } from '@/lib/image-utils';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -127,7 +128,7 @@ export default function DashboardPage() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('fee_records')
-        .select('id, amount, amount_paid, paid, paid_at, payment_method, member_id, period_month, period_end, collected_by, created_at, members(member_number, full_name, phone, photo_url, created_at)')
+        .select('id, amount, amount_paid, discount, paid, paid_at, payment_method, member_id, period_month, period_end, collected_by, created_at, members(member_number, full_name, phone, photo_url, created_at)')
         .or('paid.eq.true,amount_paid.gt.0')
         .order('paid_at', { ascending: false, nullsFirst: false })
         .limit(100);
@@ -313,12 +314,25 @@ export default function DashboardPage() {
           if (isCurrentCalendarMonth && now.getDate() < (jD || 1)) {
             return false;
           }
-          // For future months: include if within their paid tenure
+          const tenureMonths = Math.max(1, Number(m.tenure_months) || 1);
+          if (tenureMonths > 1) {
+            const planEnd = new Date(jY, jM - 1 + tenureMonths - 1, 1);
+            const planEndKey = `${planEnd.getFullYear()}-${String(planEnd.getMonth() + 1).padStart(2, '0')}-01`;
+            if (monthStart > planEndKey) return false;
+          }
+          // Future months are listed only when the prepaid plan already covers them.
+          // Do not create the next unpaid cycle (month 4 of a 3-month plan) early.
           if (isFutureMonth) {
             const tenure = Math.max(1, Number(m.tenure_months) || 1);
             const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
             const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
-            return monthStart <= lastTenurePeriod;
+            if (monthStart > lastTenurePeriod) return false;
+            const monthlyRate = Number(m.monthly_fee) || 0;
+            const trainingFee = Number(m.training_fees) || 0;
+            const totalFee = monthlyRate + trainingFee;
+            const totalTenureFee = monthlyRate * tenure + trainingFee;
+            const memberPaid = Number(m.amount_paid) || 0;
+            return totalFee > 0 && (memberPaid >= totalTenureFee || memberPaid >= totalFee);
           }
           return true;
         });
@@ -1082,7 +1096,7 @@ export default function DashboardPage() {
                             </div>
                           </div>
                         </div>
-                        <div className="text-right">
+                        <div className="text-right space-y-1">
                           <p className="text-sm font-bold text-primary">{amtPaid > 0 ? formatCurrency(amtPaid) : '—'}</p>
                           {isPartial ? (
                             <div className="flex items-center justify-end gap-1 mt-0.5">
@@ -1091,6 +1105,19 @@ export default function DashboardPage() {
                             </div>
                           ) : (
                             <Badge variant="success" className="text-[10px] px-1.5 py-0 mt-0.5">Paid</Badge>
+                          )}
+                          {!isWalkin && (
+                            <div className="flex justify-end">
+                              <UpdateRecordedPaymentButton
+                                record={{
+                                  id: f.id,
+                                  amount: totalAmount,
+                                  amount_paid: amtPaid,
+                                  discount: Number(f.discount) || 0,
+                                }}
+                                title={`${displayName}${memberNumber ? ` ${memberNumber}` : ''}`}
+                              />
+                            </div>
                           )}
                         </div>
                       </div>
@@ -1270,6 +1297,17 @@ export default function DashboardPage() {
                           <Badge variant="warning" className="text-[10px]">Partial</Badge>
                         ) : (
                           <Badge variant="success" className="text-[10px]">Paid</Badge>
+                        )}
+                        {!isWalkin && (
+                          <UpdateRecordedPaymentButton
+                            record={{
+                              id: f.id,
+                              amount: totalAmount,
+                              amount_paid: amtPaid,
+                              discount: Number(f.discount) || 0,
+                            }}
+                            title={`${displayName}${memberNumber ? ` ${memberNumber}` : ''}`}
+                          />
                         )}
                       </div>
                       {isPartial && (

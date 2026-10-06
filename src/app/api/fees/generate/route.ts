@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { latestDuePeriod, normalizePeriod, rowCountsAsPaid, shouldHideFromFeeHistory, shouldOmitUnpaidCycle } from '@/lib/fee-periods';
 
 export async function POST(request: Request) {
   const supabase = await createServerSupabaseClient();
@@ -69,29 +70,38 @@ export async function POST(request: Request) {
     const lastTenureDate = new Date(jYear, jMonth - 1 + tenure - 1, 1);
     const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
     const maxGenerationDate = lastTenureDate > latestDueMonth ? lastTenureDate : latestDueMonth;
-    const maxAllowedPeriod = lastTenurePeriod > latestDueMonthKey ? lastTenurePeriod : latestDueMonthKey;
-
-    // Delete any future unpaid fee records beyond both tenure package and latest active cycle
-    await supabase
-      .from('fee_records')
-      .delete()
-      .eq('member_id', member.id)
-      .gt('period_month', maxAllowedPeriod)
-      .eq('paid', false);
 
     // Fetch existing records for this member
     const { data: existingRecords } = await supabase
       .from('fee_records')
-      .select('id, period_month, paid, amount, amount_paid')
+      .select('id, period_month, paid, amount, amount_paid, discount')
       .eq('member_id', member.id);
 
-    const existingMap = new Map((existingRecords || []).map((r: any) => [r.period_month, r]));
+    const dueMonth = latestDuePeriod(member.join_date, now);
+    const extraAfterPackage = (existingRecords || []).filter((record: any) => {
+      if (rowCountsAsPaid(record) || Number(record.amount_paid || 0) > 0) return false;
+      if (shouldOmitUnpaidCycle(record.period_month, existingRecords || [], { tenure, dueMonth })) return true;
+      return tenure > 1 && normalizePeriod(record.period_month) > lastTenurePeriod;
+    });
+    if (extraAfterPackage.length > 0) {
+      const extraUnpaidIds = extraAfterPackage.map((record: any) => record.id).filter(Boolean);
+      if (extraUnpaidIds.length > 0) {
+        await supabase.from('fee_records').delete().in('id', extraUnpaidIds);
+      }
+    }
+
+    const existingMap = new Map(
+      (existingRecords || [])
+        .filter((record: any) => !extraAfterPackage.some((extra: any) => extra.id === record.id))
+        .map((r: any) => [normalizePeriod(r.period_month), r])
+    );
 
     const monthlyRate = Number(member.monthly_fee) || 0;
     const trainingFee = Number(member.training_fees) || 0;
     const totalFee = monthlyRate + trainingFee;
     const totalTenureFee = monthlyRate * tenure + trainingFee;
     const memberPaid = Number(member.amount_paid) || 0;
+    const packagePaid = tenure > 1 && totalFee > 0 && (memberPaid >= totalTenureFee || memberPaid >= totalFee);
     const paidAtTimestamp = member.join_date ? `${member.join_date}T12:00:00.000Z` : now.toISOString();
 
     const recordsToInsert = [];
@@ -106,9 +116,24 @@ export async function POST(request: Request) {
       const periodEnd = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
       const isWithinTenure = periodMonth <= lastTenurePeriod;
-      const isTenurePaid = isWithinTenure && (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
+      const isTenurePaid = isWithinTenure && packagePaid;
+
+      // A multi-month plan stops at its last cycle. Monthly members still get each due month.
+      if (!isWithinTenure && (tenure > 1 || periodMonth > latestDueMonthKey)) {
+        cursor.setMonth(cursor.getMonth() + 1);
+        continue;
+      }
 
       const existing = existingMap.get(periodMonth);
+      // 1 Jan – 1 Feb is the cycle after the paid months. Do not create it.
+      if (
+        !existing &&
+        (shouldHideFromFeeHistory(periodMonth, existingRecords || []) ||
+          shouldOmitUnpaidCycle(periodMonth, existingRecords || [], { tenure, dueMonth }))
+      ) {
+        cursor.setMonth(cursor.getMonth() + 1);
+        continue;
+      }
       if (!existing) {
         recordsToInsert.push({
           member_id: member.id,
