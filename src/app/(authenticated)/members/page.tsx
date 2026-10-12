@@ -2154,12 +2154,30 @@ export default function MembersPage() {
   function openPayModal(m: Member) {
     setPayModalMember(m);
     setPayModalIsAdvance(false);
-    setPayModalAdvanceMonths(0);
-    resetPayPlan(m);
+    const { plan, hasTraining, trainingAmount } = resetPayPlan(m);
+
+    // Compute the correct advance months for the member's plan so the
+    // initial display matches the selected tab (e.g. 3333×3 for a 3-month plan).
+    const unpaidCount = (memberUnpaidFees[m.id] || []).length;
+    const advance = Math.max(0, plan - unpaidCount);
+    setPayModalAdvanceMonths(advance);
+
     setPayDiscount('0');
-    setPayAmountReceived('');
     setPayMethod('cash');
     setPayDate(getTodayLocalDateString());
+
+    if (plan > 1) {
+      // Pre-fill the received amount and mark plan as touched so the
+      // breakdown shows gym fee × months correctly on first render.
+      setPayPlanTouched(true);
+      const unpaid = memberUnpaidFees[m.id] || [];
+      const advances = getNextAdvancePeriods(m, allFeeRecords, advance);
+      const quote = quotePaymentCycles(m, unpaid, advances, hasTraining, Math.max(0, Number(trainingAmount) || 0));
+      setPayAmountReceived(quote.total > 0 ? String(quote.total) : '');
+    } else {
+      setPayAmountReceived('');
+    }
+
     setPayModalOpen(true);
   }
 
@@ -2182,8 +2200,13 @@ export default function MembersPage() {
   // Advance records computed for the modal if payModalAdvanceMonths > 0
   const payModalAdvancePeriods = useMemo(() => {
     if (!payModalMember || payModalAdvanceMonths <= 0) return [];
-    return getNextAdvancePeriods(payModalMember, allFeeRecords, payModalAdvanceMonths);
-  }, [payModalMember, payModalAdvanceMonths, allFeeRecords]);
+    const unpaid = memberUnpaidFees[payModalMember.id] || [];
+    const unpaidPeriodSet = new Set(unpaid.map(fr => normalizePeriod(fr.period_month)));
+    // Request extra periods to compensate for any that overlap with existing unpaid fees
+    const raw = getNextAdvancePeriods(payModalMember, allFeeRecords, payModalAdvanceMonths + unpaidPeriodSet.size);
+    const filtered = raw.filter(adv => !unpaidPeriodSet.has(normalizePeriod(adv.period_month)));
+    return filtered.slice(0, payModalAdvanceMonths);
+  }, [payModalMember, payModalAdvanceMonths, allFeeRecords, memberUnpaidFees]);
 
   const payTrainingAmountNum = Math.max(0, Number(payTrainingAmount) || 0);
 
