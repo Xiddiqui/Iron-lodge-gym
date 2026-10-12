@@ -106,6 +106,7 @@ export async function POST(request: Request) {
 
     const recordsToInsert = [];
     const idsToMarkPaid: string[] = [];
+    const idsToUpdateAmount: string[] = [];
 
     let cursor = new Date(jYear, jMonth - 1, 1);
     while (cursor <= maxGenerationDate) {
@@ -148,6 +149,8 @@ export async function POST(request: Request) {
         });
       } else if (isTenurePaid && (!existing.paid || Number(existing.amount_paid || 0) < totalFee)) {
         idsToMarkPaid.push(existing.id);
+      } else if (!existing.paid && Number(existing.amount_paid || 0) === 0 && Number(existing.amount) !== totalFee && totalFee > 0) {
+        idsToUpdateAmount.push(existing.id);
       }
 
       cursor.setMonth(cursor.getMonth() + 1);
@@ -162,6 +165,13 @@ export async function POST(request: Request) {
           paid_at: paidAtTimestamp,
         })
         .in('id', idsToMarkPaid);
+    }
+
+    if (idsToUpdateAmount.length > 0) {
+      await supabase
+        .from('fee_records')
+        .update({ amount: totalFee })
+        .in('id', idsToUpdateAmount);
     }
 
     let insertedCount = 0;
@@ -270,6 +280,7 @@ export async function POST(request: Request) {
   const existingMap = new Map((existingRecords || []).map((r: any) => [r.member_id, r]));
   const recordsToInsert: any[] = [];
   const updatesToMarkPaid: Array<{ id: string; amount_paid: number; paid_at: string | null }> = [];
+  const updatesToFixAmount: Array<{ id: string; amount: number }> = [];
 
   for (const rec of bulkRecords) {
     const existing = existingMap.get(rec.member_id);
@@ -280,6 +291,11 @@ export async function POST(request: Request) {
         id: existing.id,
         amount_paid: rec.amount_paid,
         paid_at: rec.paid_at,
+      });
+    } else if (!existing.paid && Number(existing.amount_paid || 0) === 0 && Number(existing.amount) !== rec.amount && rec.amount > 0) {
+      updatesToFixAmount.push({
+        id: existing.id,
+        amount: rec.amount,
       });
     }
   }
@@ -301,6 +317,13 @@ export async function POST(request: Request) {
     await supabase
       .from('fee_records')
       .update({ paid: true, amount_paid: u.amount_paid, paid_at: u.paid_at })
+      .eq('id', u.id);
+  }
+
+  for (const u of updatesToFixAmount) {
+    await supabase
+      .from('fee_records')
+      .update({ amount: u.amount })
       .eq('id', u.id);
   }
 

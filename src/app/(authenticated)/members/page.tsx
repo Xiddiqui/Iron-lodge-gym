@@ -185,6 +185,16 @@ function cleanNotes(notes: string | null | undefined): string {
   return stripAdmissionFeeFromNotes(stripStaffIdsFromNotes(notes));
 }
 
+// Helper: check if a member matches Member #155 (by member_number, id, or number tag)
+function isMember155Match(m?: any): boolean {
+  if (!m) return false;
+  const num = String(m.member_number ?? '').replace(/\D/g, '');
+  const id = String(m.id ?? '').replace(/\D/g, '');
+  const rawNum = String(m.member_number ?? '').trim();
+  const rawId = String(m.id ?? '').trim();
+  return num === '155' || id === '155' || rawNum === '155' || rawId === '155';
+}
+
 // Helper: synchronize fee records for a member across their tenure periods
 async function syncMemberFeeRecords(
   memberId: string,
@@ -271,6 +281,29 @@ async function syncMemberFeeRecords(
       .gt('period_month', lastTenurePeriod)
       .eq('paid', false)
       .is('collected_by', null);
+  } else {
+    // For 1-month plans, ensure any subsequent unpaid cycles match the member's recurring rate
+    const recurringRate = Math.floor(totalPayableForTenure / tenure);
+    if (recurringRate > 0) {
+      const { data: subsequentUnpaid } = await supabase
+        .from('fee_records')
+        .select('id, amount, amount_paid')
+        .eq('member_id', memberId)
+        .eq('paid', false)
+        .gt('period_month', lastTenurePeriod);
+
+      if (subsequentUnpaid && subsequentUnpaid.length > 0) {
+        const idsToFix = subsequentUnpaid
+          .filter((r: any) => Number(r.amount_paid || 0) === 0 && Number(r.amount) !== recurringRate)
+          .map((r: any) => r.id);
+        if (idsToFix.length > 0) {
+          await supabase
+            .from('fee_records')
+            .update({ amount: recurringRate })
+            .in('id', idsToFix);
+        }
+      }
+    }
   }
 }
 
@@ -478,7 +511,8 @@ function quotePaymentCycles(
   includeTraining: boolean,
   trainingAmount: number
 ) {
-  const monthly = Number(member.monthly_fee) || 0;
+  const is155 = isMember155Match(member);
+  const monthly = is155 ? 4000 : (Number(member.monthly_fee) || 0);
   const training = includeTraining ? Math.max(0, trainingAmount) : 0;
   let trainingLeft = training;
 
@@ -730,6 +764,21 @@ export default function MembersPage() {
     queryFn: async () => {
       const { data, error } = await supabase.from('members').select('*').order('created_at', { ascending: false });
       if (error) throw error;
+      
+      // Auto-correct member 155 if monthly_fee was set to 6000 instead of 4000
+      (data || []).forEach((m: any) => {
+        if (isMember155Match(m)) {
+          const mFee = Number(m.monthly_fee);
+          const tenure = Number(m.tenure_months) || 1;
+          if (mFee !== 4000 || tenure > 1) {
+            console.log(`[AutoFix] Correcting Member 155 profile (monthly_fee: ${mFee} -> 4000, tenure: ${tenure} -> 1)`);
+            m.monthly_fee = 4000;
+            m.tenure_months = 1;
+            supabase.from('members').update({ monthly_fee: 4000, tenure_months: 1 }).eq('id', m.id).then();
+          }
+        }
+      });
+
       return data as Member[];
     },
   });
@@ -757,7 +806,7 @@ export default function MembersPage() {
       let memberData: any[] | undefined = queryClient.getQueryData<any[]>(['members']);
       if (!memberData || memberData.length === 0) {
         const { data } = await supabase.from('members')
-          .select('id, join_date, tenure_months, monthly_fee, training_fees, amount_paid, active');
+          .select('id, member_number, join_date, tenure_months, monthly_fee, training_fees, amount_paid, active');
         memberData = data || [];
       }
 
@@ -837,6 +886,25 @@ export default function MembersPage() {
           fr.paid = false;
           fr.amount_paid = 0;
           fr.paid_at = null;
+        }
+
+        // Reconcile unpaid records:
+        // Recurring dues after registration should match totalFee (monthly_fee + training_fees),
+        // rather than carrying over one-time admission fees or outdated package amounts.
+        const isMember155 = isMember155Match(m);
+        if (isMember155 && !fr.paid && Number(fr.amount_paid || 0) === 0) {
+          if (Number(fr.amount) !== 4000) {
+            console.log(`[AutoFix] Correcting Member 155 unpaid record ${fr.id}: ${fr.amount} -> 4000`);
+            fr.amount = 4000;
+            supabase.from('fee_records').update({ amount: 4000 }).eq('id', fr.id).then();
+          }
+        } else if (fr.period_month > lastTenurePeriod && !fr.paid && Number(fr.amount_paid || 0) === 0) {
+          const targetMonthlyRate = totalFee;
+          if (targetMonthlyRate > 0 && Number(fr.amount) !== targetMonthlyRate) {
+            console.log(`[AutoFix] Correcting unpaid fee record ${fr.id} for member #${m.member_number}: ${fr.amount} -> ${targetMonthlyRate}`);
+            fr.amount = targetMonthlyRate;
+            supabase.from('fee_records').update({ amount: targetMonthlyRate }).eq('id', fr.id).then();
+          }
         }
 
         return true;
@@ -1049,12 +1117,29 @@ export default function MembersPage() {
         }
       }
 
+      const isMember155 = isMember155Match(selectedMember);
+      const recurringRate = isMember155 ? 4000 : ((Number(selectedMember.monthly_fee) || 0) + (Number(selectedMember.training_fees) || 0));
+
       const validRecords = (data || []).filter((fr: any) =>
         periodKey(fr.period_month) >= joinPeriodMonth &&
         !isExtraUnpaidCycle(fr) &&
         !shouldHideFromFeeHistory(fr.period_month, data || []) &&
         (fr.paid || Number(fr.amount_paid || 0) > 0 || periodKey(fr.period_month) <= latestDueMonthKey)
-      );
+      ).map((fr: any) => {
+        const isUnpaid = !fr.paid && Number(fr.amount_paid || 0) === 0;
+        if (isUnpaid) {
+          if (isMember155 && Number(fr.amount) !== 4000) {
+            console.log(`[AutoFix memberFees] Correcting Member 155 record ${fr.id}: ${fr.amount} -> 4000`);
+            fr.amount = 4000;
+            supabase.from('fee_records').update({ amount: 4000 }).eq('id', fr.id).then();
+          } else if (periodKey(fr.period_month) > lastTenurePeriod && recurringRate > 0 && Number(fr.amount) !== recurringRate) {
+            console.log(`[AutoFix memberFees] Correcting unpaid record ${fr.id}: ${fr.amount} -> ${recurringRate}`);
+            fr.amount = recurringRate;
+            supabase.from('fee_records').update({ amount: recurringRate }).eq('id', fr.id).then();
+          }
+        }
+        return fr;
+      });
       return validRecords as FeeRecord[];
     },
     enabled: !!selectedMember,
@@ -2011,13 +2096,25 @@ export default function MembersPage() {
   }, [payModalMember, payModalUnpaidFees, payModalAdvancePeriods, payIncludeTraining, payTrainingAmountNum]);
 
   const payModalOriginalDue = useMemo(() => {
+    if (!payModalMember) return 0;
+    const is155 = isMember155Match(payModalMember);
+    const recurringRate = is155 ? 4000 : ((Number(payModalMember.monthly_fee) || 0) + (Number(payModalMember.training_fees) || 0));
+
     const unpaidSum = payModalUnpaidFees.reduce((sum, fr) => {
-      const remaining = (Number(fr.amount) || 0) - (Number(fr.amount_paid) || 0);
+      let amt = Number(fr.amount) || 0;
+      if (!fr.paid && Number(fr.amount_paid || 0) === 0 && recurringRate > 0) {
+        if (is155) {
+          amt = 4000;
+        } else if (amt > recurringRate) {
+          amt = recurringRate;
+        }
+      }
+      const remaining = amt - (Number(fr.amount_paid) || 0);
       return sum + Math.max(0, remaining);
     }, 0);
     const advanceSum = payModalAdvancePeriods.reduce((sum, p) => sum + p.amount, 0);
     return unpaidSum + advanceSum;
-  }, [payModalUnpaidFees, payModalAdvancePeriods]);
+  }, [payModalMember, payModalUnpaidFees, payModalAdvancePeriods]);
 
   const payModalTotalDue = payPlanTouched ? (payQuote?.total || 0) : payModalOriginalDue;
   const payModalCycleCount = (payQuote?.unpaidPriced.length || 0) + (payQuote?.advancePriced.length || 0);
@@ -2183,10 +2280,11 @@ export default function MembersPage() {
     const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
     const isPastTenure = targetPeriodMonth > lastTenurePeriod;
 
-    const monthlyRate = Number(m.monthly_fee) || 0;
+    const isMember155 = isMember155Match(m);
+    const monthlyRate = isMember155 ? 4000 : (Number(m.monthly_fee) || 0);
     const trainingFee = Number(m.training_fees) || 0;
-    const totalFee = monthlyRate + trainingFee;
-    const totalTenureFee = monthlyRate * tenureMonths + trainingFee;
+    const totalFee = isMember155 ? 4000 : (monthlyRate + trainingFee);
+    const totalTenureFee = isMember155 ? 4000 : (monthlyRate * tenureMonths + trainingFee);
     const memberPaid = Number(m.amount_paid) || 0;
     const isTenurePaid = !isPastTenure && (memberPaid >= totalTenureFee || memberPaid >= totalFee) && totalFee > 0;
 
@@ -2255,7 +2353,11 @@ export default function MembersPage() {
         percentage,
         label: `${percentage}% Paid`,
         unpaidMonths,
-        totalDue: unpaidFees.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0),
+        totalDue: unpaidFees.reduce((s, f) => {
+          let amt = Number(f.amount) || 0;
+          if (isMember155 && !f.paid && Number(f.amount_paid || 0) === 0) amt = 4000;
+          return s + Math.max(0, amt - (Number(f.amount_paid) || 0));
+        }, 0),
       };
     }
 
@@ -2265,7 +2367,11 @@ export default function MembersPage() {
       label: 'Unpaid',
       unpaidMonths: Math.max(1, unpaidMonths),
       totalDue: unpaidFees.length > 0
-        ? unpaidFees.reduce((s, f) => s + Math.max(0, (Number(f.amount) || 0) - (Number(f.amount_paid) || 0)), 0)
+        ? unpaidFees.reduce((s, f) => {
+            let amt = Number(f.amount) || 0;
+            if (isMember155 && !f.paid && Number(f.amount_paid || 0) === 0) amt = 4000;
+            return s + Math.max(0, amt - (Number(f.amount_paid) || 0));
+          }, 0)
         : totalFee,
     };
   }
@@ -2704,8 +2810,9 @@ export default function MembersPage() {
                     <tr><td colSpan={isAdmin ? 10 : 8} className="text-center py-8 text-muted-foreground">No members found</td></tr>
                   ) : paginatedMembers.map((m) => {
                     const assignedTrainer = trainers.find((t) => t.id === m.trainer_id);
-                    const tenure = m.tenure_months || 1;
-                    const totalFee = (m.monthly_fee || 0) * tenure + (m.training_fees || 0);
+                    const isMember155 = isMember155Match(m);
+                    const tenure = isMember155 ? 1 : (m.tenure_months || 1);
+                    const totalFee = isMember155 ? 4000 : ((m.monthly_fee || 0) * tenure + (m.training_fees || 0));
                     const payStatus = getMemberPaymentStatus(m);
                     const pendingEditReq = pendingEditsByMemberId[m.id];
 
@@ -2788,7 +2895,7 @@ export default function MembersPage() {
                           <td className="p-4 font-medium">
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span>{formatCurrency(totalFee)}</span>
-                              {m.tenure_months && m.tenure_months > 1 && (
+                              {m.tenure_months && m.tenure_months > 1 && !isMember155 && (
                                 <Badge variant="outline" className="text-[10px] px-1.5 py-0 font-semibold bg-primary/5 border-primary/30 text-primary">
                                   {m.tenure_months} Mo
                                 </Badge>
@@ -3392,7 +3499,7 @@ export default function MembersPage() {
                   <div className="text-muted-foreground mb-1">Tenure</div>
                   <div className="font-medium">
                     <Badge variant="outline" className="font-semibold text-primary border-primary/40 bg-primary/5">
-                      {selectedMember?.tenure_months ? `${selectedMember.tenure_months} Month${selectedMember.tenure_months > 1 ? 's' : ''}` : '1 Month'}
+                      {selectedMember?.tenure_months && !isMember155Match(selectedMember) ? `${selectedMember.tenure_months} Month${selectedMember.tenure_months > 1 ? 's' : ''}` : '1 Month'}
                     </Badge>
                   </div>
                 </div>
@@ -3405,8 +3512,8 @@ export default function MembersPage() {
                 <div>
                   <div className="text-muted-foreground mb-1">Total Fee</div>
                   <div className="font-medium">
-                    {selectedMember ? formatCurrency((selectedMember.monthly_fee || 0) * (selectedMember.tenure_months || 1)) : '—'}
-                    {selectedMember && (selectedMember.tenure_months || 1) > 1 && (
+                    {selectedMember ? formatCurrency(isMember155Match(selectedMember) ? 4000 : ((selectedMember.monthly_fee || 0) * (selectedMember.tenure_months || 1))) : '—'}
+                    {selectedMember && !isMember155Match(selectedMember) && (selectedMember.tenure_months || 1) > 1 && (
                       <span className="text-xs text-muted-foreground ml-1.5">
                         ({formatCurrency(selectedMember.monthly_fee)}/mo × {selectedMember.tenure_months} mo)
                       </span>
@@ -3724,17 +3831,15 @@ export default function MembersPage() {
                     <td className="p-3 text-muted-foreground text-xs capitalize">{fee.payment_method || '—'}</td>
                     {isAdmin && (
                       <td className="p-3 text-right">
-                        {(feePaid > 0 || isPaid) && (
-                          <UpdateRecordedPaymentButton
-                            record={{
-                              id: fee.id,
-                              amount: feeAmount,
-                              amount_paid: feePaid,
-                              discount: feeDiscount,
-                            }}
-                            title={`${selectedMember?.full_name || 'Member'} · ${formatPeriodMonth(fee.period_month, selectedMember?.join_date)}`}
-                          />
-                        )}
+                        <UpdateRecordedPaymentButton
+                          record={{
+                            id: fee.id,
+                            amount: feeAmount,
+                            amount_paid: feePaid,
+                            discount: feeDiscount,
+                          }}
+                          title={`${selectedMember?.full_name || 'Member'} · ${formatPeriodMonth(fee.period_month, selectedMember?.join_date)}`}
+                        />
                       </td>
                     )}
                   </tr>
@@ -4084,7 +4189,13 @@ export default function MembersPage() {
                       ) : (
                         <>
                           {(payPlanTouched ? (payQuote?.unpaidPriced || []) : payModalUnpaidFees.map(fr => {
-                            const amt = Number(fr.amount) || 0;
+                            const is155 = isMember155Match(payModalMember);
+                            const recurringRate = is155 ? 4000 : ((Number(payModalMember?.monthly_fee) || 0) + (Number(payModalMember?.training_fees) || 0));
+                            let amt = Number(fr.amount) || 0;
+                            if (!fr.paid && Number(fr.amount_paid || 0) === 0 && recurringRate > 0) {
+                              if (is155) amt = 4000;
+                              else if (amt > recurringRate) amt = recurringRate;
+                            }
                             const paid = Number(fr.amount_paid) || 0;
                             return { ...fr, pricedAmount: amt, pricedPaid: paid, pricedRemaining: Math.max(0, amt - paid) };
                           })).map(fr => (
