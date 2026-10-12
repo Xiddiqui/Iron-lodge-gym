@@ -87,12 +87,17 @@ export function followsPaidPackage(
   return streak >= 3;
 }
 
-/** Fee history never lists the unpaid cycle after a 3-month paid run. */
+/** Fee history hides the unpaid cycle after a 3-month paid run only if it is in the future (not due yet). */
 export function shouldHideFromFeeHistory(
   period: string | null | undefined,
-  records: FeeLike[]
+  records: FeeLike[],
+  dueMonth?: string
 ): boolean {
-  return followsPaidPackage(period, records);
+  const key = normalizePeriod(period);
+  if (!key) return false;
+  if (!followsPaidPackage(key, records)) return false;
+  if (dueMonth) return key > dueMonth;
+  return false;
 }
 
 export function extraUnpaidPeriods<T extends FeeLike>(records: T[]): T[] {
@@ -101,8 +106,7 @@ export function extraUnpaidPeriods<T extends FeeLike>(records: T[]): T[] {
 
 /**
  * Records to delete or not create.
- * The unpaid cycle after 3 paid months is always removed for a multi-month plan.
- * A monthly plan keeps only the bill that is due right now.
+ * An unpaid cycle after paid months is only omitted if it is in the future (not due yet).
  */
 export function shouldOmitUnpaidCycle(
   period: string | null | undefined,
@@ -114,9 +118,7 @@ export function shouldOmitUnpaidCycle(
   if (records.some((record) => normalizePeriod(record.period_month) === key && rowCountsAsPaid(record))) {
     return false;
   }
-  const tenure = Math.max(1, Number(options.tenure) || 1);
   const afterThreePaid = followsPaidPackage(key, records) || monthAfterLatestPaid(records) === key;
   if (!afterThreePaid) return false;
-  if (tenure > 1) return true;
   return key > options.dueMonth;
 }

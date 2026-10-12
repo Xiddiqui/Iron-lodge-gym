@@ -338,9 +338,9 @@ function getMonthsBetween(joinDate: string): string[] {
 }
 
 
-// Helper: compute the next fee due date based on join_date and paid fee records
-function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
-  if (!m.join_date) return '—';
+// Helper: compute the next fee due date raw string (YYYY-MM-DD) based on join_date and paid fee records
+function getMemberNextDueDateRaw(m: Member, feeRecords?: FeeRecord[]): string | null {
+  if (!m.join_date) return null;
   const [jYear, jMonth, jDay] = m.join_date.split('-').map(Number);
   const joinDay = jDay || 1;
 
@@ -371,7 +371,7 @@ function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
   }
 
   if (!latestPeriod) {
-    return formatDate(m.join_date);
+    return m.join_date;
   }
 
   const [lYear, lMonth] = latestPeriod.split('-').map(Number);
@@ -381,8 +381,13 @@ function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
   const nextMonth = nextMonthDate.getMonth() + 1;
   const daysInNextMonth = new Date(nextYear, nextMonth, 0).getDate();
   const billingDay = Math.min(joinDay, daysInNextMonth);
-  const nextDueDateStr = `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(billingDay).padStart(2, '0')}`;
-  return formatDate(nextDueDateStr);
+  return `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(billingDay).padStart(2, '0')}`;
+}
+
+// Helper: compute the next fee due date based on join_date and paid fee records
+function getMemberNextDueDate(m: Member, feeRecords?: FeeRecord[]): string {
+  const raw = getMemberNextDueDateRaw(m, feeRecords);
+  return raw ? formatDate(raw) : '—';
 }
 
 export interface AdvancePeriod {
@@ -852,13 +857,14 @@ export default function MembersPage() {
         const memberPaid = Number(m.amount_paid) || 0;
         const isTenurePaid = totalFee > 0 && (memberPaid >= totalTenureFee || memberPaid >= totalFee);
 
-        // Multi-month plans do not include an unpaid cycle after the package.
+        // Multi-month plans: future unpaid cycles beyond tenure & beyond current due month are omitted.
         if (
           tenure > 1 &&
           !fr.paid &&
           Number(fr.amount_paid || 0) === 0 &&
           fr.collected_by == null &&
-          String(fr.period_month || '').slice(0, 10) > lastTenurePeriod
+          String(fr.period_month || '').slice(0, 10) > lastTenurePeriod &&
+          String(fr.period_month || '').slice(0, 10) > latestDueMonthKey
         ) {
           priorRecordIds.push(fr.id);
           return false;
@@ -877,7 +883,7 @@ export default function MembersPage() {
             fr.amount_paid = totalFee;
             fr.paid_at = fr.paid_at || (m.join_date ? `${m.join_date}T12:00:00.000Z` : now.toISOString());
           }
-        } else if (tenure > 1 && fr.collected_by == null) {
+        } else if (tenure > 1 && fr.collected_by == null && String(fr.period_month || '').slice(0, 10) > latestDueMonthKey) {
           priorRecordIds.push(fr.id);
           return false;
         } else if (fr.collected_by == null && (fr.paid || Number(fr.amount_paid) > 0)) {
@@ -916,7 +922,7 @@ export default function MembersPage() {
 
       for (const m of memberData) {
         if (!m.join_date) continue;
-        const [jY, jM] = m.join_date.split('-').map(Number);
+        const [jY, jM, jD] = m.join_date.split('-').map(Number);
         if (!jY || !jM) continue;
 
         const tenure = Math.max(1, Number(m.tenure_months) || 1);
@@ -929,10 +935,18 @@ export default function MembersPage() {
 
         if (!isTenurePaid) continue;
 
+        const joinDay = jD || 1;
+        const nowDate = new Date();
+        const currentDay = nowDate.getDate();
+        const latestDueMonth = currentDay >= joinDay
+          ? new Date(nowDate.getFullYear(), nowDate.getMonth(), 1)
+          : new Date(nowDate.getFullYear(), nowDate.getMonth() - 1, 1);
+
         const lastTenureDate = new Date(jY, jM - 1 + tenure - 1, 1);
+        const maxCursorDate = latestDueMonth > lastTenureDate ? latestDueMonth : lastTenureDate;
         let cursor = new Date(jY, jM - 1, 1);
 
-        while (cursor <= lastTenureDate) {
+        while (cursor <= maxCursorDate) {
           const y = cursor.getFullYear();
           const mon = cursor.getMonth() + 1;
           const pMonth = `${y}-${String(mon).padStart(2, '0')}-01`;
@@ -941,35 +955,67 @@ export default function MembersPage() {
           if (!existingKeySet.has(key)) {
             const lastDay = new Date(y, mon, 0).getDate();
             const pEnd = `${y}-${String(mon).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-            const paidAtStr = m.join_date ? `${m.join_date}T12:00:00.000Z` : new Date().toISOString();
+            const isWithinTenure = cursor <= lastTenureDate;
 
-            const newRec: FeeRecord = {
-              id: `v_${m.id}_${pMonth}`,
-              member_id: m.id,
-              amount: totalFee,
-              amount_paid: totalFee,
-              discount: 0,
-              period_month: pMonth,
-              period_end: pEnd,
-              paid: true,
-              paid_at: paidAtStr,
-              payment_method: 'cash',
-              collected_by: null,
-            };
-            reconciledFees.push(newRec);
-            existingKeySet.add(key);
+            if (isWithinTenure) {
+              const paidAtStr = m.join_date ? `${m.join_date}T12:00:00.000Z` : nowDate.toISOString();
 
-            missingTenureRecordsToInsert.push({
-              member_id: m.id,
-              amount: totalFee,
-              amount_paid: totalFee,
-              discount: 0,
-              period_month: pMonth,
-              period_end: pEnd,
-              paid: true,
-              paid_at: paidAtStr,
-              payment_method: 'cash',
-            });
+              const newRec: FeeRecord = {
+                id: `v_${m.id}_${pMonth}`,
+                member_id: m.id,
+                amount: totalFee,
+                amount_paid: totalFee,
+                discount: 0,
+                period_month: pMonth,
+                period_end: pEnd,
+                paid: true,
+                paid_at: paidAtStr,
+                payment_method: 'cash',
+                collected_by: null,
+              };
+              reconciledFees.push(newRec);
+              existingKeySet.add(key);
+
+              missingTenureRecordsToInsert.push({
+                member_id: m.id,
+                amount: totalFee,
+                amount_paid: totalFee,
+                discount: 0,
+                period_month: pMonth,
+                period_end: pEnd,
+                paid: true,
+                paid_at: paidAtStr,
+                payment_method: 'cash',
+              });
+            } else if (m.active) {
+              const newUnpaidRec: FeeRecord = {
+                id: `due_${m.id}_${pMonth}`,
+                member_id: m.id,
+                amount: totalFee,
+                amount_paid: 0,
+                discount: 0,
+                period_month: pMonth,
+                period_end: pEnd,
+                paid: false,
+                paid_at: null,
+                payment_method: null,
+                collected_by: null,
+              };
+              reconciledFees.push(newUnpaidRec);
+              existingKeySet.add(key);
+
+              missingTenureRecordsToInsert.push({
+                member_id: m.id,
+                amount: totalFee,
+                amount_paid: 0,
+                discount: 0,
+                period_month: pMonth,
+                period_end: pEnd,
+                paid: false,
+                paid_at: null,
+                payment_method: null,
+              });
+            }
           }
           cursor.setMonth(cursor.getMonth() + 1);
         }
@@ -1024,8 +1070,9 @@ export default function MembersPage() {
 
     allFeeRecords.forEach(fr => {
       if (!fr.paid) {
-        if (shouldHideFromFeeHistory(fr.period_month, feesByMember.get(fr.member_id) || [])) return;
         const m = memberMap.get(fr.member_id);
+        const dueMonthKey = m?.join_date ? latestDuePeriod(m.join_date) : currentMonthKey;
+        if (shouldHideFromFeeHistory(fr.period_month, feesByMember.get(fr.member_id) || [], dueMonthKey)) return;
         if (m && m.join_date) {
           const [jY, jM] = m.join_date.split('-').map(Number);
           if (jY && jM) {
@@ -1105,7 +1152,7 @@ export default function MembersPage() {
         if (!unpaid) return false;
         if (shouldOmitUnpaidCycle(fr.period_month, data || [], { tenure, dueMonth })) return true;
         const period = periodKey(fr.period_month);
-        if (tenure > 1 && period > lastTenurePeriod) return true;
+        if (tenure > 1 && period > lastTenurePeriod && period > latestDueMonthKey) return true;
         return period > latestDueMonthKey;
       };
 
@@ -1123,7 +1170,7 @@ export default function MembersPage() {
       const validRecords = (data || []).filter((fr: any) =>
         periodKey(fr.period_month) >= joinPeriodMonth &&
         !isExtraUnpaidCycle(fr) &&
-        !shouldHideFromFeeHistory(fr.period_month, data || []) &&
+        !shouldHideFromFeeHistory(fr.period_month, data || [], dueMonth) &&
         (fr.paid || Number(fr.amount_paid || 0) > 0 || periodKey(fr.period_month) <= latestDueMonthKey)
       ).map((fr: any) => {
         const isUnpaid = !fr.paid && Number(fr.amount_paid || 0) === 0;
@@ -1140,6 +1187,62 @@ export default function MembersPage() {
         }
         return fr;
       });
+
+      // Ensure any missing due periods up to latestDueMonthKey are present in validRecords
+      const existingPeriodSet = new Set(validRecords.map((r: any) => normalizePeriod(r.period_month)));
+      const missingDueRecordsToInsert: any[] = [];
+
+      let curDate = new Date(jY, jM - 1, 1);
+      while (curDate <= latestDueMonth) {
+        const cY = curDate.getFullYear();
+        const cM = curDate.getMonth() + 1;
+        const pMonth = `${cY}-${String(cM).padStart(2, '0')}-01`;
+
+        if (!existingPeriodSet.has(pMonth)) {
+          const lastDay = new Date(cY, cM, 0).getDate();
+          const pEnd = `${cY}-${String(cM).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+          const isWithinTenure = curDate <= lastTenureDate;
+
+          const newRecord: FeeRecord = {
+            id: `due_${selectedMember.id}_${pMonth}`,
+            member_id: selectedMember.id,
+            amount: recurringRate,
+            amount_paid: isWithinTenure ? recurringRate : 0,
+            discount: 0,
+            period_month: pMonth,
+            period_end: pEnd,
+            paid: isWithinTenure,
+            paid_at: isWithinTenure ? (selectedMember.join_date ? `${selectedMember.join_date}T12:00:00.000Z` : now.toISOString()) : null,
+            payment_method: isWithinTenure ? 'cash' : null,
+            collected_by: null,
+            status: isWithinTenure ? 'paid' : 'unpaid',
+          };
+
+          validRecords.push(newRecord);
+          existingPeriodSet.add(pMonth);
+
+          if (!isWithinTenure) {
+            missingDueRecordsToInsert.push({
+              member_id: selectedMember.id,
+              amount: recurringRate,
+              amount_paid: 0,
+              discount: 0,
+              period_month: pMonth,
+              period_end: pEnd,
+              paid: false,
+              paid_at: null,
+              payment_method: null,
+            });
+          }
+        }
+        curDate.setMonth(curDate.getMonth() + 1);
+      }
+
+      if (missingDueRecordsToInsert.length > 0) {
+        supabase.from('fee_records').upsert(missingDueRecordsToInsert, { onConflict: 'member_id,period_month', ignoreDuplicates: true }).then();
+      }
+
+      validRecords.sort((a: any, b: any) => (b.period_month || '').localeCompare(a.period_month || ''));
       return validRecords as FeeRecord[];
     },
     enabled: !!selectedMember,
@@ -2241,14 +2344,19 @@ export default function MembersPage() {
   function getMemberPaymentStatus(m: Member) {
     const now = new Date();
     const today = now.getDate();
+    const todayStr = getTodayLocalDateString();
 
     // Determine the member's billing day and join year/month safely from join_date
     const [jYear, jMonth, jDay] = (m.join_date || '').split('-').map(Number);
     const joinDay = jDay || 1;
 
-    // Check if this month's fee is actually due yet based on the member's billing day
-    // e.g. if member joined on Aug 10 and today is Sep 1, fee isn't due until Sep 10
-    const feeNotDueYet = today < joinDay;
+    // Check if membership has already expired based on next due date
+    const nextDueDateRaw = getMemberNextDueDateRaw(m, allFeeRecords);
+    const isExpired = Boolean(nextDueDateRaw && nextDueDateRaw <= todayStr);
+
+    // Check if this month's fee is actually due yet based on the member's billing day.
+    // If the membership has already expired / passed its due date, it IS due immediately.
+    const feeNotDueYet = !isExpired && today < joinDay;
 
     let currentFee = memberCurrentFee[m.id];
     let unpaidFees = memberUnpaidFees[m.id] || [];
@@ -2278,7 +2386,7 @@ export default function MembersPage() {
 
     const lastTenureDate = new Date(jYear || now.getFullYear(), (jMonth || (now.getMonth() + 1)) - 1 + tenureMonths - 1, 1);
     const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
-    const isPastTenure = targetPeriodMonth > lastTenurePeriod;
+    const isPastTenure = isExpired || targetPeriodMonth > lastTenurePeriod;
 
     const isMember155 = isMember155Match(m);
     const monthlyRate = isMember155 ? 4000 : (Number(m.monthly_fee) || 0);
@@ -3716,7 +3824,7 @@ export default function MembersPage() {
     // });
 
     const historyFees = memberFees.filter((fee) => {
-      if (shouldHideFromFeeHistory(fee.period_month, memberFees)) return false;
+      if (shouldHideFromFeeHistory(fee.period_month, memberFees, dueMonth)) return false;
       if (shouldOmitUnpaidCycle(fee.period_month, memberFees, { tenure: tenureMonths, dueMonth })) return false;
     
       const normPeriod = normalizePeriod(fee.period_month);

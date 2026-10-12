@@ -204,13 +204,15 @@ export default function AttendancePage() {
 
     const totalFee = ((memberObj?.monthly_fee || 0) + (memberObj?.training_fees || 0));
     const expiresOn = computeMembershipExpiry(memberFees, memberObj);
+    const isExpired = Boolean(expiresOn && daysBetweenDates(karachiToday(), expiresOn) < 0);
 
     // Parse member join date to determine billing day
     const [jYear, jMonth, jDay] = (memberObj?.join_date || '').split('-').map(Number);
     const joinDay = jDay || 1;
 
     // Determine the active billing cycle month key
-    const feeNotDueYet = currentDay < joinDay;
+    // If membership has already expired, fee is due now (do not wait for upcoming join day)
+    const feeNotDueYet = !isExpired && currentDay < joinDay;
     const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
     const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const prevMonthKey = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}-01`;
@@ -221,8 +223,8 @@ export default function AttendancePage() {
     const lastTenureDate = new Date(jYear || now.getFullYear(), (jMonth || (now.getMonth() + 1)) - 1 + tenure - 1, 1);
     const lastTenurePeriod = `${lastTenureDate.getFullYear()}-${String(lastTenureDate.getMonth() + 1).padStart(2, '0')}-01`;
 
-    // If within registration tenure and member paid registration amount
-    if (activeCycleKey <= lastTenurePeriod && Number(memberObj?.amount_paid) >= totalFee && totalFee > 0) {
+    // If within registration tenure and member paid registration amount (and not expired)
+    if (!isExpired && activeCycleKey <= lastTenurePeriod && Number(memberObj?.amount_paid) >= totalFee && totalFee > 0) {
       return { status: 'paid', expiresOn };
     }
 
@@ -230,7 +232,7 @@ export default function AttendancePage() {
       if (totalFee > 0) {
         // No fee records but fee exists — check if fee is not due yet
         if (feeNotDueYet) return { status: 'paid', expiresOn };
-        return { status: 'due', amountDue: totalFee, totalAmount: totalFee, expiresOn };
+        return { status: isExpired ? 'overdue' : 'due', amountDue: totalFee, totalAmount: totalFee, expiresOn };
       }
       return { status: 'paid', expiresOn };
     }
@@ -274,11 +276,11 @@ export default function AttendancePage() {
       return { status: 'paid', expiresOn };
     }
 
-    // Check for overdue: past the period_end or past billing day + grace
-    const isOverdue = !feeNotDueYet && (
+    // Check for overdue: past the period_end, membership expired, or past billing day + grace
+    const isOverdue = isExpired || (!feeNotDueYet && (
       (activeFee?.period_end && new Date(activeFee.period_end) < today) ||
       currentDay > (joinDay + 5)
-    );
+    ));
 
     const amountDue = activeFee
       ? Math.max(0, Number(activeFee.amount) - Number(activeFee.discount || 0) - Number(activeFee.amount_paid || 0))

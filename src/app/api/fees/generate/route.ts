@@ -81,7 +81,7 @@ export async function POST(request: Request) {
     const extraAfterPackage = (existingRecords || []).filter((record: any) => {
       if (rowCountsAsPaid(record) || Number(record.amount_paid || 0) > 0) return false;
       if (shouldOmitUnpaidCycle(record.period_month, existingRecords || [], { tenure, dueMonth })) return true;
-      return tenure > 1 && normalizePeriod(record.period_month) > lastTenurePeriod;
+      return tenure > 1 && normalizePeriod(record.period_month) > lastTenurePeriod && normalizePeriod(record.period_month) > dueMonth;
     });
     if (extraAfterPackage.length > 0) {
       const extraUnpaidIds = extraAfterPackage.map((record: any) => record.id).filter(Boolean);
