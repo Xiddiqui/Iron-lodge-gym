@@ -10,7 +10,26 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { feeIds, advanceRecords, amountPaid, discount, paymentMethod, paidAt, paid_at, membership, feeAmountOverrides } = body;
+  const { feeIds, advanceRecords, amountPaid, discount, paymentMethod, paidAt, paid_at, membership, feeAmountOverrides, cycleAdjustments } = body;
+
+  const hasAdjustments = cycleAdjustments && Object.values(cycleAdjustments).some(
+    (adj: any) => adj && (adj.mode === 'waived' || adj.mode === 'daily')
+  );
+
+  if (hasAdjustments) {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (profile?.role !== 'admin') {
+      return NextResponse.json(
+        { error: 'Only administrators can apply attendance discounts or adjustments' },
+        { status: 403 }
+      );
+    }
+  }
 
   if (membership?.memberId) {
     const tenureMonths = Math.max(1, Number(membership.tenureMonths) || 1);
@@ -191,11 +210,54 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'amountPaid cannot be negative' }, { status: 400 });
   }
 
+  // Resolve virtual fee IDs to database UUIDs
+  const resolvedFeeIds: string[] = [];
+  for (const fid of allFeeIds) {
+    if (!fid) continue;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(fid));
+    if (isUuid) {
+      if (!resolvedFeeIds.includes(fid)) resolvedFeeIds.push(fid);
+    } else if (String(fid).startsWith('due_') || String(fid).startsWith('v_')) {
+      const parts = String(fid).split('_');
+      if (parts.length >= 3) {
+        const mId = parts[1];
+        const pMonth = parts.slice(2).join('_');
+        const { data: found } = await supabase
+          .from('fee_records')
+          .select('id')
+          .eq('member_id', mId)
+          .eq('period_month', pMonth)
+          .maybeSingle();
+        if (found) {
+          if (!resolvedFeeIds.includes(found.id)) resolvedFeeIds.push(found.id);
+        } else {
+          const [y, m] = pMonth.split('-').map(Number);
+          const lastDay = new Date(y, m, 0).getDate();
+          const pEnd = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+          const { data: created } = await supabase
+            .from('fee_records')
+            .insert({
+              member_id: mId,
+              period_month: pMonth,
+              period_end: pEnd,
+              amount: 0,
+              paid: false,
+              amount_paid: 0,
+              discount: 0,
+            })
+            .select('id')
+            .single();
+          if (created && !resolvedFeeIds.includes(created.id)) resolvedFeeIds.push(created.id);
+        }
+      }
+    }
+  }
+
   // Fetch all the fee records
   const { data: feeRecords, error: fetchError } = await supabase
     .from('fee_records')
     .select('*')
-    .in('id', allFeeIds)
+    .in('id', resolvedFeeIds)
     .order('period_month', { ascending: true });
 
   if (fetchError) {
@@ -212,16 +274,77 @@ export async function POST(request: Request) {
     return sum + (Number(r.amount) - alreadyPaid);
   }, 0);
 
-  // Apply discount proportionally, then distribute payment oldest-first
+  // Apply discount proportionally to unadjusted records, then distribute payment oldest-first
   const effectivePayment = totalPaid;
-  const discountPerRecord = feeRecords.length > 0 ? totalDiscount / feeRecords.length : 0;
+  const unadjustedRecords = feeRecords.filter((r: any) => {
+    const adj = cycleAdjustments?.[r.period_month] || cycleAdjustments?.[r.id];
+    return !adj || adj.mode === 'none';
+  });
+  const discountPerRecord = unadjustedRecords.length > 0 ? totalDiscount / unadjustedRecords.length : 0;
   
   let remainingPayment = effectivePayment;
-  const updates: Array<{ id: string; amount_paid: number; discount: number; paid: boolean; paid_at: string | null; payment_method: string; collected_by: string }> = [];
+  const updates: Array<{
+    id: string;
+    amount_paid: number;
+    discount: number;
+    paid: boolean;
+    paid_at: string | null;
+    payment_method: string;
+    collected_by: string;
+    notes?: string | null;
+  }> = [];
 
   for (const record of feeRecords) {
     const recordAmount = Number(record.amount) || 0;
     const alreadyPaid = Number(record.amount_paid) || 0;
+    const adj = cycleAdjustments?.[record.period_month] || cycleAdjustments?.[record.id];
+
+    if (adj?.mode === 'waived') {
+      // Full discount - member did not come whole month (or waived by admin)
+      const waiverDiscount = Math.max(0, recordAmount - alreadyPaid);
+      updates.push({
+        id: record.id,
+        amount_paid: alreadyPaid,
+        discount: (Number(record.discount) || 0) + waiverDiscount,
+        paid: true,
+        paid_at: paymentTimestamp,
+        payment_method: method,
+        collected_by: user.id,
+        notes: record.notes ? `${record.notes} | Waived by Admin (No attendance)` : 'Waived by Admin (No attendance)',
+      });
+      // Waived month does not take any of remainingPayment
+      continue;
+    }
+
+    if (adj?.mode === 'daily') {
+      const days = Math.max(0, Number(adj.days) || 0);
+      const rate = Math.max(0, Number(adj.rate) || 300);
+      const targetCharge = days * rate;
+      const standardRemaining = Math.max(0, recordAmount - alreadyPaid);
+      const dailyDiscount = Math.max(0, standardRemaining - targetCharge);
+      const effectiveDueForRecord = Math.max(0, Math.min(standardRemaining, targetCharge - alreadyPaid));
+
+      const paymentForRecord = Math.min(remainingPayment, effectiveDueForRecord);
+      remainingPayment -= paymentForRecord;
+
+      const newAmountPaid = alreadyPaid + paymentForRecord;
+      const isFullyPaid = (newAmountPaid + dailyDiscount) >= recordAmount;
+
+      const noteText = `Adjusted by Admin: ${days} day${days !== 1 ? 's' : ''} @ PKR ${rate}/day = PKR ${targetCharge} (PKR ${dailyDiscount} adjusted to next months)`;
+
+      updates.push({
+        id: record.id,
+        amount_paid: newAmountPaid,
+        discount: (Number(record.discount) || 0) + dailyDiscount,
+        paid: isFullyPaid,
+        paid_at: newAmountPaid > 0 ? paymentTimestamp : null,
+        payment_method: method,
+        collected_by: user.id,
+        notes: record.notes ? `${record.notes} | ${noteText}` : noteText,
+      });
+      continue;
+    }
+
     const recordDiscount = Math.min(discountPerRecord, recordAmount - alreadyPaid);
     const remainingForRecord = Math.max(0, recordAmount - alreadyPaid - recordDiscount);
     
@@ -239,6 +362,7 @@ export async function POST(request: Request) {
       paid_at: newAmountPaid > 0 ? paymentTimestamp : null,
       payment_method: method,
       collected_by: user.id,
+      notes: record.notes,
     });
   }
 

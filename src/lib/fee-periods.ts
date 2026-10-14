@@ -122,3 +122,94 @@ export function shouldOmitUnpaidCycle(
   if (!afterThreePaid) return false;
   return key > options.dueMonth;
 }
+
+export function getBillingCycleDateRange(
+  periodMonth: string | null | undefined,
+  joinDate?: string | null
+): { startStr: string; endStr: string; formattedRange: string } {
+  const norm = normalizePeriod(periodMonth);
+  if (!norm) {
+    const now = new Date();
+    const s = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+    return { startStr: s, endStr: s, formattedRange: s };
+  }
+  const [y, m] = norm.split('-').map(Number);
+  const pad = (n: number) => String(n).padStart(2, '0');
+
+  if (joinDate && typeof joinDate === 'string' && joinDate.includes('-')) {
+    const cleanJoinDate = joinDate.slice(0, 10);
+    const [, , jD] = cleanJoinDate.split('-').map(Number);
+    const joinDay = jD || 1;
+
+    const daysInStartMonth = new Date(y, m, 0).getDate();
+    const startDay = Math.min(joinDay, daysInStartMonth);
+
+    const nextMonthObj = new Date(y, m, 1);
+    const nextY = nextMonthObj.getFullYear();
+    const nextM = nextMonthObj.getMonth() + 1;
+    const daysInNextMonth = new Date(nextY, nextM, 0).getDate();
+    const endDay = Math.min(joinDay, daysInNextMonth);
+
+    const startStr = `${y}-${pad(m)}-${pad(startDay)}`;
+    const endStr = `${nextY}-${pad(nextM)}-${pad(endDay)}`;
+
+    const startDate = new Date(y, m - 1, startDay);
+    const endDate = new Date(nextY, nextM - 1, endDay);
+    const startMonthStr = startDate.toLocaleDateString('en-US', { month: 'short' });
+    const endMonthStr = endDate.toLocaleDateString('en-US', { month: 'short' });
+    const formattedRange = y === nextY
+      ? `${startDay} ${startMonthStr} – ${endDay} ${endMonthStr} ${y}`
+      : `${startDay} ${startMonthStr} ${y} – ${endDay} ${endMonthStr} ${nextY}`;
+
+    return { startStr, endStr, formattedRange };
+  }
+
+  const nextMonthObj = new Date(y, m, 1);
+  const nextY = nextMonthObj.getFullYear();
+  const nextM = nextMonthObj.getMonth() + 1;
+
+  const startStr = `${y}-${pad(m)}-01`;
+  const endStr = `${nextY}-${pad(nextM)}-01`;
+  const startDate = new Date(y, m - 1, 1);
+  const formattedRange = startDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+
+  return { startStr, endStr, formattedRange };
+}
+
+export function calculateCycleAttendance(
+  attendanceRecords: Array<{ check_in?: string | null }> | null | undefined,
+  periodMonth: string | null | undefined,
+  joinDate?: string | null
+): { count: number; dates: string[]; formattedDates: string[] } {
+  if (!attendanceRecords || attendanceRecords.length === 0) {
+    return { count: 0, dates: [], formattedDates: [] };
+  }
+
+  const { startStr, endStr } = getBillingCycleDateRange(periodMonth, joinDate);
+  const uniqueDates = new Set<string>();
+
+  for (const record of attendanceRecords) {
+    if (!record?.check_in) continue;
+    const d = new Date(record.check_in);
+    if (isNaN(d.getTime())) continue;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const dateStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    if (dateStr >= startStr && dateStr < endStr) {
+      uniqueDates.add(dateStr);
+    }
+  }
+
+  const dates = Array.from(uniqueDates).sort();
+  const formattedDates = dates.map(dStr => {
+    const [y, m, d] = dStr.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    return `${d} ${dt.toLocaleDateString('en-US', { month: 'short' })}`;
+  });
+
+  return {
+    count: dates.length,
+    dates,
+    formattedDates,
+  };
+}
+

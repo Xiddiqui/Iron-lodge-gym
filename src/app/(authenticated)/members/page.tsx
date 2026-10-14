@@ -4,7 +4,7 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase/client';
 import { formatCurrency, formatDate, formatDateTime, formatPeriodMonth } from '@/lib/format';
-import { latestDuePeriod, normalizePeriod, shouldHideFromFeeHistory, shouldOmitUnpaidCycle } from '@/lib/fee-periods';
+import { latestDuePeriod, normalizePeriod, shouldHideFromFeeHistory, shouldOmitUnpaidCycle, calculateCycleAttendance } from '@/lib/fee-periods';
 import { useRole } from '@/hooks/use-role';
 import { useCurrentUser } from '@/hooks/use-session';
 import { Card, CardContent } from '@/components/ui/card';
@@ -508,13 +508,20 @@ function normalizePlanMonths(tenure: number | null | undefined): number {
   return 1;
 }
 
+export type CycleAdjustment = {
+  mode: 'none' | 'waived' | 'daily';
+  days: number;
+  rate: number;
+};
+
 // Package price matches member registration: gym fee × months, training added once.
 function quotePaymentCycles(
   member: Member,
   unpaidFees: FeeRecord[],
   advancePeriods: AdvancePeriod[],
   includeTraining: boolean,
-  trainingAmount: number
+  trainingAmount: number,
+  cycleAdjustments: Record<string, CycleAdjustment> = {}
 ) {
   const is155 = isMember155Match(member);
   const monthly = is155 ? 4000 : (Number(member.monthly_fee) || 0);
@@ -525,8 +532,33 @@ function quotePaymentCycles(
     const amount = monthly + trainingLeft;
     trainingLeft = 0;
     const paid = Number(fr.amount_paid) || 0;
-    const remaining = Math.max(0, amount - paid);
-    return { ...fr, pricedAmount: amount, pricedPaid: paid, pricedRemaining: remaining };
+    const baseRemaining = Math.max(0, amount - paid);
+
+    const adj = cycleAdjustments[fr.period_month] || cycleAdjustments[fr.id];
+    let pricedRemaining = baseRemaining;
+    let waiverDiscount = 0;
+
+    if (adj?.mode === 'waived') {
+      pricedRemaining = 0;
+      waiverDiscount = baseRemaining;
+    } else if (adj?.mode === 'daily') {
+      const days = Math.max(0, Number(adj.days) || 0);
+      const rate = Math.max(0, Number(adj.rate) || 300);
+      const targetCharge = days * rate;
+      pricedRemaining = Math.max(0, Math.min(baseRemaining, targetCharge - paid));
+      waiverDiscount = Math.max(0, baseRemaining - pricedRemaining);
+    }
+
+    return {
+      ...fr,
+      pricedAmount: amount,
+      pricedPaid: paid,
+      pricedRemaining,
+      waiverDiscount,
+      adjustmentMode: adj?.mode || 'none',
+      adjustmentDays: adj?.days,
+      adjustmentRate: adj?.rate,
+    };
   });
 
   const advancePriced = advancePeriods.map((adv) => {
@@ -686,6 +718,23 @@ export default function MembersPage() {
   const [payIncludeTraining, setPayIncludeTraining] = useState(false);
   const [payTrainingAmount, setPayTrainingAmount] = useState('0');
   const [payPlanTouched, setPayPlanTouched] = useState(false);
+  const [cycleAdjustments, setCycleAdjustments] = useState<Record<string, CycleAdjustment>>({});
+
+  // Fetch Attendance records for Pay Modal to verify attendance per cycle
+  const { data: payModalAttendance = [], isLoading: loadingPayModalAttendance } = useQuery({
+    queryKey: ['pay_modal_attendance', payModalMember?.id],
+    queryFn: async () => {
+      if (!payModalMember?.id) return [];
+      const { data, error } = await supabase
+        .from('attendance')
+        .select('id, check_in, check_out')
+        .eq('member_id', payModalMember.id)
+        .order('check_in', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    enabled: !!payModalMember?.id && payModalOpen,
+  });
 
   // Announcements State
   const [announcementOpen, setAnnouncementOpen] = useState(false);
@@ -1860,6 +1909,7 @@ export default function MembersPage() {
       paidAt,
       membership,
       feeAmountOverrides,
+      cycleAdjustments,
     }: {
       feeIds: string[];
       advanceRecords?: Array<{
@@ -1878,6 +1928,7 @@ export default function MembersPage() {
         trainingFees: number;
       };
       feeAmountOverrides?: Array<{ id: string; amount: number }>;
+      cycleAdjustments?: Record<string, CycleAdjustment>;
     }) => {
       const res = await fetch('/api/fees/collect', {
         method: 'POST',
@@ -1891,6 +1942,7 @@ export default function MembersPage() {
           paidAt,
           membership,
           feeAmountOverrides,
+          cycleAdjustments,
         }),
       });
       if (!res.ok) {
@@ -1913,6 +1965,7 @@ export default function MembersPage() {
       setPayIncludeTraining(false);
       setPayTrainingAmount('0');
       setPayPlanTouched(false);
+      setCycleAdjustments({});
     },
     onError: (e) => toast.error(e.message),
   });
@@ -2154,6 +2207,7 @@ export default function MembersPage() {
   function openPayModal(m: Member) {
     setPayModalMember(m);
     setPayModalIsAdvance(false);
+    setCycleAdjustments({});
     const { plan, hasTraining, trainingAmount } = resetPayPlan(m);
 
     // Compute the correct advance months for the member's plan so the
@@ -2186,6 +2240,7 @@ export default function MembersPage() {
     resetPayPlan(m);
     setPayModalMember(m);
     setPayModalIsAdvance(true);
+    setCycleAdjustments({});
     setPayModalAdvanceMonths(1);
     setPayDiscount('0');
     setPayAmountReceived('');
@@ -2217,9 +2272,10 @@ export default function MembersPage() {
       payModalUnpaidFees,
       payModalAdvancePeriods,
       payIncludeTraining,
-      payTrainingAmountNum
+      payTrainingAmountNum,
+      cycleAdjustments
     );
-  }, [payModalMember, payModalUnpaidFees, payModalAdvancePeriods, payIncludeTraining, payTrainingAmountNum]);
+  }, [payModalMember, payModalUnpaidFees, payModalAdvancePeriods, payIncludeTraining, payTrainingAmountNum, cycleAdjustments]);
 
   const payModalOriginalDue = useMemo(() => {
     if (!payModalMember) return 0;
@@ -2235,12 +2291,25 @@ export default function MembersPage() {
           amt = recurringRate;
         }
       }
-      const remaining = amt - (Number(fr.amount_paid) || 0);
-      return sum + Math.max(0, remaining);
+      const paid = Number(fr.amount_paid) || 0;
+      const baseRemaining = Math.max(0, amt - paid);
+
+      const adj = cycleAdjustments[fr.period_month] || cycleAdjustments[fr.id];
+      if (adj?.mode === 'waived') {
+        return sum;
+      }
+      if (adj?.mode === 'daily') {
+        const days = Math.max(0, Number(adj.days) || 0);
+        const rate = Math.max(0, Number(adj.rate) || 300);
+        const targetCharge = days * rate;
+        const adjustedDue = Math.max(0, Math.min(baseRemaining, targetCharge - paid));
+        return sum + adjustedDue;
+      }
+      return sum + baseRemaining;
     }, 0);
     const advanceSum = payModalAdvancePeriods.reduce((sum, p) => sum + p.amount, 0);
     return unpaidSum + advanceSum;
-  }, [payModalMember, payModalUnpaidFees, payModalAdvancePeriods]);
+  }, [payModalMember, payModalUnpaidFees, payModalAdvancePeriods, cycleAdjustments]);
 
   const payModalTotalDue = payPlanTouched ? (payQuote?.total || 0) : payModalOriginalDue;
   const payModalCycleCount = (payQuote?.unpaidPriced.length || 0) + (payQuote?.advancePriced.length || 0);
@@ -2264,10 +2333,17 @@ export default function MembersPage() {
     return Math.max(isAdvance ? 1 : 0, planMonths - unpaidCount);
   }
 
-  function fillReceivedFor(member: Member, planMonths: number, includeTraining: boolean, trainingStr: string, advanceMonths: number) {
+  function fillReceivedFor(
+    member: Member,
+    planMonths: number,
+    includeTraining: boolean,
+    trainingStr: string,
+    advanceMonths: number,
+    currentAdjustments = cycleAdjustments
+  ) {
     const unpaid = memberUnpaidFees[member.id] || [];
     const advances = getNextAdvancePeriods(member, allFeeRecords, advanceMonths);
-    const quote = quotePaymentCycles(member, unpaid, advances, includeTraining, Math.max(0, Number(trainingStr) || 0));
+    const quote = quotePaymentCycles(member, unpaid, advances, includeTraining, Math.max(0, Number(trainingStr) || 0), currentAdjustments);
     setPayAmountReceived(quote.total > 0 ? String(quote.total) : '');
   }
 
@@ -2277,7 +2353,7 @@ export default function MembersPage() {
     setPayPlanTouched(true);
     setPayPlanMonths(planMonths);
     setPayModalAdvanceMonths(advance);
-    fillReceivedFor(payModalMember, planMonths, payIncludeTraining, payTrainingAmount, advance);
+    fillReceivedFor(payModalMember, planMonths, payIncludeTraining, payTrainingAmount, advance, cycleAdjustments);
   }
 
   function applyTrainingChoice(include: boolean, trainingStr: string = payTrainingAmount) {
@@ -2285,7 +2361,7 @@ export default function MembersPage() {
     setPayPlanTouched(true);
     setPayIncludeTraining(include);
     setPayTrainingAmount(trainingStr);
-    fillReceivedFor(payModalMember, payPlanMonths, include, trainingStr, payModalAdvanceMonths);
+    fillReceivedFor(payModalMember, payPlanMonths, include, trainingStr, payModalAdvanceMonths, cycleAdjustments);
   }
 
   function applyAdvanceMonths(next: number) {
@@ -2297,21 +2373,16 @@ export default function MembersPage() {
     if ((PLAN_MONTH_OPTIONS as readonly number[]).includes(covered)) {
       setPayPlanMonths(covered);
     }
-    if (payPlanTouched) {
-      fillReceivedFor(payModalMember, payPlanMonths, payIncludeTraining, payTrainingAmount, advance);
-      return;
-    }
-    const unpaid = memberUnpaidFees[payModalMember.id] || [];
-    const advances = getNextAdvancePeriods(payModalMember, allFeeRecords, advance);
-    const unpaidSum = unpaid.reduce((sum, fr) => sum + Math.max(0, (Number(fr.amount) || 0) - (Number(fr.amount_paid) || 0)), 0);
-    const total = unpaidSum + advances.reduce((sum, p) => sum + p.amount, 0);
-    setPayAmountReceived(total > 0 ? String(total) : '');
+    fillReceivedFor(payModalMember, payPlanMonths, payIncludeTraining, payTrainingAmount, advance, cycleAdjustments);
   }
 
   function handlePaySubmit() {
     if (!payModalMember || payModalTotalItemsCount === 0 || !payQuote) return;
-    if (payModalReceivedNum <= 0 && payModalDiscountNum <= 0) {
-      toast.error('Please enter amount received or discount');
+    const hasWaiverOrAdj = Object.values(cycleAdjustments).some(
+      (adj) => adj && (adj.mode === 'waived' || adj.mode === 'daily')
+    );
+    if (payModalReceivedNum <= 0 && payModalDiscountNum <= 0 && !hasWaiverOrAdj) {
+      toast.error('Please enter amount received, discount, or apply an attendance discount');
       return;
     }
     if (payPlanTouched && payIncludeTraining && payTrainingAmountNum <= 0) {
@@ -2341,6 +2412,7 @@ export default function MembersPage() {
       discount: payModalDiscountNum,
       paymentMethod: payMethod,
       paidAt: computedPaidAt,
+      cycleAdjustments: isAdmin ? cycleAdjustments : undefined,
       ...(payPlanTouched
         ? {
             membership: {
@@ -4328,8 +4400,21 @@ export default function MembersPage() {
                               else if (amt > recurringRate) amt = recurringRate;
                             }
                             const paid = Number(fr.amount_paid) || 0;
-                            return { ...fr, pricedAmount: amt, pricedPaid: paid, pricedRemaining: Math.max(0, amt - paid) };
-                          })).map(fr => (
+                            const baseRemaining = Math.max(0, amt - paid);
+                            const adj = cycleAdjustments[fr.period_month] || cycleAdjustments[fr.id];
+                            let pricedRemaining = baseRemaining;
+                            if (adj?.mode === 'waived') pricedRemaining = 0;
+                            else if (adj?.mode === 'daily') {
+                              const days = Math.max(0, Number(adj.days) || 0);
+                              const rate = Math.max(0, Number(adj.rate) || 300);
+                              pricedRemaining = Math.max(0, Math.min(baseRemaining, days * rate - paid));
+                            }
+                            return { ...fr, pricedAmount: amt, pricedPaid: paid, pricedRemaining, adjustmentMode: adj?.mode };
+                          })).map(fr => {
+                            const adj = cycleAdjustments[fr.period_month] || cycleAdjustments[fr.id];
+                            const isWaived = (fr as any).adjustmentMode === 'waived' || adj?.mode === 'waived';
+                            const isDaily = (fr as any).adjustmentMode === 'daily' || adj?.mode === 'daily';
+                            return (
                               <tr key={fr.id} className="border-b border-border/50 last:border-0">
                                 <td className="p-2 font-medium whitespace-nowrap">{formatPeriodMonth(fr.period_month, payModalMember?.join_date)}</td>
                                 <td className="p-2 text-center">
@@ -4337,9 +4422,22 @@ export default function MembersPage() {
                                 </td>
                                 <td className="p-2 text-right">{formatCurrency(fr.pricedAmount)}</td>
                                 <td className="p-2 text-right text-green-600">{fr.pricedPaid > 0 ? formatCurrency(fr.pricedPaid) : '—'}</td>
-                                <td className="p-2 text-right font-semibold text-red-500">{formatCurrency(fr.pricedRemaining)}</td>
+                                <td className="p-2 text-right font-semibold">
+                                  {isWaived ? (
+                                    <span className="text-emerald-600 dark:text-emerald-400 font-bold">
+                                      PKR 0 <span className="text-[10px] text-muted-foreground font-normal">(Waived)</span>
+                                    </span>
+                                  ) : isDaily ? (
+                                    <span className="text-blue-600 dark:text-blue-400 font-bold">
+                                      {formatCurrency(fr.pricedRemaining)} <span className="text-[10px] text-muted-foreground font-normal">(Adjusted)</span>
+                                    </span>
+                                  ) : (
+                                    <span className="text-red-500 font-semibold">{formatCurrency(fr.pricedRemaining)}</span>
+                                  )}
+                                </td>
                               </tr>
-                          ))}
+                            );
+                          })}
                           {(payPlanTouched ? (payQuote?.advancePriced || []) : payModalAdvancePeriods).map(adv => (
                             <tr key={adv.period_month} className="border-b border-border/50 last:border-0 bg-primary/5">
                               <td className="p-2 font-medium whitespace-nowrap text-primary">{adv.formattedRange}</td>
@@ -4359,6 +4457,171 @@ export default function MembersPage() {
                   </table>
                 </div>
               </div>
+
+              {/* Admin Attendance & Fee Adjustments (Only Admin) */}
+              {isAdmin && payModalUnpaidFees.length > 0 && (
+                <div className="space-y-2.5 p-3 rounded-lg border border-primary/20 bg-primary/5">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs font-bold text-foreground flex items-center gap-1.5 uppercase tracking-wide">
+                      <Fingerprint className="h-4 w-4 text-primary" />
+                      Attendance Check & Absence Discount
+                    </Label>
+                    {loadingPayModalAttendance && (
+                      <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                        <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                        Checking attendance...
+                      </span>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-muted-foreground">
+                    Admin-only control: Check attendance to waive unpaid months if the member did not attend, or charge PKR 300/day for attended days and adjust the rest towards next months.
+                  </p>
+
+                  <div className="space-y-2">
+                    {payModalUnpaidFees.map((fr) => {
+                      const att = calculateCycleAttendance(payModalAttendance, fr.period_month, payModalMember?.join_date);
+                      const adj = cycleAdjustments[fr.period_month] || { mode: 'none', days: att.count, rate: 300 };
+                      const is155 = isMember155Match(payModalMember);
+                      const recurringRate = is155 ? 4000 : ((Number(payModalMember?.monthly_fee) || 0) + (Number(payModalMember?.training_fees) || 0));
+                      let baseAmt = Number(fr.amount) || 0;
+                      if (!fr.paid && Number(fr.amount_paid || 0) === 0 && recurringRate > 0) {
+                        if (is155) baseAmt = 4000;
+                        else if (baseAmt > recurringRate) baseAmt = recurringRate;
+                      }
+                      const alreadyPaid = Number(fr.amount_paid) || 0;
+                      const normalDue = Math.max(0, baseAmt - alreadyPaid);
+
+                      return (
+                        <div key={fr.id || fr.period_month} className="p-2.5 rounded-md border border-border bg-background space-y-2 text-xs">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="font-semibold text-foreground">
+                              {formatPeriodMonth(fr.period_month, payModalMember?.join_date)}
+                            </span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {att.count === 0 ? (
+                                <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 gap-1 font-semibold">
+                                  <AlertCircle className="h-3 w-3 text-amber-600" />
+                                  0 days attended (Absent whole month)
+                                </Badge>
+                              ) : (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 gap-1 font-semibold"
+                                  title={att.formattedDates.join(', ')}
+                                >
+                                  <CalendarCheck className="h-3 w-3 text-blue-600" />
+                                  {att.count} day{att.count > 1 ? 's' : ''} attended {att.formattedDates.length > 0 ? `(${att.formattedDates.slice(0, 3).join(', ')}${att.formattedDates.length > 3 ? '...' : ''})` : ''}
+                                </Badge>
+                              )}
+                              <span className="text-muted-foreground font-medium">
+                                Regular Due: {formatCurrency(normalDue)}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="pt-1.5 border-t border-border/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                            <div className="flex items-center gap-3.5 flex-wrap">
+                              {/* Give him discount checkbox */}
+                              <label className="flex items-center gap-1.5 cursor-pointer font-medium select-none">
+                                <input
+                                  type="checkbox"
+                                  checked={adj.mode === 'waived'}
+                                  onChange={(e) => {
+                                    const next = { ...cycleAdjustments };
+                                    if (e.target.checked) {
+                                      next[fr.period_month] = { mode: 'waived', days: att.count, rate: 300 };
+                                    } else {
+                                      delete next[fr.period_month];
+                                    }
+                                    setCycleAdjustments(next);
+                                    setPayPlanTouched(true);
+                                    fillReceivedFor(payModalMember, payPlanMonths, payIncludeTraining, payTrainingAmount, payModalAdvanceMonths, next);
+                                  }}
+                                  className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer"
+                                />
+                                <span className={adj.mode === 'waived' ? 'text-emerald-600 dark:text-emerald-400 font-bold' : 'text-foreground'}>
+                                  Give him discount
+                                </span>
+                                <span className="text-[10px] text-muted-foreground">
+                                  (removes month from total due)
+                                </span>
+                              </label>
+
+                              {/* Charge 300/day option */}
+                              <label className="flex items-center gap-1.5 cursor-pointer font-medium select-none">
+                                <input
+                                  type="checkbox"
+                                  checked={adj.mode === 'daily'}
+                                  onChange={(e) => {
+                                    const next = { ...cycleAdjustments };
+                                    if (e.target.checked) {
+                                      next[fr.period_month] = {
+                                        mode: 'daily',
+                                        days: att.count > 0 ? att.count : 1,
+                                        rate: 300,
+                                      };
+                                    } else {
+                                      delete next[fr.period_month];
+                                    }
+                                    setCycleAdjustments(next);
+                                    setPayPlanTouched(true);
+                                    fillReceivedFor(payModalMember, payPlanMonths, payIncludeTraining, payTrainingAmount, payModalAdvanceMonths, next);
+                                  }}
+                                  className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary cursor-pointer"
+                                />
+                                <span className={adj.mode === 'daily' ? 'text-blue-600 dark:text-blue-400 font-bold' : 'text-foreground'}>
+                                  Charge 300/day
+                                </span>
+                              </label>
+                            </div>
+
+                            {/* Details for waived or daily */}
+                            {adj.mode === 'waived' && (
+                              <div className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold flex items-center gap-1">
+                                <Check className="h-3.5 w-3.5" />
+                                Month waived — {formatCurrency(normalDue)} removed from total due
+                              </div>
+                            )}
+
+                            {adj.mode === 'daily' && (
+                              <div className="flex items-center gap-2 bg-blue-500/10 p-1.5 rounded border border-blue-500/20 flex-wrap">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-[11px] text-muted-foreground">Days:</span>
+                                  <Input
+                                    type="number"
+                                    min="1"
+                                    max="31"
+                                    value={adj.days}
+                                    onChange={(e) => {
+                                      const days = Math.max(0, Number(e.target.value) || 0);
+                                      const next = {
+                                        ...cycleAdjustments,
+                                        [fr.period_month]: { ...adj, days },
+                                      };
+                                      setCycleAdjustments(next);
+                                      setPayPlanTouched(true);
+                                      fillReceivedFor(payModalMember, payPlanMonths, payIncludeTraining, payTrainingAmount, payModalAdvanceMonths, next);
+                                    }}
+                                    className="h-6 w-14 text-center text-xs p-1 font-bold"
+                                  />
+                                </div>
+                                <span className="text-[11px] font-medium text-muted-foreground">× PKR 300 =</span>
+                                <span className="text-xs font-bold text-blue-600 dark:text-blue-400">
+                                  {formatCurrency(adj.days * 300)}
+                                </span>
+                                <span className="text-[10px] text-muted-foreground">
+                                  (Remaining {formatCurrency(Math.max(0, normalDue - (adj.days * 300)))} adjusted next months)
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* Advance Months Selector Controls */}
               <div className="flex items-center justify-between p-3 rounded-lg bg-muted/40 border border-border">
