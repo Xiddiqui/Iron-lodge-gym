@@ -19,6 +19,7 @@ import { Switch } from '@/components/ui/switch';
 import { Users, Plus, Search, Loader2, Pencil, Wallet, CalendarDays, CalendarPlus, CalendarCheck, Zap, Camera, RefreshCw, X, User, Megaphone, Trash2, CheckSquare, Square, AlertTriangle, Send, CreditCard, Receipt, BookmarkPlus, Bookmark, PhoneCall, CheckCircle2, Play, SkipForward, RotateCcw, Edit3, Save, MessageSquare, Clock, Check, XCircle, AlertCircle, ShieldAlert, Upload, ZoomIn, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Fingerprint } from 'lucide-react';
 import { PhotoPreviewDialog } from '@/components/ui/photo-preview-dialog';
 import { normalizeImageSrc, compressImageFile, compressDataUrl } from '@/lib/image-utils';
+import { ensureMemberPhotoUrl } from '@/lib/member-photo';
 import { toast } from 'sonner';
 import { UpdateRecordedPaymentButton } from '@/components/fees/update-recorded-payment';
 import { isMemberAssignedToStaff, embedStaffIdsInNotes, stripStaffIdsFromNotes, getAssignedStaffIds } from '@/lib/staff-assignments';
@@ -1497,6 +1498,9 @@ export default function MembersPage() {
       const rawPaid = data.amount_paid === '' ? totalInitialPayable : Number(data.amount_paid);
       const paidAmount = isNaN(rawPaid) ? totalInitialPayable : rawPaid;
 
+      // Store photos in Supabase Storage, not as base64 in the members row
+      const photoUrl = await ensureMemberPhotoUrl(supabase, data.photo_url, editing?.id || data.member_number);
+
       const payload: Record<string, any> = {
         member_number: data.member_number,
         full_name: data.full_name,
@@ -1512,7 +1516,7 @@ export default function MembersPage() {
         trainer_id: data.trainer_id || null,
         amount_paid: paidAmount,
         notes: data.notes || null,
-        photo_url: data.photo_url || null,
+        photo_url: photoUrl,
         active: data.active,
       };
 

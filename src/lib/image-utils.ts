@@ -39,6 +39,32 @@ export function isRemoteImageUrl(src: string | null | undefined): boolean {
   return clean.startsWith('http://') || clean.startsWith('https://') || clean.startsWith('//');
 }
 
+/** Old Supabase projects whose storage was copied to the current project. */
+const LEGACY_SUPABASE_HOSTS = ['agtjskrtfugwlsqazpay.supabase.co'];
+
+/**
+ * Rewrites a Supabase Storage URL that points at a known old Supabase project so it
+ * points at the current project instead. Bucket and file path are kept as-is, so this works
+ * when the storage folders were copied over to the new project with the same structure.
+ */
+export function rewriteLegacyStorageUrl(src: string, currentBase = process.env.NEXT_PUBLIC_SUPABASE_URL): string {
+  if (!currentBase) return src;
+  try {
+    const url = new URL(src);
+    const current = new URL(currentBase);
+    if (
+      LEGACY_SUPABASE_HOSTS.includes(url.hostname) &&
+      url.hostname !== current.hostname &&
+      url.pathname.startsWith('/storage/v1/object/')
+    ) {
+      return `${current.origin}${url.pathname}${url.search}`;
+    }
+  } catch {
+    /* not a valid URL — leave untouched */
+  }
+  return src;
+}
+
 /**
  * Normalizes any image source string into a valid browser-displayable URL or Data URI.
  * Returns null if source is missing, blank, or invalid.
@@ -47,6 +73,11 @@ export function normalizeImageSrc(src: string | null | undefined): string | null
   if (!src || typeof src !== 'string') return null;
   const clean = src.trim();
   if (!clean || clean === 'null' || clean === 'undefined') return null;
+
+  // Links into an old Supabase project's storage → same bucket/path on the current project
+  if (clean.startsWith('http://') || clean.startsWith('https://')) {
+    return rewriteLegacyStorageUrl(clean);
+  }
 
   // If already standard URL, relative path, blob URL, or data URI
   if (
