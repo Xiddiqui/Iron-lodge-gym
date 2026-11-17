@@ -30,36 +30,21 @@ export async function ensureMemberPhotoUrl(
   if (!photo || !photo.trim()) return null;
   if (!isBase64Image(photo) && !photo.trim().startsWith('data:')) return photo.trim();
 
-  const { bytes, mime, ext } = dataUrlToBytes(photo.trim());
-  const safeKey = (keyHint || 'member').toString().replace(/[^a-zA-Z0-9_-]/g, '_');
-  const path = `${MEMBER_PHOTO_FOLDER}/${safeKey}_${Date.now()}.${ext}`;
-
-  // Storage only accepts uploads from signed-in users. A tab left open for a long time
-  // (or a PC that slept) can hold an expired token, so the upload goes out as anonymous
-  // and is rejected with "violates row-level security policy". Make sure the session is fresh.
-  const { data: sessionData } = await supabase.auth.getSession();
-  if (!sessionData.session) {
-    const { error: refreshError } = await supabase.auth.refreshSession();
-    if (refreshError) {
-      throw new Error('Your login session has expired. Please log out and log in again, then save the member.');
-    }
+  // Uploaded through our own API route: it checks the user is signed in, then writes
+  // with the service role. Uploading straight from the browser was being rejected by
+  // Storage RLS ("new row violates row-level security policy").
+  void supabase;
+  const res = await fetch('/api/member-photo', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ photo: photo.trim(), keyHint: keyHint ?? undefined }),
+  });
+  const json = (await res.json().catch(() => ({}))) as { url?: string; error?: string };
+  if (!res.ok || !json.url) {
+    // A redirect to the login page (expired session) comes back as HTML with no url.
+    const reason = json.error || (res.redirected ? 'your login session has expired, please log in again' : `server error ${res.status}`);
+    throw new Error(`Photo upload failed: ${reason}`);
   }
-
-  const upload = () =>
-    supabase.storage
-      .from(MEMBER_PHOTO_BUCKET)
-      .upload(path, bytes, { contentType: mime, upsert: true, cacheControl: '31536000' });
-
-  let { error } = await upload();
-  if (error && /row-level security|unauthori[sz]ed|jwt/i.test(error.message)) {
-    // Token may have expired mid-request; refresh once and retry.
-    const { error: refreshError } = await supabase.auth.refreshSession();
-    if (refreshError) {
-      throw new Error('Your login session has expired. Please log out and log in again, then save the member.');
-    }
-    ({ error } = await upload());
-  }
-  if (error) throw new Error(`Photo upload failed: ${error.message}`);
-
-  return supabase.storage.from(MEMBER_PHOTO_BUCKET).getPublicUrl(path).data.publicUrl;
+  return json.url;
 }
